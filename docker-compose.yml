@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: creditlens
+      POSTGRES_PASSWORD: creditlens
+      POSTGRES_DB: creditlens
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U creditlens"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@creditlens.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports: ["5050:80"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://creditlens:creditlens@postgres:5432/creditlens
+      REDIS_URL: redis://redis:6379/0
+      KIE_AI_API_KEY: ${KIE_AI_API_KEY:-}
+      KIE_AI_MODEL: ${KIE_AI_MODEL:-gemini-2.0-flash}
+      UK_COMPANIES_HOUSE_API_KEY: ${UK_COMPANIES_HOUSE_API_KEY:-}
+      OPENCORPORATES_API_KEY: ${OPENCORPORATES_API_KEY:-}
+      OPENSANCTIONS_API_KEY: ${OPENSANCTIONS_API_KEY:-}
+      NL_KVK_API_KEY: ${NL_KVK_API_KEY:-}
+      NL_KVK_BASE_URL: ${NL_KVK_BASE_URL:-https://api.kvk.nl/api/v2}
+      SEC_EDGAR_USER_AGENT: ${SEC_EDGAR_USER_AGENT:-CreditLens dev contact@example.com}
+      CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
+      LOG_LEVEL: INFO
+    ports: ["8000:8000"]
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      INTERNAL_API_URL: http://api:8000
+    ports: ["3000:3000"]
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

@@ -1,0 +1,51 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+.npm/
+.yarn/
+.pnp.*
+*.tsbuildinfo
+
+# --- Env / secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Docker / runtime ---
+pgdata/
+redis-data/
+
+# --- Logs / reports ---
+*.log
+logs/
+*.cov
+coverage.xml
+docs/VALIDATION_REPORT.md.tmp
