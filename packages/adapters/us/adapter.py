@@ -14,6 +14,7 @@ of State scrapers, which are out of MVP scope.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -43,6 +44,50 @@ def _pad_cik(value: str) -> str:
     return value.strip().lstrip("0").zfill(10)
 
 
+# Map normalized line items to the ordered list of US-GAAP concepts we
+# accept. First non-null wins, so list the canonical tag before its
+# common alternates.
+_BALANCE_SHEET_CONCEPTS: dict[str, list[str]] = {
+    "total_assets": ["Assets"],
+    "current_assets": ["AssetsCurrent"],
+    "noncurrent_assets": ["AssetsNoncurrent"],
+    "cash": ["CashAndCashEquivalentsAtCarryingValue"],
+    "inventory": ["InventoryNet"],
+    "receivables": ["AccountsReceivableNetCurrent"],
+    "total_liabilities": ["Liabilities"],
+    "current_liabilities": ["LiabilitiesCurrent"],
+    "noncurrent_liabilities": ["LiabilitiesNoncurrent"],
+    "equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ],
+    "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
+}
+
+_INCOME_STATEMENT_CONCEPTS: dict[str, list[str]] = {
+    "revenue": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet",
+    ],
+    "cost_of_sales": ["CostOfRevenue", "CostOfGoodsAndServicesSold"],
+    "gross_profit": ["GrossProfit"],
+    "operating_profit": ["OperatingIncomeLoss"],
+    "net_income": ["NetIncomeLoss"],
+    "depreciation_amortization": [
+        "DepreciationAndAmortization",
+        "DepreciationDepletionAndAmortization",
+    ],
+    "interest_expense": ["InterestExpense"],
+}
+
+_CASH_FLOW_CONCEPTS: dict[str, list[str]] = {
+    "operating_cf": ["NetCashProvidedByUsedInOperatingActivities"],
+    "investing_cf": ["NetCashProvidedByUsedInInvestingActivities"],
+    "financing_cf": ["NetCashProvidedByUsedInFinancingActivities"],
+}
+
+
 class USAdapter(CountryAdapter):
     country_code = "US"
     country_name = "United States"
@@ -56,6 +101,10 @@ class USAdapter(CountryAdapter):
     DATA_BASE = "https://data.sec.gov"
 
     _tickers_cache: list[dict[str, Any]] | None = None
+    # Per-CIK XBRL facts cache. Process-lifetime; Postgres-level caching is
+    # handled by the route layer.
+    _facts_cache: dict[str, dict[str, Any] | None] = {}
+    _facts_lock = asyncio.Lock()
 
     def __init__(self) -> None:
         # SEC requires a descriptive UA with contact. Pulled from env so the
@@ -191,24 +240,47 @@ class USAdapter(CountryAdapter):
             source_url=f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}",
         )
 
+    async def _fetch_xbrl_facts(self, cik: str) -> dict[str, Any] | None:
+        """Fetch and cache the SEC companyfacts JSON for one CIK.
+
+        Returns None when the filer has no XBRL facts (404) — many small
+        non-reporting registrants fall in this bucket.
+        """
+        padded = _pad_cik(cik)
+        async with USAdapter._facts_lock:
+            if padded in USAdapter._facts_cache:
+                return USAdapter._facts_cache[padded]
+        async with build_http_client(headers=self._headers) as client:
+            resp = await get_with_retry(
+                client, f"{self.DATA_BASE}/api/xbrl/companyfacts/CIK{padded}.json"
+            )
+        if resp.status_code == 404:
+            USAdapter._facts_cache[padded] = None
+            return None
+        if resp.status_code >= 400:
+            raise AdapterError(
+                f"EDGAR companyfacts {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json()
+        USAdapter._facts_cache[padded] = data
+        return data
+
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         cik = _pad_cik(company_id)
-        async with build_http_client(headers=self._headers) as client:
-            resp = await get_with_retry(client, f"{self.DATA_BASE}/api/xbrl/companyfacts/CIK{cik}.json")
-            if resp.status_code == 404:
-                return []
-            if resp.status_code >= 400:
-                raise AdapterError(f"EDGAR companyfacts {resp.status_code}: {resp.text[:200]}")
-            facts = resp.json()
+        facts = await self._fetch_xbrl_facts(cik)
+        if facts is None:
+            return []
 
-            sub_resp = await get_with_retry(client, f"{self.DATA_BASE}/submissions/CIK{cik}.json")
+        async with build_http_client(headers=self._headers) as client:
+            sub_resp = await get_with_retry(
+                client, f"{self.DATA_BASE}/submissions/CIK{cik}.json"
+            )
             submissions = sub_resp.json() if sub_resp.status_code == 200 else {}
 
-        annual_per_year = _flatten_xbrl_to_yearly(facts)
+        yearly = _build_structured_by_year(facts)
 
-        # Build a document_url map from the recent submissions list (10-K only).
         doc_urls: dict[int, str] = {}
         recent = (submissions.get("filings") or {}).get("recent") or {}
         forms = recent.get("form") or []
@@ -230,7 +302,7 @@ class USAdapter(CountryAdapter):
 
         filings: list[FinancialFiling] = []
         cutoff = datetime.utcnow().year - years
-        for year, structured in annual_per_year.items():
+        for year, structured in yearly.items():
             if year < cutoff:
                 continue
             filings.append(
@@ -238,8 +310,9 @@ class USAdapter(CountryAdapter):
                     company_id=cik,
                     year=year,
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=date(year, 12, 31),
-                    currency="USD",
+                    period_end=_parse_iso_date(structured.get("period_end"))
+                    or date(year, 12, 31),
+                    currency=structured.get("currency") or "USD",
                     structured_data=structured,
                     document_url=doc_urls.get(year),
                     document_format="xbrl",
@@ -259,55 +332,119 @@ def _parse_iso_date(s: str | None) -> date | None:
         return None
 
 
-# Mapping from SEC US-GAAP XBRL tags to our normalized line items.
-_XBRL_TAG_MAP: dict[str, str] = {
-    "Revenues": "revenue",
-    "RevenueFromContractWithCustomerExcludingAssessedTax": "revenue",
-    "SalesRevenueNet": "revenue",
-    "CostOfRevenue": "cost_of_sales",
-    "CostOfGoodsAndServicesSold": "cost_of_sales",
-    "GrossProfit": "gross_profit",
-    "OperatingIncomeLoss": "operating_profit",
-    "NetIncomeLoss": "net_income",
-    "Assets": "total_assets",
-    "AssetsCurrent": "current_assets",
-    "CashAndCashEquivalentsAtCarryingValue": "cash",
-    "InventoryNet": "inventory",
-    "AccountsReceivableNetCurrent": "receivables",
-    "Liabilities": "total_liabilities",
-    "LiabilitiesCurrent": "current_liabilities",
-    "LongTermDebt": "long_term_debt",
-    "StockholdersEquity": "equity",
-    "RetainedEarningsAccumulatedDeficit": "retained_earnings",
-}
+def _pick_fy_fact(
+    block: dict[str, Any], year: int
+) -> tuple[float | None, str | None]:
+    """Return (value, end_date) for the best FY 10-K fact matching year.
+
+    Preference order:
+    1. fp == "FY", form == "10-K", end-year == year, latest `filed` (most
+       recent restatement wins).
+    2. Same as above but ignoring fp (some filers omit the period flag).
+    """
+    units = block.get("units") or {}
+    unit_key = "USD" if "USD" in units else next(iter(units), None)
+    if not unit_key:
+        return None, None
+    candidates: list[dict[str, Any]] = []
+    relaxed: list[dict[str, Any]] = []
+    for item in units[unit_key]:
+        end = item.get("end")
+        if not end:
+            continue
+        try:
+            end_year = int(end[:4])
+        except ValueError:
+            continue
+        if end_year != year or item.get("form") != "10-K":
+            continue
+        if item.get("fp") == "FY":
+            candidates.append(item)
+        else:
+            relaxed.append(item)
+    pool = candidates or relaxed
+    if not pool:
+        return None, None
+    pool.sort(key=lambda x: (x.get("filed") or "", x.get("accn") or ""), reverse=True)
+    best = pool[0]
+    return best.get("val"), best.get("end")
 
 
-def _flatten_xbrl_to_yearly(facts: dict[str, Any]) -> dict[int, dict[str, Any]]:
-    """Reduce SEC companyfacts JSON to {year: {line: value}} for FY filings."""
+def _all_fy_years(facts: dict[str, Any]) -> list[int]:
+    """All distinct FY end-years observed in any us-gaap fact under 10-K."""
+    us_gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+    years: set[int] = set()
+    for block in us_gaap.values():
+        units = block.get("units") or {}
+        for items in units.values():
+            for item in items:
+                if item.get("form") != "10-K":
+                    continue
+                end = item.get("end")
+                if not end:
+                    continue
+                try:
+                    years.add(int(end[:4]))
+                except ValueError:
+                    pass
+    return sorted(years, reverse=True)
+
+
+def _build_structured_by_year(facts: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """Build the per-year structured_data payloads from companyfacts JSON.
+
+    Output shape matches the ESEF parser so the risk engine can consume
+    both interchangeably.
+    """
     us_gaap = (facts.get("facts") or {}).get("us-gaap") or {}
     out: dict[int, dict[str, Any]] = {}
-    for tag, normalized in _XBRL_TAG_MAP.items():
-        block = us_gaap.get(tag)
-        if not block:
+    for year in _all_fy_years(facts):
+        balance: dict[str, Any] = {}
+        income: dict[str, Any] = {}
+        cash_flow: dict[str, Any] = {}
+        raw: dict[str, Any] = {}
+        period_end: str | None = None
+
+        def _extract(group: dict[str, Any], mapping: dict[str, list[str]]) -> None:
+            nonlocal period_end
+            for field, concepts in mapping.items():
+                for concept in concepts:
+                    block = us_gaap.get(concept)
+                    if not block:
+                        continue
+                    val, end = _pick_fy_fact(block, year)
+                    if val is None:
+                        continue
+                    group[field] = val
+                    raw[concept] = val
+                    if end and (period_end is None or end > period_end):
+                        period_end = end
+                    break
+
+        _extract(balance, _BALANCE_SHEET_CONCEPTS)
+        _extract(income, _INCOME_STATEMENT_CONCEPTS)
+        _extract(cash_flow, _CASH_FLOW_CONCEPTS)
+
+        # Synthesize gross profit when only revenue and cost of sales are
+        # reported separately — the risk engine does the same, but having
+        # it pre-computed is useful for inspection.
+        if (
+            "gross_profit" not in income
+            and "revenue" in income
+            and "cost_of_sales" in income
+        ):
+            income["gross_profit"] = income["revenue"] - income["cost_of_sales"]
+
+        if not (balance or income or cash_flow):
             continue
-        units = block.get("units") or {}
-        # Prefer USD, fall back to first available unit.
-        unit_key = "USD" if "USD" in units else (next(iter(units), None) if units else None)
-        if not unit_key:
-            continue
-        for item in units[unit_key]:
-            if item.get("form") != "10-K":
-                continue
-            if item.get("fp") not in (None, "FY"):
-                continue
-            end = item.get("end")
-            if not end:
-                continue
-            try:
-                year = int(end[:4])
-            except ValueError:
-                continue
-            year_block = out.setdefault(year, {})
-            # Keep the highest-quality value: 10-K FY, prefer fy == year.
-            year_block.setdefault(normalized, item.get("val"))
+
+        out[year] = {
+            "currency": "USD",
+            "period_end": period_end or f"{year}-12-31",
+            "consolidated": True,
+            "balance_sheet": balance,
+            "income_statement": income,
+            "cash_flow": cash_flow,
+            "raw_concepts": raw,
+        }
     return out

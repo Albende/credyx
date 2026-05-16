@@ -1,0 +1,1945 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - link "CreditLens" [ref=e5] [cursor=pointer]:
+          - /url: /
+        - navigation [ref=e6]:
+          - link "Search" [ref=e7] [cursor=pointer]:
+            - /url: /
+          - link "Coverage" [ref=e8] [cursor=pointer]:
+            - /url: /coverage
+          - link "API" [ref=e9] [cursor=pointer]:
+            - /url: http://localhost:8000/docs
+    - main [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - heading "B2B Credit Intelligence" [level=1] [ref=e13]
+          - paragraph [ref=e14]: Search real company data from official European, Turkish, and US government registries. Pull filed balance sheets, then run an AI-powered credit risk analysis end to end.
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - generic [ref=e17]: Country
+            - combobox [ref=e18]:
+              - option "🏳️ AD — Andorra (soon)"
+              - option "🏳️ AE — United Arab Emirates"
+              - option "🏳️ AF — Afghanistan (soon)"
+              - option "🏳️ AG — Antigua and Barbuda (soon)"
+              - option "🏳️ AI — Anguilla (soon)"
+              - option "🏳️ AL — Albania"
+              - option "🏳️ AM — Armenia"
+              - option "🏳️ AO — Angola"
+              - option "🏳️ AR — Argentina"
+              - option "🏳️ AS — American Samoa (soon)"
+              - option "🇦🇹 AT — Austria"
+              - option "🏳️ AU — Australia"
+              - option "🏳️ AW — Aruba (soon)"
+              - option "🏳️ AZ — Azerbaijan"
+              - option "🏳️ BA — Bosnia and Herzegovina"
+              - option "🏳️ BB — Barbados (soon)"
+              - option "🏳️ BD — Bangladesh"
+              - option "🇧🇪 BE — Belgium"
+              - option "🏳️ BF — Burkina Faso (soon)"
+              - option "🇧🇬 BG — Bulgaria"
+              - option "🏳️ BH — Bahrain"
+              - option "🏳️ BI — Burundi (soon)"
+              - option "🏳️ BJ — Benin (soon)"
+              - option "🏳️ BL — Saint Barthélemy (soon)"
+              - option "🏳️ BM — Bermuda (soon)"
+              - option "🏳️ BN — Brunei (soon)"
+              - option "🏳️ BO — Bolivia"
+              - option "🏳️ BQ — Caribbean Netherlands (soon)"
+              - option "🏳️ BR — Brazil" [selected]
+              - option "🏳️ BS — Bahamas (soon)"
+              - option "🏳️ BT — Bhutan (soon)"
+              - option "🏳️ BW — Botswana"
+              - option "🏳️ BY — Belarus"
+              - option "🏳️ BZ — Belize (soon)"
+              - option "🏳️ CA — Canada"
+              - option "🏳️ CD — DR Congo"
+              - option "🏳️ CF — Central African Republic (soon)"
+              - option "🏳️ CG — Congo-Brazzaville (soon)"
+              - option "🏳️ CH — Switzerland"
+              - option "🏳️ CI — Côte d'Ivoire"
+              - option "🏳️ CK — Cook Islands (soon)"
+              - option "🏳️ CL — Chile"
+              - option "🏳️ CM — Cameroon"
+              - option "🏳️ CN — China (soon)"
+              - option "🏳️ CO — Colombia"
+              - option "🏳️ CR — Costa Rica"
+              - option "🏳️ CU — Cuba (soon)"
+              - option "🏳️ CV — Cape Verde (soon)"
+              - option "🏳️ CW — Curaçao (soon)"
+              - option "🇨🇾 CY — Cyprus"
+              - option "🇨🇿 CZ — Czech Republic"
+              - option "🇩🇪 DE — Germany"
+              - option "🏳️ DJ — Djibouti (soon)"
+              - option "🇩🇰 DK — Denmark"
+              - option "🏳️ DM — Dominica (soon)"
+              - option "🏳️ DO — Dominican Republic"
+              - option "🏳️ DZ — Algeria"
+              - option "🏳️ EC — Ecuador"
+              - option "🇪🇪 EE — Estonia"
+              - option "🏳️ EG — Egypt"
+              - option "🏳️ EH — Western Sahara (soon)"
+              - option "🏳️ ER — Eritrea (soon)"
+              - option "🇪🇸 ES — Spain"
+              - option "🏳️ ET — Ethiopia"
+              - option "🇫🇮 FI — Finland"
+              - option "🏳️ FJ — Fiji (soon)"
+              - option "🏳️ FM — Micronesia (soon)"
+              - option "🏳️ FO — Faroe Islands (soon)"
+              - option "🇫🇷 FR — France"
+              - option "🏳️ GA — Gabon (soon)"
+              - option "🇬🇧 GB — United Kingdom"
+              - option "🏳️ GD — Grenada (soon)"
+              - option "🏳️ GE — Georgia"
+              - option "🏳️ GF — French Guiana (soon)"
+              - option "🏳️ GG — Guernsey (soon)"
+              - option "🏳️ GH — Ghana"
+              - option "🏳️ GI — Gibraltar (soon)"
+              - option "🏳️ GL — Greenland (soon)"
+              - option "🏳️ GM — Gambia (soon)"
+              - option "🏳️ GN — Guinea (soon)"
+              - option "🏳️ GP — Guadeloupe (soon)"
+              - option "🏳️ GQ — Equatorial Guinea (soon)"
+              - option "🇬🇷 GR — Greece"
+              - option "🏳️ GT — Guatemala (soon)"
+              - option "🏳️ GU — Guam (soon)"
+              - option "🏳️ GW — Guinea-Bissau (soon)"
+              - option "🏳️ GY — Guyana (soon)"
+              - option "🏳️ HK — Hong Kong"
+              - option "🏳️ HN — Honduras (soon)"
+              - option "🇭🇷 HR — Croatia"
+              - option "🏳️ HT — Haiti (soon)"
+              - option "🇭🇺 HU — Hungary"
+              - option "🏳️ ID — Indonesia"
+              - option "🇮🇪 IE — Ireland"
+              - option "🏳️ IL — Israel"
+              - option "🏳️ IM — Isle of Man (soon)"
+              - option "🏳️ IN — India"
+              - option "🏳️ IQ — Iraq"
+              - option "🏳️ IR — Iran (soon)"
+              - option "🏳️ IS — Iceland"
+              - option "🇮🇹 IT — Italy"
+              - option "🏳️ JE — Jersey (soon)"
+              - option "🏳️ JM — Jamaica (soon)"
+              - option "🏳️ JO — Jordan"
+              - option "🏳️ JP — Japan"
+              - option "🏳️ KE — Kenya"
+              - option "🏳️ KG — Kyrgyzstan"
+              - option "🏳️ KH — Cambodia"
+              - option "🏳️ KI — Kiribati (soon)"
+              - option "🏳️ KM — Comoros (soon)"
+              - option "🏳️ KN — Saint Kitts and Nevis (soon)"
+              - option "🏳️ KP — North Korea (soon)"
+              - option "🏳️ KR — South Korea"
+              - option "🏳️ KW — Kuwait"
+              - option "🏳️ KY — Cayman Islands (soon)"
+              - option "🏳️ KZ — Kazakhstan"
+              - option "🏳️ LA — Laos (soon)"
+              - option "🏳️ LB — Lebanon (soon)"
+              - option "🏳️ LC — Saint Lucia (soon)"
+              - option "🏳️ LI — Liechtenstein (soon)"
+              - option "🏳️ LK — Sri Lanka"
+              - option "🏳️ LR — Liberia (soon)"
+              - option "🏳️ LS — Lesotho (soon)"
+              - option "🇱🇹 LT — Lithuania"
+              - option "🇱🇺 LU — Luxembourg"
+              - option "🇱🇻 LV — Latvia"
+              - option "🏳️ LY — Libya (soon)"
+              - option "🏳️ MA — Morocco"
+              - option "🏳️ MC — Monaco (soon)"
+              - option "🏳️ MD — Moldova"
+              - option "🏳️ ME — Montenegro"
+              - option "🏳️ MF — Saint Martin (soon)"
+              - option "🏳️ MG — Madagascar"
+              - option "🏳️ MH — Marshall Islands (soon)"
+              - option "🏳️ MK — North Macedonia"
+              - option "🏳️ ML — Mali (soon)"
+              - option "🏳️ MM — Myanmar"
+              - option "🏳️ MN — Mongolia (soon)"
+              - option "🏳️ MO — Macao (soon)"
+              - option "🏳️ MP — Northern Mariana Islands (soon)"
+              - option "🏳️ MQ — Martinique (soon)"
+              - option "🏳️ MR — Mauritania (soon)"
+              - option "🏳️ MS — Montserrat (soon)"
+              - option "🇲🇹 MT — Malta"
+              - option "🏳️ MU — Mauritius"
+              - option "🏳️ MV — Maldives (soon)"
+              - option "🏳️ MW — Malawi (soon)"
+              - option "🏳️ MX — Mexico"
+              - option "🏳️ MY — Malaysia"
+              - option "🏳️ MZ — Mozambique"
+              - option "🏳️ NA — Namibia (soon)"
+              - option "🏳️ NC — New Caledonia (soon)"
+              - option "🏳️ NE — Niger (soon)"
+              - option "🏳️ NF — Norfolk Island (soon)"
+              - option "🏳️ NG — Nigeria"
+              - option "🏳️ NI — Nicaragua (soon)"
+              - option "🇳🇱 NL — Netherlands"
+              - option "🇳🇴 NO — Norway"
+              - option "🏳️ NP — Nepal"
+              - option "🏳️ NR — Nauru (soon)"
+              - option "🏳️ NU — Niue (soon)"
+              - option "🏳️ NZ — New Zealand"
+              - option "🏳️ OM — Oman (soon)"
+              - option "🏳️ PA — Panama (soon)"
+              - option "🏳️ PE — Peru"
+              - option "🏳️ PF — French Polynesia (soon)"
+              - option "🏳️ PG — Papua New Guinea (soon)"
+              - option "🏳️ PH — Philippines"
+              - option "🏳️ PK — Pakistan"
+              - option "🇵🇱 PL — Poland"
+              - option "🏳️ PM — Saint Pierre and Miquelon (soon)"
+              - option "🏳️ PN — Pitcairn (soon)"
+              - option "🏳️ PR — Puerto Rico (soon)"
+              - option "🏳️ PS — Palestine (soon)"
+              - option "🇵🇹 PT — Portugal"
+              - option "🏳️ PW — Palau (soon)"
+              - option "🏳️ PY — Paraguay"
+              - option "🏳️ QA — Qatar"
+              - option "🏳️ RE — Réunion (soon)"
+              - option "🇷🇴 RO — Romania"
+              - option "🏳️ RS — Serbia"
+              - option "🏳️ RU — Russia"
+              - option "🏳️ RW — Rwanda (soon)"
+              - option "🏳️ SA — Saudi Arabia"
+              - option "🏳️ SB — Solomon Islands (soon)"
+              - option "🏳️ SC — Seychelles"
+              - option "🏳️ SD — Sudan (soon)"
+              - option "🇸🇪 SE — Sweden"
+              - option "🏳️ SG — Singapore"
+              - option "🏳️ SH — Saint Helena (soon)"
+              - option "🇸🇮 SI — Slovenia"
+              - option "🇸🇰 SK — Slovakia"
+              - option "🏳️ SL — Sierra Leone (soon)"
+              - option "🏳️ SM — San Marino (soon)"
+              - option "🏳️ SN — Senegal"
+              - option "🏳️ SO — Somalia (soon)"
+              - option "🏳️ SR — Suriname (soon)"
+              - option "🏳️ SS — South Sudan (soon)"
+              - option "🏳️ ST — São Tomé and Príncipe (soon)"
+              - option "🏳️ SV — El Salvador (soon)"
+              - option "🏳️ SX — Sint Maarten (soon)"
+              - option "🏳️ SY — Syria (soon)"
+              - option "🏳️ SZ — Eswatini (soon)"
+              - option "🏳️ TC — Turks and Caicos Islands (soon)"
+              - option "🏳️ TD — Chad (soon)"
+              - option "🏳️ TG — Togo (soon)"
+              - option "🏳️ TH — Thailand"
+              - option "🏳️ TJ — Tajikistan (soon)"
+              - option "🏳️ TK — Tokelau (soon)"
+              - option "🏳️ TL — Timor-Leste (soon)"
+              - option "🏳️ TM — Turkmenistan (soon)"
+              - option "🏳️ TN — Tunisia"
+              - option "🏳️ TO — Tonga (soon)"
+              - option "🇹🇷 TR — Türkiye"
+              - option "🏳️ TT — Trinidad and Tobago (soon)"
+              - option "🏳️ TV — Tuvalu (soon)"
+              - option "🏳️ TW — Taiwan"
+              - option "🏳️ TZ — Tanzania"
+              - option "🏳️ UA — Ukraine"
+              - option "🏳️ UG — Uganda (soon)"
+              - option "🇬🇧 UK — United Kingdom"
+              - option "🇺🇸 US — United States"
+              - option "🏳️ UY — Uruguay"
+              - option "🏳️ UZ — Uzbekistan"
+              - option "🏳️ VA — Vatican City (soon)"
+              - option "🏳️ VC — Saint Vincent and the Grenadines (soon)"
+              - option "🏳️ VE — Venezuela (soon)"
+              - option "🏳️ VG — British Virgin Islands (soon)"
+              - option "🏳️ VI — US Virgin Islands (soon)"
+              - option "🏳️ VN — Vietnam"
+              - option "🏳️ VU — Vanuatu (soon)"
+              - option "🏳️ WF — Wallis and Futuna (soon)"
+              - option "🏳️ WS — Samoa (soon)"
+              - option "🏳️ XK — Kosovo"
+              - option "🏳️ YE — Yemen (soon)"
+              - option "🏳️ YT — Mayotte (soon)"
+              - option "🏳️ ZA — South Africa"
+              - option "🏳️ ZM — Zambia"
+              - option "🏳️ ZW — Zimbabwe"
+            - generic [ref=e19]:
+              - button "Search by name" [ref=e20] [cursor=pointer]
+              - button "Lookup by Identifier" [ref=e21] [cursor=pointer]
+          - generic [ref=e22]:
+            - textbox "Company name..." [ref=e23]
+            - button "Search" [disabled] [ref=e24]
+        - generic [ref=e25]:
+          - heading "Live adapter coverage (112/239 usable)" [level=2] [ref=e26]
+          - generic [ref=e27]:
+            - link "🏳️ AD Andorra soon" [ref=e28] [cursor=pointer]:
+              - /url: /?country=AD
+              - generic [ref=e29]:
+                - generic [ref=e30]: 🏳️
+                - generic [ref=e31]: AD
+              - generic [ref=e32]: Andorra
+              - generic [ref=e33]: soon
+            - link "🏳️ AE United Arab Emirates live" [ref=e34] [cursor=pointer]:
+              - /url: /?country=AE
+              - generic [ref=e35]:
+                - generic [ref=e36]: 🏳️
+                - generic [ref=e37]: AE
+              - generic [ref=e38]: United Arab Emirates
+              - generic [ref=e39]: live
+            - link "🏳️ AF Afghanistan soon" [ref=e40] [cursor=pointer]:
+              - /url: /?country=AF
+              - generic [ref=e41]:
+                - generic [ref=e42]: 🏳️
+                - generic [ref=e43]: AF
+              - generic [ref=e44]: Afghanistan
+              - generic [ref=e45]: soon
+            - link "🏳️ AG Antigua and Barbuda soon" [ref=e46] [cursor=pointer]:
+              - /url: /?country=AG
+              - generic [ref=e47]:
+                - generic [ref=e48]: 🏳️
+                - generic [ref=e49]: AG
+              - generic [ref=e50]: Antigua and Barbuda
+              - generic [ref=e51]: soon
+            - link "🏳️ AI Anguilla soon" [ref=e52] [cursor=pointer]:
+              - /url: /?country=AI
+              - generic [ref=e53]:
+                - generic [ref=e54]: 🏳️
+                - generic [ref=e55]: AI
+              - generic [ref=e56]: Anguilla
+              - generic [ref=e57]: soon
+            - link "🏳️ AL Albania live" [ref=e58] [cursor=pointer]:
+              - /url: /?country=AL
+              - generic [ref=e59]:
+                - generic [ref=e60]: 🏳️
+                - generic [ref=e61]: AL
+              - generic [ref=e62]: Albania
+              - generic [ref=e63]: live
+            - link "🏳️ AM Armenia live" [ref=e64] [cursor=pointer]:
+              - /url: /?country=AM
+              - generic [ref=e65]:
+                - generic [ref=e66]: 🏳️
+                - generic [ref=e67]: AM
+              - generic [ref=e68]: Armenia
+              - generic [ref=e69]: live
+            - link "🏳️ AO Angola live" [ref=e70] [cursor=pointer]:
+              - /url: /?country=AO
+              - generic [ref=e71]:
+                - generic [ref=e72]: 🏳️
+                - generic [ref=e73]: AO
+              - generic [ref=e74]: Angola
+              - generic [ref=e75]: live
+            - link "🏳️ AR Argentina live" [ref=e76] [cursor=pointer]:
+              - /url: /?country=AR
+              - generic [ref=e77]:
+                - generic [ref=e78]: 🏳️
+                - generic [ref=e79]: AR
+              - generic [ref=e80]: Argentina
+              - generic [ref=e81]: live
+            - link "🏳️ AS American Samoa soon" [ref=e82] [cursor=pointer]:
+              - /url: /?country=AS
+              - generic [ref=e83]:
+                - generic [ref=e84]: 🏳️
+                - generic [ref=e85]: AS
+              - generic [ref=e86]: American Samoa
+              - generic [ref=e87]: soon
+            - link "🇦🇹 AT Austria live" [ref=e88] [cursor=pointer]:
+              - /url: /?country=AT
+              - generic [ref=e89]:
+                - generic [ref=e90]: 🇦🇹
+                - generic [ref=e91]: AT
+              - generic [ref=e92]: Austria
+              - generic [ref=e93]: live
+            - link "🏳️ AU Australia live" [ref=e94] [cursor=pointer]:
+              - /url: /?country=AU
+              - generic [ref=e95]:
+                - generic [ref=e96]: 🏳️
+                - generic [ref=e97]: AU
+              - generic [ref=e98]: Australia
+              - generic [ref=e99]: live
+            - link "🏳️ AW Aruba soon" [ref=e100] [cursor=pointer]:
+              - /url: /?country=AW
+              - generic [ref=e101]:
+                - generic [ref=e102]: 🏳️
+                - generic [ref=e103]: AW
+              - generic [ref=e104]: Aruba
+              - generic [ref=e105]: soon
+            - link "🏳️ AZ Azerbaijan live" [ref=e106] [cursor=pointer]:
+              - /url: /?country=AZ
+              - generic [ref=e107]:
+                - generic [ref=e108]: 🏳️
+                - generic [ref=e109]: AZ
+              - generic [ref=e110]: Azerbaijan
+              - generic [ref=e111]: live
+            - link "🏳️ BA Bosnia and Herzegovina live" [ref=e112] [cursor=pointer]:
+              - /url: /?country=BA
+              - generic [ref=e113]:
+                - generic [ref=e114]: 🏳️
+                - generic [ref=e115]: BA
+              - generic [ref=e116]: Bosnia and Herzegovina
+              - generic [ref=e117]: live
+            - link "🏳️ BB Barbados soon" [ref=e118] [cursor=pointer]:
+              - /url: /?country=BB
+              - generic [ref=e119]:
+                - generic [ref=e120]: 🏳️
+                - generic [ref=e121]: BB
+              - generic [ref=e122]: Barbados
+              - generic [ref=e123]: soon
+            - link "🏳️ BD Bangladesh live" [ref=e124] [cursor=pointer]:
+              - /url: /?country=BD
+              - generic [ref=e125]:
+                - generic [ref=e126]: 🏳️
+                - generic [ref=e127]: BD
+              - generic [ref=e128]: Bangladesh
+              - generic [ref=e129]: live
+            - link "🇧🇪 BE Belgium live" [ref=e130] [cursor=pointer]:
+              - /url: /?country=BE
+              - generic [ref=e131]:
+                - generic [ref=e132]: 🇧🇪
+                - generic [ref=e133]: BE
+              - generic [ref=e134]: Belgium
+              - generic [ref=e135]: live
+            - link "🏳️ BF Burkina Faso soon" [ref=e136] [cursor=pointer]:
+              - /url: /?country=BF
+              - generic [ref=e137]:
+                - generic [ref=e138]: 🏳️
+                - generic [ref=e139]: BF
+              - generic [ref=e140]: Burkina Faso
+              - generic [ref=e141]: soon
+            - link "🇧🇬 BG Bulgaria live" [ref=e142] [cursor=pointer]:
+              - /url: /?country=BG
+              - generic [ref=e143]:
+                - generic [ref=e144]: 🇧🇬
+                - generic [ref=e145]: BG
+              - generic [ref=e146]: Bulgaria
+              - generic [ref=e147]: live
+            - link "🏳️ BH Bahrain live" [ref=e148] [cursor=pointer]:
+              - /url: /?country=BH
+              - generic [ref=e149]:
+                - generic [ref=e150]: 🏳️
+                - generic [ref=e151]: BH
+              - generic [ref=e152]: Bahrain
+              - generic [ref=e153]: live
+            - link "🏳️ BI Burundi soon" [ref=e154] [cursor=pointer]:
+              - /url: /?country=BI
+              - generic [ref=e155]:
+                - generic [ref=e156]: 🏳️
+                - generic [ref=e157]: BI
+              - generic [ref=e158]: Burundi
+              - generic [ref=e159]: soon
+            - link "🏳️ BJ Benin soon" [ref=e160] [cursor=pointer]:
+              - /url: /?country=BJ
+              - generic [ref=e161]:
+                - generic [ref=e162]: 🏳️
+                - generic [ref=e163]: BJ
+              - generic [ref=e164]: Benin
+              - generic [ref=e165]: soon
+            - link "🏳️ BL Saint Barthélemy soon" [ref=e166] [cursor=pointer]:
+              - /url: /?country=BL
+              - generic [ref=e167]:
+                - generic [ref=e168]: 🏳️
+                - generic [ref=e169]: BL
+              - generic [ref=e170]: Saint Barthélemy
+              - generic [ref=e171]: soon
+            - link "🏳️ BM Bermuda soon" [ref=e172] [cursor=pointer]:
+              - /url: /?country=BM
+              - generic [ref=e173]:
+                - generic [ref=e174]: 🏳️
+                - generic [ref=e175]: BM
+              - generic [ref=e176]: Bermuda
+              - generic [ref=e177]: soon
+            - link "🏳️ BN Brunei soon" [ref=e178] [cursor=pointer]:
+              - /url: /?country=BN
+              - generic [ref=e179]:
+                - generic [ref=e180]: 🏳️
+                - generic [ref=e181]: BN
+              - generic [ref=e182]: Brunei
+              - generic [ref=e183]: soon
+            - link "🏳️ BO Bolivia live" [ref=e184] [cursor=pointer]:
+              - /url: /?country=BO
+              - generic [ref=e185]:
+                - generic [ref=e186]: 🏳️
+                - generic [ref=e187]: BO
+              - generic [ref=e188]: Bolivia
+              - generic [ref=e189]: live
+            - link "🏳️ BQ Caribbean Netherlands soon" [ref=e190] [cursor=pointer]:
+              - /url: /?country=BQ
+              - generic [ref=e191]:
+                - generic [ref=e192]: 🏳️
+                - generic [ref=e193]: BQ
+              - generic [ref=e194]: Caribbean Netherlands
+              - generic [ref=e195]: soon
+            - link "🏳️ BR Brazil live" [ref=e196] [cursor=pointer]:
+              - /url: /?country=BR
+              - generic [ref=e197]:
+                - generic [ref=e198]: 🏳️
+                - generic [ref=e199]: BR
+              - generic [ref=e200]: Brazil
+              - generic [ref=e201]: live
+            - link "🏳️ BS Bahamas soon" [ref=e202] [cursor=pointer]:
+              - /url: /?country=BS
+              - generic [ref=e203]:
+                - generic [ref=e204]: 🏳️
+                - generic [ref=e205]: BS
+              - generic [ref=e206]: Bahamas
+              - generic [ref=e207]: soon
+            - link "🏳️ BT Bhutan soon" [ref=e208] [cursor=pointer]:
+              - /url: /?country=BT
+              - generic [ref=e209]:
+                - generic [ref=e210]: 🏳️
+                - generic [ref=e211]: BT
+              - generic [ref=e212]: Bhutan
+              - generic [ref=e213]: soon
+            - link "🏳️ BW Botswana live" [ref=e214] [cursor=pointer]:
+              - /url: /?country=BW
+              - generic [ref=e215]:
+                - generic [ref=e216]: 🏳️
+                - generic [ref=e217]: BW
+              - generic [ref=e218]: Botswana
+              - generic [ref=e219]: live
+            - link "🏳️ BY Belarus live" [ref=e220] [cursor=pointer]:
+              - /url: /?country=BY
+              - generic [ref=e221]:
+                - generic [ref=e222]: 🏳️
+                - generic [ref=e223]: BY
+              - generic [ref=e224]: Belarus
+              - generic [ref=e225]: live
+            - link "🏳️ BZ Belize soon" [ref=e226] [cursor=pointer]:
+              - /url: /?country=BZ
+              - generic [ref=e227]:
+                - generic [ref=e228]: 🏳️
+                - generic [ref=e229]: BZ
+              - generic [ref=e230]: Belize
+              - generic [ref=e231]: soon
+            - link "🏳️ CA Canada live" [ref=e232] [cursor=pointer]:
+              - /url: /?country=CA
+              - generic [ref=e233]:
+                - generic [ref=e234]: 🏳️
+                - generic [ref=e235]: CA
+              - generic [ref=e236]: Canada
+              - generic [ref=e237]: live
+            - link "🏳️ CD DR Congo live" [ref=e238] [cursor=pointer]:
+              - /url: /?country=CD
+              - generic [ref=e239]:
+                - generic [ref=e240]: 🏳️
+                - generic [ref=e241]: CD
+              - generic [ref=e242]: DR Congo
+              - generic [ref=e243]: live
+            - link "🏳️ CF Central African Republic soon" [ref=e244] [cursor=pointer]:
+              - /url: /?country=CF
+              - generic [ref=e245]:
+                - generic [ref=e246]: 🏳️
+                - generic [ref=e247]: CF
+              - generic [ref=e248]: Central African Republic
+              - generic [ref=e249]: soon
+            - link "🏳️ CG Congo-Brazzaville soon" [ref=e250] [cursor=pointer]:
+              - /url: /?country=CG
+              - generic [ref=e251]:
+                - generic [ref=e252]: 🏳️
+                - generic [ref=e253]: CG
+              - generic [ref=e254]: Congo-Brazzaville
+              - generic [ref=e255]: soon
+            - link "🏳️ CH Switzerland live" [ref=e256] [cursor=pointer]:
+              - /url: /?country=CH
+              - generic [ref=e257]:
+                - generic [ref=e258]: 🏳️
+                - generic [ref=e259]: CH
+              - generic [ref=e260]: Switzerland
+              - generic [ref=e261]: live
+            - link "🏳️ CI Côte d'Ivoire live" [ref=e262] [cursor=pointer]:
+              - /url: /?country=CI
+              - generic [ref=e263]:
+                - generic [ref=e264]: 🏳️
+                - generic [ref=e265]: CI
+              - generic [ref=e266]: Côte d'Ivoire
+              - generic [ref=e267]: live
+            - link "🏳️ CK Cook Islands soon" [ref=e268] [cursor=pointer]:
+              - /url: /?country=CK
+              - generic [ref=e269]:
+                - generic [ref=e270]: 🏳️
+                - generic [ref=e271]: CK
+              - generic [ref=e272]: Cook Islands
+              - generic [ref=e273]: soon
+            - link "🏳️ CL Chile live" [ref=e274] [cursor=pointer]:
+              - /url: /?country=CL
+              - generic [ref=e275]:
+                - generic [ref=e276]: 🏳️
+                - generic [ref=e277]: CL
+              - generic [ref=e278]: Chile
+              - generic [ref=e279]: live
+            - link "🏳️ CM Cameroon live" [ref=e280] [cursor=pointer]:
+              - /url: /?country=CM
+              - generic [ref=e281]:
+                - generic [ref=e282]: 🏳️
+                - generic [ref=e283]: CM
+              - generic [ref=e284]: Cameroon
+              - generic [ref=e285]: live
+            - link "🏳️ CN China soon" [ref=e286] [cursor=pointer]:
+              - /url: /?country=CN
+              - generic [ref=e287]:
+                - generic [ref=e288]: 🏳️
+                - generic [ref=e289]: CN
+              - generic [ref=e290]: China
+              - generic [ref=e291]: soon
+            - link "🏳️ CO Colombia live" [ref=e292] [cursor=pointer]:
+              - /url: /?country=CO
+              - generic [ref=e293]:
+                - generic [ref=e294]: 🏳️
+                - generic [ref=e295]: CO
+              - generic [ref=e296]: Colombia
+              - generic [ref=e297]: live
+            - link "🏳️ CR Costa Rica live" [ref=e298] [cursor=pointer]:
+              - /url: /?country=CR
+              - generic [ref=e299]:
+                - generic [ref=e300]: 🏳️
+                - generic [ref=e301]: CR
+              - generic [ref=e302]: Costa Rica
+              - generic [ref=e303]: live
+            - link "🏳️ CU Cuba soon" [ref=e304] [cursor=pointer]:
+              - /url: /?country=CU
+              - generic [ref=e305]:
+                - generic [ref=e306]: 🏳️
+                - generic [ref=e307]: CU
+              - generic [ref=e308]: Cuba
+              - generic [ref=e309]: soon
+            - link "🏳️ CV Cape Verde soon" [ref=e310] [cursor=pointer]:
+              - /url: /?country=CV
+              - generic [ref=e311]:
+                - generic [ref=e312]: 🏳️
+                - generic [ref=e313]: CV
+              - generic [ref=e314]: Cape Verde
+              - generic [ref=e315]: soon
+            - link "🏳️ CW Curaçao soon" [ref=e316] [cursor=pointer]:
+              - /url: /?country=CW
+              - generic [ref=e317]:
+                - generic [ref=e318]: 🏳️
+                - generic [ref=e319]: CW
+              - generic [ref=e320]: Curaçao
+              - generic [ref=e321]: soon
+            - link "🇨🇾 CY Cyprus live" [ref=e322] [cursor=pointer]:
+              - /url: /?country=CY
+              - generic [ref=e323]:
+                - generic [ref=e324]: 🇨🇾
+                - generic [ref=e325]: CY
+              - generic [ref=e326]: Cyprus
+              - generic [ref=e327]: live
+            - link "🇨🇿 CZ Czech Republic live" [ref=e328] [cursor=pointer]:
+              - /url: /?country=CZ
+              - generic [ref=e329]:
+                - generic [ref=e330]: 🇨🇿
+                - generic [ref=e331]: CZ
+              - generic [ref=e332]: Czech Republic
+              - generic [ref=e333]: live
+            - link "🇩🇪 DE Germany live" [ref=e334] [cursor=pointer]:
+              - /url: /?country=DE
+              - generic [ref=e335]:
+                - generic [ref=e336]: 🇩🇪
+                - generic [ref=e337]: DE
+              - generic [ref=e338]: Germany
+              - generic [ref=e339]: live
+            - link "🏳️ DJ Djibouti soon" [ref=e340] [cursor=pointer]:
+              - /url: /?country=DJ
+              - generic [ref=e341]:
+                - generic [ref=e342]: 🏳️
+                - generic [ref=e343]: DJ
+              - generic [ref=e344]: Djibouti
+              - generic [ref=e345]: soon
+            - link "🇩🇰 DK Denmark live" [ref=e346] [cursor=pointer]:
+              - /url: /?country=DK
+              - generic [ref=e347]:
+                - generic [ref=e348]: 🇩🇰
+                - generic [ref=e349]: DK
+              - generic [ref=e350]: Denmark
+              - generic [ref=e351]: live
+            - link "🏳️ DM Dominica soon" [ref=e352] [cursor=pointer]:
+              - /url: /?country=DM
+              - generic [ref=e353]:
+                - generic [ref=e354]: 🏳️
+                - generic [ref=e355]: DM
+              - generic [ref=e356]: Dominica
+              - generic [ref=e357]: soon
+            - link "🏳️ DO Dominican Republic live" [ref=e358] [cursor=pointer]:
+              - /url: /?country=DO
+              - generic [ref=e359]:
+                - generic [ref=e360]: 🏳️
+                - generic [ref=e361]: DO
+              - generic [ref=e362]: Dominican Republic
+              - generic [ref=e363]: live
+            - link "🏳️ DZ Algeria live" [ref=e364] [cursor=pointer]:
+              - /url: /?country=DZ
+              - generic [ref=e365]:
+                - generic [ref=e366]: 🏳️
+                - generic [ref=e367]: DZ
+              - generic [ref=e368]: Algeria
+              - generic [ref=e369]: live
+            - link "🏳️ EC Ecuador live" [ref=e370] [cursor=pointer]:
+              - /url: /?country=EC
+              - generic [ref=e371]:
+                - generic [ref=e372]: 🏳️
+                - generic [ref=e373]: EC
+              - generic [ref=e374]: Ecuador
+              - generic [ref=e375]: live
+            - link "🇪🇪 EE Estonia live" [ref=e376] [cursor=pointer]:
+              - /url: /?country=EE
+              - generic [ref=e377]:
+                - generic [ref=e378]: 🇪🇪
+                - generic [ref=e379]: EE
+              - generic [ref=e380]: Estonia
+              - generic [ref=e381]: live
+            - link "🏳️ EG Egypt live" [ref=e382] [cursor=pointer]:
+              - /url: /?country=EG
+              - generic [ref=e383]:
+                - generic [ref=e384]: 🏳️
+                - generic [ref=e385]: EG
+              - generic [ref=e386]: Egypt
+              - generic [ref=e387]: live
+            - link "🏳️ EH Western Sahara soon" [ref=e388] [cursor=pointer]:
+              - /url: /?country=EH
+              - generic [ref=e389]:
+                - generic [ref=e390]: 🏳️
+                - generic [ref=e391]: EH
+              - generic [ref=e392]: Western Sahara
+              - generic [ref=e393]: soon
+            - link "🏳️ ER Eritrea soon" [ref=e394] [cursor=pointer]:
+              - /url: /?country=ER
+              - generic [ref=e395]:
+                - generic [ref=e396]: 🏳️
+                - generic [ref=e397]: ER
+              - generic [ref=e398]: Eritrea
+              - generic [ref=e399]: soon
+            - link "🇪🇸 ES Spain live" [ref=e400] [cursor=pointer]:
+              - /url: /?country=ES
+              - generic [ref=e401]:
+                - generic [ref=e402]: 🇪🇸
+                - generic [ref=e403]: ES
+              - generic [ref=e404]: Spain
+              - generic [ref=e405]: live
+            - link "🏳️ ET Ethiopia live" [ref=e406] [cursor=pointer]:
+              - /url: /?country=ET
+              - generic [ref=e407]:
+                - generic [ref=e408]: 🏳️
+                - generic [ref=e409]: ET
+              - generic [ref=e410]: Ethiopia
+              - generic [ref=e411]: live
+            - link "🇫🇮 FI Finland live" [ref=e412] [cursor=pointer]:
+              - /url: /?country=FI
+              - generic [ref=e413]:
+                - generic [ref=e414]: 🇫🇮
+                - generic [ref=e415]: FI
+              - generic [ref=e416]: Finland
+              - generic [ref=e417]: live
+            - link "🏳️ FJ Fiji soon" [ref=e418] [cursor=pointer]:
+              - /url: /?country=FJ
+              - generic [ref=e419]:
+                - generic [ref=e420]: 🏳️
+                - generic [ref=e421]: FJ
+              - generic [ref=e422]: Fiji
+              - generic [ref=e423]: soon
+            - link "🏳️ FM Micronesia soon" [ref=e424] [cursor=pointer]:
+              - /url: /?country=FM
+              - generic [ref=e425]:
+                - generic [ref=e426]: 🏳️
+                - generic [ref=e427]: FM
+              - generic [ref=e428]: Micronesia
+              - generic [ref=e429]: soon
+            - link "🏳️ FO Faroe Islands soon" [ref=e430] [cursor=pointer]:
+              - /url: /?country=FO
+              - generic [ref=e431]:
+                - generic [ref=e432]: 🏳️
+                - generic [ref=e433]: FO
+              - generic [ref=e434]: Faroe Islands
+              - generic [ref=e435]: soon
+            - link "🇫🇷 FR France live" [ref=e436] [cursor=pointer]:
+              - /url: /?country=FR
+              - generic [ref=e437]:
+                - generic [ref=e438]: 🇫🇷
+                - generic [ref=e439]: FR
+              - generic [ref=e440]: France
+              - generic [ref=e441]: live
+            - link "🏳️ GA Gabon soon" [ref=e442] [cursor=pointer]:
+              - /url: /?country=GA
+              - generic [ref=e443]:
+                - generic [ref=e444]: 🏳️
+                - generic [ref=e445]: GA
+              - generic [ref=e446]: Gabon
+              - generic [ref=e447]: soon
+            - link "🇬🇧 GB United Kingdom live" [ref=e448] [cursor=pointer]:
+              - /url: /?country=GB
+              - generic [ref=e449]:
+                - generic [ref=e450]: 🇬🇧
+                - generic [ref=e451]: GB
+              - generic [ref=e452]: United Kingdom
+              - generic [ref=e453]: live
+            - link "🏳️ GD Grenada soon" [ref=e454] [cursor=pointer]:
+              - /url: /?country=GD
+              - generic [ref=e455]:
+                - generic [ref=e456]: 🏳️
+                - generic [ref=e457]: GD
+              - generic [ref=e458]: Grenada
+              - generic [ref=e459]: soon
+            - link "🏳️ GE Georgia live" [ref=e460] [cursor=pointer]:
+              - /url: /?country=GE
+              - generic [ref=e461]:
+                - generic [ref=e462]: 🏳️
+                - generic [ref=e463]: GE
+              - generic [ref=e464]: Georgia
+              - generic [ref=e465]: live
+            - link "🏳️ GF French Guiana soon" [ref=e466] [cursor=pointer]:
+              - /url: /?country=GF
+              - generic [ref=e467]:
+                - generic [ref=e468]: 🏳️
+                - generic [ref=e469]: GF
+              - generic [ref=e470]: French Guiana
+              - generic [ref=e471]: soon
+            - link "🏳️ GG Guernsey soon" [ref=e472] [cursor=pointer]:
+              - /url: /?country=GG
+              - generic [ref=e473]:
+                - generic [ref=e474]: 🏳️
+                - generic [ref=e475]: GG
+              - generic [ref=e476]: Guernsey
+              - generic [ref=e477]: soon
+            - link "🏳️ GH Ghana live" [ref=e478] [cursor=pointer]:
+              - /url: /?country=GH
+              - generic [ref=e479]:
+                - generic [ref=e480]: 🏳️
+                - generic [ref=e481]: GH
+              - generic [ref=e482]: Ghana
+              - generic [ref=e483]: live
+            - link "🏳️ GI Gibraltar soon" [ref=e484] [cursor=pointer]:
+              - /url: /?country=GI
+              - generic [ref=e485]:
+                - generic [ref=e486]: 🏳️
+                - generic [ref=e487]: GI
+              - generic [ref=e488]: Gibraltar
+              - generic [ref=e489]: soon
+            - link "🏳️ GL Greenland soon" [ref=e490] [cursor=pointer]:
+              - /url: /?country=GL
+              - generic [ref=e491]:
+                - generic [ref=e492]: 🏳️
+                - generic [ref=e493]: GL
+              - generic [ref=e494]: Greenland
+              - generic [ref=e495]: soon
+            - link "🏳️ GM Gambia soon" [ref=e496] [cursor=pointer]:
+              - /url: /?country=GM
+              - generic [ref=e497]:
+                - generic [ref=e498]: 🏳️
+                - generic [ref=e499]: GM
+              - generic [ref=e500]: Gambia
+              - generic [ref=e501]: soon
+            - link "🏳️ GN Guinea soon" [ref=e502] [cursor=pointer]:
+              - /url: /?country=GN
+              - generic [ref=e503]:
+                - generic [ref=e504]: 🏳️
+                - generic [ref=e505]: GN
+              - generic [ref=e506]: Guinea
+              - generic [ref=e507]: soon
+            - link "🏳️ GP Guadeloupe soon" [ref=e508] [cursor=pointer]:
+              - /url: /?country=GP
+              - generic [ref=e509]:
+                - generic [ref=e510]: 🏳️
+                - generic [ref=e511]: GP
+              - generic [ref=e512]: Guadeloupe
+              - generic [ref=e513]: soon
+            - link "🏳️ GQ Equatorial Guinea soon" [ref=e514] [cursor=pointer]:
+              - /url: /?country=GQ
+              - generic [ref=e515]:
+                - generic [ref=e516]: 🏳️
+                - generic [ref=e517]: GQ
+              - generic [ref=e518]: Equatorial Guinea
+              - generic [ref=e519]: soon
+            - link "🇬🇷 GR Greece live" [ref=e520] [cursor=pointer]:
+              - /url: /?country=GR
+              - generic [ref=e521]:
+                - generic [ref=e522]: 🇬🇷
+                - generic [ref=e523]: GR
+              - generic [ref=e524]: Greece
+              - generic [ref=e525]: live
+            - link "🏳️ GT Guatemala soon" [ref=e526] [cursor=pointer]:
+              - /url: /?country=GT
+              - generic [ref=e527]:
+                - generic [ref=e528]: 🏳️
+                - generic [ref=e529]: GT
+              - generic [ref=e530]: Guatemala
+              - generic [ref=e531]: soon
+            - link "🏳️ GU Guam soon" [ref=e532] [cursor=pointer]:
+              - /url: /?country=GU
+              - generic [ref=e533]:
+                - generic [ref=e534]: 🏳️
+                - generic [ref=e535]: GU
+              - generic [ref=e536]: Guam
+              - generic [ref=e537]: soon
+            - link "🏳️ GW Guinea-Bissau soon" [ref=e538] [cursor=pointer]:
+              - /url: /?country=GW
+              - generic [ref=e539]:
+                - generic [ref=e540]: 🏳️
+                - generic [ref=e541]: GW
+              - generic [ref=e542]: Guinea-Bissau
+              - generic [ref=e543]: soon
+            - link "🏳️ GY Guyana soon" [ref=e544] [cursor=pointer]:
+              - /url: /?country=GY
+              - generic [ref=e545]:
+                - generic [ref=e546]: 🏳️
+                - generic [ref=e547]: GY
+              - generic [ref=e548]: Guyana
+              - generic [ref=e549]: soon
+            - link "🏳️ HK Hong Kong live" [ref=e550] [cursor=pointer]:
+              - /url: /?country=HK
+              - generic [ref=e551]:
+                - generic [ref=e552]: 🏳️
+                - generic [ref=e553]: HK
+              - generic [ref=e554]: Hong Kong
+              - generic [ref=e555]: live
+            - link "🏳️ HN Honduras soon" [ref=e556] [cursor=pointer]:
+              - /url: /?country=HN
+              - generic [ref=e557]:
+                - generic [ref=e558]: 🏳️
+                - generic [ref=e559]: HN
+              - generic [ref=e560]: Honduras
+              - generic [ref=e561]: soon
+            - link "🇭🇷 HR Croatia live" [ref=e562] [cursor=pointer]:
+              - /url: /?country=HR
+              - generic [ref=e563]:
+                - generic [ref=e564]: 🇭🇷
+                - generic [ref=e565]: HR
+              - generic [ref=e566]: Croatia
+              - generic [ref=e567]: live
+            - link "🏳️ HT Haiti soon" [ref=e568] [cursor=pointer]:
+              - /url: /?country=HT
+              - generic [ref=e569]:
+                - generic [ref=e570]: 🏳️
+                - generic [ref=e571]: HT
+              - generic [ref=e572]: Haiti
+              - generic [ref=e573]: soon
+            - link "🇭🇺 HU Hungary live" [ref=e574] [cursor=pointer]:
+              - /url: /?country=HU
+              - generic [ref=e575]:
+                - generic [ref=e576]: 🇭🇺
+                - generic [ref=e577]: HU
+              - generic [ref=e578]: Hungary
+              - generic [ref=e579]: live
+            - link "🏳️ ID Indonesia live" [ref=e580] [cursor=pointer]:
+              - /url: /?country=ID
+              - generic [ref=e581]:
+                - generic [ref=e582]: 🏳️
+                - generic [ref=e583]: ID
+              - generic [ref=e584]: Indonesia
+              - generic [ref=e585]: live
+            - link "🇮🇪 IE Ireland live" [ref=e586] [cursor=pointer]:
+              - /url: /?country=IE
+              - generic [ref=e587]:
+                - generic [ref=e588]: 🇮🇪
+                - generic [ref=e589]: IE
+              - generic [ref=e590]: Ireland
+              - generic [ref=e591]: live
+            - link "🏳️ IL Israel live" [ref=e592] [cursor=pointer]:
+              - /url: /?country=IL
+              - generic [ref=e593]:
+                - generic [ref=e594]: 🏳️
+                - generic [ref=e595]: IL
+              - generic [ref=e596]: Israel
+              - generic [ref=e597]: live
+            - link "🏳️ IM Isle of Man soon" [ref=e598] [cursor=pointer]:
+              - /url: /?country=IM
+              - generic [ref=e599]:
+                - generic [ref=e600]: 🏳️
+                - generic [ref=e601]: IM
+              - generic [ref=e602]: Isle of Man
+              - generic [ref=e603]: soon
+            - link "🏳️ IN India live" [ref=e604] [cursor=pointer]:
+              - /url: /?country=IN
+              - generic [ref=e605]:
+                - generic [ref=e606]: 🏳️
+                - generic [ref=e607]: IN
+              - generic [ref=e608]: India
+              - generic [ref=e609]: live
+            - link "🏳️ IQ Iraq live" [ref=e610] [cursor=pointer]:
+              - /url: /?country=IQ
+              - generic [ref=e611]:
+                - generic [ref=e612]: 🏳️
+                - generic [ref=e613]: IQ
+              - generic [ref=e614]: Iraq
+              - generic [ref=e615]: live
+            - link "🏳️ IR Iran soon" [ref=e616] [cursor=pointer]:
+              - /url: /?country=IR
+              - generic [ref=e617]:
+                - generic [ref=e618]: 🏳️
+                - generic [ref=e619]: IR
+              - generic [ref=e620]: Iran
+              - generic [ref=e621]: soon
+            - link "🏳️ IS Iceland live" [ref=e622] [cursor=pointer]:
+              - /url: /?country=IS
+              - generic [ref=e623]:
+                - generic [ref=e624]: 🏳️
+                - generic [ref=e625]: IS
+              - generic [ref=e626]: Iceland
+              - generic [ref=e627]: live
+            - link "🇮🇹 IT Italy live" [ref=e628] [cursor=pointer]:
+              - /url: /?country=IT
+              - generic [ref=e629]:
+                - generic [ref=e630]: 🇮🇹
+                - generic [ref=e631]: IT
+              - generic [ref=e632]: Italy
+              - generic [ref=e633]: live
+            - link "🏳️ JE Jersey soon" [ref=e634] [cursor=pointer]:
+              - /url: /?country=JE
+              - generic [ref=e635]:
+                - generic [ref=e636]: 🏳️
+                - generic [ref=e637]: JE
+              - generic [ref=e638]: Jersey
+              - generic [ref=e639]: soon
+            - link "🏳️ JM Jamaica soon" [ref=e640] [cursor=pointer]:
+              - /url: /?country=JM
+              - generic [ref=e641]:
+                - generic [ref=e642]: 🏳️
+                - generic [ref=e643]: JM
+              - generic [ref=e644]: Jamaica
+              - generic [ref=e645]: soon
+            - link "🏳️ JO Jordan live" [ref=e646] [cursor=pointer]:
+              - /url: /?country=JO
+              - generic [ref=e647]:
+                - generic [ref=e648]: 🏳️
+                - generic [ref=e649]: JO
+              - generic [ref=e650]: Jordan
+              - generic [ref=e651]: live
+            - link "🏳️ JP Japan live" [ref=e652] [cursor=pointer]:
+              - /url: /?country=JP
+              - generic [ref=e653]:
+                - generic [ref=e654]: 🏳️
+                - generic [ref=e655]: JP
+              - generic [ref=e656]: Japan
+              - generic [ref=e657]: live
+            - link "🏳️ KE Kenya live" [ref=e658] [cursor=pointer]:
+              - /url: /?country=KE
+              - generic [ref=e659]:
+                - generic [ref=e660]: 🏳️
+                - generic [ref=e661]: KE
+              - generic [ref=e662]: Kenya
+              - generic [ref=e663]: live
+            - link "🏳️ KG Kyrgyzstan live" [ref=e664] [cursor=pointer]:
+              - /url: /?country=KG
+              - generic [ref=e665]:
+                - generic [ref=e666]: 🏳️
+                - generic [ref=e667]: KG
+              - generic [ref=e668]: Kyrgyzstan
+              - generic [ref=e669]: live
+            - link "🏳️ KH Cambodia live" [ref=e670] [cursor=pointer]:
+              - /url: /?country=KH
+              - generic [ref=e671]:
+                - generic [ref=e672]: 🏳️
+                - generic [ref=e673]: KH
+              - generic [ref=e674]: Cambodia
+              - generic [ref=e675]: live
+            - link "🏳️ KI Kiribati soon" [ref=e676] [cursor=pointer]:
+              - /url: /?country=KI
+              - generic [ref=e677]:
+                - generic [ref=e678]: 🏳️
+                - generic [ref=e679]: KI
+              - generic [ref=e680]: Kiribati
+              - generic [ref=e681]: soon
+            - link "🏳️ KM Comoros soon" [ref=e682] [cursor=pointer]:
+              - /url: /?country=KM
+              - generic [ref=e683]:
+                - generic [ref=e684]: 🏳️
+                - generic [ref=e685]: KM
+              - generic [ref=e686]: Comoros
+              - generic [ref=e687]: soon
+            - link "🏳️ KN Saint Kitts and Nevis soon" [ref=e688] [cursor=pointer]:
+              - /url: /?country=KN
+              - generic [ref=e689]:
+                - generic [ref=e690]: 🏳️
+                - generic [ref=e691]: KN
+              - generic [ref=e692]: Saint Kitts and Nevis
+              - generic [ref=e693]: soon
+            - link "🏳️ KP North Korea soon" [ref=e694] [cursor=pointer]:
+              - /url: /?country=KP
+              - generic [ref=e695]:
+                - generic [ref=e696]: 🏳️
+                - generic [ref=e697]: KP
+              - generic [ref=e698]: North Korea
+              - generic [ref=e699]: soon
+            - link "🏳️ KR South Korea live" [ref=e700] [cursor=pointer]:
+              - /url: /?country=KR
+              - generic [ref=e701]:
+                - generic [ref=e702]: 🏳️
+                - generic [ref=e703]: KR
+              - generic [ref=e704]: South Korea
+              - generic [ref=e705]: live
+            - link "🏳️ KW Kuwait live" [ref=e706] [cursor=pointer]:
+              - /url: /?country=KW
+              - generic [ref=e707]:
+                - generic [ref=e708]: 🏳️
+                - generic [ref=e709]: KW
+              - generic [ref=e710]: Kuwait
+              - generic [ref=e711]: live
+            - link "🏳️ KY Cayman Islands soon" [ref=e712] [cursor=pointer]:
+              - /url: /?country=KY
+              - generic [ref=e713]:
+                - generic [ref=e714]: 🏳️
+                - generic [ref=e715]: KY
+              - generic [ref=e716]: Cayman Islands
+              - generic [ref=e717]: soon
+            - link "🏳️ KZ Kazakhstan live" [ref=e718] [cursor=pointer]:
+              - /url: /?country=KZ
+              - generic [ref=e719]:
+                - generic [ref=e720]: 🏳️
+                - generic [ref=e721]: KZ
+              - generic [ref=e722]: Kazakhstan
+              - generic [ref=e723]: live
+            - link "🏳️ LA Laos soon" [ref=e724] [cursor=pointer]:
+              - /url: /?country=LA
+              - generic [ref=e725]:
+                - generic [ref=e726]: 🏳️
+                - generic [ref=e727]: LA
+              - generic [ref=e728]: Laos
+              - generic [ref=e729]: soon
+            - link "🏳️ LB Lebanon soon" [ref=e730] [cursor=pointer]:
+              - /url: /?country=LB
+              - generic [ref=e731]:
+                - generic [ref=e732]: 🏳️
+                - generic [ref=e733]: LB
+              - generic [ref=e734]: Lebanon
+              - generic [ref=e735]: soon
+            - link "🏳️ LC Saint Lucia soon" [ref=e736] [cursor=pointer]:
+              - /url: /?country=LC
+              - generic [ref=e737]:
+                - generic [ref=e738]: 🏳️
+                - generic [ref=e739]: LC
+              - generic [ref=e740]: Saint Lucia
+              - generic [ref=e741]: soon
+            - link "🏳️ LI Liechtenstein soon" [ref=e742] [cursor=pointer]:
+              - /url: /?country=LI
+              - generic [ref=e743]:
+                - generic [ref=e744]: 🏳️
+                - generic [ref=e745]: LI
+              - generic [ref=e746]: Liechtenstein
+              - generic [ref=e747]: soon
+            - link "🏳️ LK Sri Lanka live" [ref=e748] [cursor=pointer]:
+              - /url: /?country=LK
+              - generic [ref=e749]:
+                - generic [ref=e750]: 🏳️
+                - generic [ref=e751]: LK
+              - generic [ref=e752]: Sri Lanka
+              - generic [ref=e753]: live
+            - link "🏳️ LR Liberia soon" [ref=e754] [cursor=pointer]:
+              - /url: /?country=LR
+              - generic [ref=e755]:
+                - generic [ref=e756]: 🏳️
+                - generic [ref=e757]: LR
+              - generic [ref=e758]: Liberia
+              - generic [ref=e759]: soon
+            - link "🏳️ LS Lesotho soon" [ref=e760] [cursor=pointer]:
+              - /url: /?country=LS
+              - generic [ref=e761]:
+                - generic [ref=e762]: 🏳️
+                - generic [ref=e763]: LS
+              - generic [ref=e764]: Lesotho
+              - generic [ref=e765]: soon
+            - link "🇱🇹 LT Lithuania live" [ref=e766] [cursor=pointer]:
+              - /url: /?country=LT
+              - generic [ref=e767]:
+                - generic [ref=e768]: 🇱🇹
+                - generic [ref=e769]: LT
+              - generic [ref=e770]: Lithuania
+              - generic [ref=e771]: live
+            - link "🇱🇺 LU Luxembourg live" [ref=e772] [cursor=pointer]:
+              - /url: /?country=LU
+              - generic [ref=e773]:
+                - generic [ref=e774]: 🇱🇺
+                - generic [ref=e775]: LU
+              - generic [ref=e776]: Luxembourg
+              - generic [ref=e777]: live
+            - link "🇱🇻 LV Latvia live" [ref=e778] [cursor=pointer]:
+              - /url: /?country=LV
+              - generic [ref=e779]:
+                - generic [ref=e780]: 🇱🇻
+                - generic [ref=e781]: LV
+              - generic [ref=e782]: Latvia
+              - generic [ref=e783]: live
+            - link "🏳️ LY Libya soon" [ref=e784] [cursor=pointer]:
+              - /url: /?country=LY
+              - generic [ref=e785]:
+                - generic [ref=e786]: 🏳️
+                - generic [ref=e787]: LY
+              - generic [ref=e788]: Libya
+              - generic [ref=e789]: soon
+            - link "🏳️ MA Morocco live" [ref=e790] [cursor=pointer]:
+              - /url: /?country=MA
+              - generic [ref=e791]:
+                - generic [ref=e792]: 🏳️
+                - generic [ref=e793]: MA
+              - generic [ref=e794]: Morocco
+              - generic [ref=e795]: live
+            - link "🏳️ MC Monaco soon" [ref=e796] [cursor=pointer]:
+              - /url: /?country=MC
+              - generic [ref=e797]:
+                - generic [ref=e798]: 🏳️
+                - generic [ref=e799]: MC
+              - generic [ref=e800]: Monaco
+              - generic [ref=e801]: soon
+            - link "🏳️ MD Moldova live" [ref=e802] [cursor=pointer]:
+              - /url: /?country=MD
+              - generic [ref=e803]:
+                - generic [ref=e804]: 🏳️
+                - generic [ref=e805]: MD
+              - generic [ref=e806]: Moldova
+              - generic [ref=e807]: live
+            - link "🏳️ ME Montenegro live" [ref=e808] [cursor=pointer]:
+              - /url: /?country=ME
+              - generic [ref=e809]:
+                - generic [ref=e810]: 🏳️
+                - generic [ref=e811]: ME
+              - generic [ref=e812]: Montenegro
+              - generic [ref=e813]: live
+            - link "🏳️ MF Saint Martin soon" [ref=e814] [cursor=pointer]:
+              - /url: /?country=MF
+              - generic [ref=e815]:
+                - generic [ref=e816]: 🏳️
+                - generic [ref=e817]: MF
+              - generic [ref=e818]: Saint Martin
+              - generic [ref=e819]: soon
+            - link "🏳️ MG Madagascar live" [ref=e820] [cursor=pointer]:
+              - /url: /?country=MG
+              - generic [ref=e821]:
+                - generic [ref=e822]: 🏳️
+                - generic [ref=e823]: MG
+              - generic [ref=e824]: Madagascar
+              - generic [ref=e825]: live
+            - link "🏳️ MH Marshall Islands soon" [ref=e826] [cursor=pointer]:
+              - /url: /?country=MH
+              - generic [ref=e827]:
+                - generic [ref=e828]: 🏳️
+                - generic [ref=e829]: MH
+              - generic [ref=e830]: Marshall Islands
+              - generic [ref=e831]: soon
+            - link "🏳️ MK North Macedonia live" [ref=e832] [cursor=pointer]:
+              - /url: /?country=MK
+              - generic [ref=e833]:
+                - generic [ref=e834]: 🏳️
+                - generic [ref=e835]: MK
+              - generic [ref=e836]: North Macedonia
+              - generic [ref=e837]: live
+            - link "🏳️ ML Mali soon" [ref=e838] [cursor=pointer]:
+              - /url: /?country=ML
+              - generic [ref=e839]:
+                - generic [ref=e840]: 🏳️
+                - generic [ref=e841]: ML
+              - generic [ref=e842]: Mali
+              - generic [ref=e843]: soon
+            - link "🏳️ MM Myanmar live" [ref=e844] [cursor=pointer]:
+              - /url: /?country=MM
+              - generic [ref=e845]:
+                - generic [ref=e846]: 🏳️
+                - generic [ref=e847]: MM
+              - generic [ref=e848]: Myanmar
+              - generic [ref=e849]: live
+            - link "🏳️ MN Mongolia soon" [ref=e850] [cursor=pointer]:
+              - /url: /?country=MN
+              - generic [ref=e851]:
+                - generic [ref=e852]: 🏳️
+                - generic [ref=e853]: MN
+              - generic [ref=e854]: Mongolia
+              - generic [ref=e855]: soon
+            - link "🏳️ MO Macao soon" [ref=e856] [cursor=pointer]:
+              - /url: /?country=MO
+              - generic [ref=e857]:
+                - generic [ref=e858]: 🏳️
+                - generic [ref=e859]: MO
+              - generic [ref=e860]: Macao
+              - generic [ref=e861]: soon
+            - link "🏳️ MP Northern Mariana Islands soon" [ref=e862] [cursor=pointer]:
+              - /url: /?country=MP
+              - generic [ref=e863]:
+                - generic [ref=e864]: 🏳️
+                - generic [ref=e865]: MP
+              - generic [ref=e866]: Northern Mariana Islands
+              - generic [ref=e867]: soon
+            - link "🏳️ MQ Martinique soon" [ref=e868] [cursor=pointer]:
+              - /url: /?country=MQ
+              - generic [ref=e869]:
+                - generic [ref=e870]: 🏳️
+                - generic [ref=e871]: MQ
+              - generic [ref=e872]: Martinique
+              - generic [ref=e873]: soon
+            - link "🏳️ MR Mauritania soon" [ref=e874] [cursor=pointer]:
+              - /url: /?country=MR
+              - generic [ref=e875]:
+                - generic [ref=e876]: 🏳️
+                - generic [ref=e877]: MR
+              - generic [ref=e878]: Mauritania
+              - generic [ref=e879]: soon
+            - link "🏳️ MS Montserrat soon" [ref=e880] [cursor=pointer]:
+              - /url: /?country=MS
+              - generic [ref=e881]:
+                - generic [ref=e882]: 🏳️
+                - generic [ref=e883]: MS
+              - generic [ref=e884]: Montserrat
+              - generic [ref=e885]: soon
+            - link "🇲🇹 MT Malta live" [ref=e886] [cursor=pointer]:
+              - /url: /?country=MT
+              - generic [ref=e887]:
+                - generic [ref=e888]: 🇲🇹
+                - generic [ref=e889]: MT
+              - generic [ref=e890]: Malta
+              - generic [ref=e891]: live
+            - link "🏳️ MU Mauritius live" [ref=e892] [cursor=pointer]:
+              - /url: /?country=MU
+              - generic [ref=e893]:
+                - generic [ref=e894]: 🏳️
+                - generic [ref=e895]: MU
+              - generic [ref=e896]: Mauritius
+              - generic [ref=e897]: live
+            - link "🏳️ MV Maldives soon" [ref=e898] [cursor=pointer]:
+              - /url: /?country=MV
+              - generic [ref=e899]:
+                - generic [ref=e900]: 🏳️
+                - generic [ref=e901]: MV
+              - generic [ref=e902]: Maldives
+              - generic [ref=e903]: soon
+            - link "🏳️ MW Malawi soon" [ref=e904] [cursor=pointer]:
+              - /url: /?country=MW
+              - generic [ref=e905]:
+                - generic [ref=e906]: 🏳️
+                - generic [ref=e907]: MW
+              - generic [ref=e908]: Malawi
+              - generic [ref=e909]: soon
+            - link "🏳️ MX Mexico live" [ref=e910] [cursor=pointer]:
+              - /url: /?country=MX
+              - generic [ref=e911]:
+                - generic [ref=e912]: 🏳️
+                - generic [ref=e913]: MX
+              - generic [ref=e914]: Mexico
+              - generic [ref=e915]: live
+            - link "🏳️ MY Malaysia live" [ref=e916] [cursor=pointer]:
+              - /url: /?country=MY
+              - generic [ref=e917]:
+                - generic [ref=e918]: 🏳️
+                - generic [ref=e919]: MY
+              - generic [ref=e920]: Malaysia
+              - generic [ref=e921]: live
+            - link "🏳️ MZ Mozambique live" [ref=e922] [cursor=pointer]:
+              - /url: /?country=MZ
+              - generic [ref=e923]:
+                - generic [ref=e924]: 🏳️
+                - generic [ref=e925]: MZ
+              - generic [ref=e926]: Mozambique
+              - generic [ref=e927]: live
+            - link "🏳️ NA Namibia soon" [ref=e928] [cursor=pointer]:
+              - /url: /?country=NA
+              - generic [ref=e929]:
+                - generic [ref=e930]: 🏳️
+                - generic [ref=e931]: NA
+              - generic [ref=e932]: Namibia
+              - generic [ref=e933]: soon
+            - link "🏳️ NC New Caledonia soon" [ref=e934] [cursor=pointer]:
+              - /url: /?country=NC
+              - generic [ref=e935]:
+                - generic [ref=e936]: 🏳️
+                - generic [ref=e937]: NC
+              - generic [ref=e938]: New Caledonia
+              - generic [ref=e939]: soon
+            - link "🏳️ NE Niger soon" [ref=e940] [cursor=pointer]:
+              - /url: /?country=NE
+              - generic [ref=e941]:
+                - generic [ref=e942]: 🏳️
+                - generic [ref=e943]: NE
+              - generic [ref=e944]: Niger
+              - generic [ref=e945]: soon
+            - link "🏳️ NF Norfolk Island soon" [ref=e946] [cursor=pointer]:
+              - /url: /?country=NF
+              - generic [ref=e947]:
+                - generic [ref=e948]: 🏳️
+                - generic [ref=e949]: NF
+              - generic [ref=e950]: Norfolk Island
+              - generic [ref=e951]: soon
+            - link "🏳️ NG Nigeria live" [ref=e952] [cursor=pointer]:
+              - /url: /?country=NG
+              - generic [ref=e953]:
+                - generic [ref=e954]: 🏳️
+                - generic [ref=e955]: NG
+              - generic [ref=e956]: Nigeria
+              - generic [ref=e957]: live
+            - link "🏳️ NI Nicaragua soon" [ref=e958] [cursor=pointer]:
+              - /url: /?country=NI
+              - generic [ref=e959]:
+                - generic [ref=e960]: 🏳️
+                - generic [ref=e961]: NI
+              - generic [ref=e962]: Nicaragua
+              - generic [ref=e963]: soon
+            - link "🇳🇱 NL Netherlands live" [ref=e964] [cursor=pointer]:
+              - /url: /?country=NL
+              - generic [ref=e965]:
+                - generic [ref=e966]: 🇳🇱
+                - generic [ref=e967]: NL
+              - generic [ref=e968]: Netherlands
+              - generic [ref=e969]: live
+            - link "🇳🇴 NO Norway live" [ref=e970] [cursor=pointer]:
+              - /url: /?country=NO
+              - generic [ref=e971]:
+                - generic [ref=e972]: 🇳🇴
+                - generic [ref=e973]: "NO"
+              - generic [ref=e974]: Norway
+              - generic [ref=e975]: live
+            - link "🏳️ NP Nepal live" [ref=e976] [cursor=pointer]:
+              - /url: /?country=NP
+              - generic [ref=e977]:
+                - generic [ref=e978]: 🏳️
+                - generic [ref=e979]: NP
+              - generic [ref=e980]: Nepal
+              - generic [ref=e981]: live
+            - link "🏳️ NR Nauru soon" [ref=e982] [cursor=pointer]:
+              - /url: /?country=NR
+              - generic [ref=e983]:
+                - generic [ref=e984]: 🏳️
+                - generic [ref=e985]: NR
+              - generic [ref=e986]: Nauru
+              - generic [ref=e987]: soon
+            - link "🏳️ NU Niue soon" [ref=e988] [cursor=pointer]:
+              - /url: /?country=NU
+              - generic [ref=e989]:
+                - generic [ref=e990]: 🏳️
+                - generic [ref=e991]: NU
+              - generic [ref=e992]: Niue
+              - generic [ref=e993]: soon
+            - link "🏳️ NZ New Zealand live" [ref=e994] [cursor=pointer]:
+              - /url: /?country=NZ
+              - generic [ref=e995]:
+                - generic [ref=e996]: 🏳️
+                - generic [ref=e997]: NZ
+              - generic [ref=e998]: New Zealand
+              - generic [ref=e999]: live
+            - link "🏳️ OM Oman soon" [ref=e1000] [cursor=pointer]:
+              - /url: /?country=OM
+              - generic [ref=e1001]:
+                - generic [ref=e1002]: 🏳️
+                - generic [ref=e1003]: OM
+              - generic [ref=e1004]: Oman
+              - generic [ref=e1005]: soon
+            - link "🏳️ PA Panama soon" [ref=e1006] [cursor=pointer]:
+              - /url: /?country=PA
+              - generic [ref=e1007]:
+                - generic [ref=e1008]: 🏳️
+                - generic [ref=e1009]: PA
+              - generic [ref=e1010]: Panama
+              - generic [ref=e1011]: soon
+            - link "🏳️ PE Peru live" [ref=e1012] [cursor=pointer]:
+              - /url: /?country=PE
+              - generic [ref=e1013]:
+                - generic [ref=e1014]: 🏳️
+                - generic [ref=e1015]: PE
+              - generic [ref=e1016]: Peru
+              - generic [ref=e1017]: live
+            - link "🏳️ PF French Polynesia soon" [ref=e1018] [cursor=pointer]:
+              - /url: /?country=PF
+              - generic [ref=e1019]:
+                - generic [ref=e1020]: 🏳️
+                - generic [ref=e1021]: PF
+              - generic [ref=e1022]: French Polynesia
+              - generic [ref=e1023]: soon
+            - link "🏳️ PG Papua New Guinea soon" [ref=e1024] [cursor=pointer]:
+              - /url: /?country=PG
+              - generic [ref=e1025]:
+                - generic [ref=e1026]: 🏳️
+                - generic [ref=e1027]: PG
+              - generic [ref=e1028]: Papua New Guinea
+              - generic [ref=e1029]: soon
+            - link "🏳️ PH Philippines live" [ref=e1030] [cursor=pointer]:
+              - /url: /?country=PH
+              - generic [ref=e1031]:
+                - generic [ref=e1032]: 🏳️
+                - generic [ref=e1033]: PH
+              - generic [ref=e1034]: Philippines
+              - generic [ref=e1035]: live
+            - link "🏳️ PK Pakistan live" [ref=e1036] [cursor=pointer]:
+              - /url: /?country=PK
+              - generic [ref=e1037]:
+                - generic [ref=e1038]: 🏳️
+                - generic [ref=e1039]: PK
+              - generic [ref=e1040]: Pakistan
+              - generic [ref=e1041]: live
+            - link "🇵🇱 PL Poland live" [ref=e1042] [cursor=pointer]:
+              - /url: /?country=PL
+              - generic [ref=e1043]:
+                - generic [ref=e1044]: 🇵🇱
+                - generic [ref=e1045]: PL
+              - generic [ref=e1046]: Poland
+              - generic [ref=e1047]: live
+            - link "🏳️ PM Saint Pierre and Miquelon soon" [ref=e1048] [cursor=pointer]:
+              - /url: /?country=PM
+              - generic [ref=e1049]:
+                - generic [ref=e1050]: 🏳️
+                - generic [ref=e1051]: PM
+              - generic [ref=e1052]: Saint Pierre and Miquelon
+              - generic [ref=e1053]: soon
+            - link "🏳️ PN Pitcairn soon" [ref=e1054] [cursor=pointer]:
+              - /url: /?country=PN
+              - generic [ref=e1055]:
+                - generic [ref=e1056]: 🏳️
+                - generic [ref=e1057]: PN
+              - generic [ref=e1058]: Pitcairn
+              - generic [ref=e1059]: soon
+            - link "🏳️ PR Puerto Rico soon" [ref=e1060] [cursor=pointer]:
+              - /url: /?country=PR
+              - generic [ref=e1061]:
+                - generic [ref=e1062]: 🏳️
+                - generic [ref=e1063]: PR
+              - generic [ref=e1064]: Puerto Rico
+              - generic [ref=e1065]: soon
+            - link "🏳️ PS Palestine soon" [ref=e1066] [cursor=pointer]:
+              - /url: /?country=PS
+              - generic [ref=e1067]:
+                - generic [ref=e1068]: 🏳️
+                - generic [ref=e1069]: PS
+              - generic [ref=e1070]: Palestine
+              - generic [ref=e1071]: soon
+            - link "🇵🇹 PT Portugal live" [ref=e1072] [cursor=pointer]:
+              - /url: /?country=PT
+              - generic [ref=e1073]:
+                - generic [ref=e1074]: 🇵🇹
+                - generic [ref=e1075]: PT
+              - generic [ref=e1076]: Portugal
+              - generic [ref=e1077]: live
+            - link "🏳️ PW Palau soon" [ref=e1078] [cursor=pointer]:
+              - /url: /?country=PW
+              - generic [ref=e1079]:
+                - generic [ref=e1080]: 🏳️
+                - generic [ref=e1081]: PW
+              - generic [ref=e1082]: Palau
+              - generic [ref=e1083]: soon
+            - link "🏳️ PY Paraguay live" [ref=e1084] [cursor=pointer]:
+              - /url: /?country=PY
+              - generic [ref=e1085]:
+                - generic [ref=e1086]: 🏳️
+                - generic [ref=e1087]: PY
+              - generic [ref=e1088]: Paraguay
+              - generic [ref=e1089]: live
+            - link "🏳️ QA Qatar live" [ref=e1090] [cursor=pointer]:
+              - /url: /?country=QA
+              - generic [ref=e1091]:
+                - generic [ref=e1092]: 🏳️
+                - generic [ref=e1093]: QA
+              - generic [ref=e1094]: Qatar
+              - generic [ref=e1095]: live
+            - link "🏳️ RE Réunion soon" [ref=e1096] [cursor=pointer]:
+              - /url: /?country=RE
+              - generic [ref=e1097]:
+                - generic [ref=e1098]: 🏳️
+                - generic [ref=e1099]: RE
+              - generic [ref=e1100]: Réunion
+              - generic [ref=e1101]: soon
+            - link "🇷🇴 RO Romania live" [ref=e1102] [cursor=pointer]:
+              - /url: /?country=RO
+              - generic [ref=e1103]:
+                - generic [ref=e1104]: 🇷🇴
+                - generic [ref=e1105]: RO
+              - generic [ref=e1106]: Romania
+              - generic [ref=e1107]: live
+            - link "🏳️ RS Serbia live" [ref=e1108] [cursor=pointer]:
+              - /url: /?country=RS
+              - generic [ref=e1109]:
+                - generic [ref=e1110]: 🏳️
+                - generic [ref=e1111]: RS
+              - generic [ref=e1112]: Serbia
+              - generic [ref=e1113]: live
+            - link "🏳️ RU Russia live" [ref=e1114] [cursor=pointer]:
+              - /url: /?country=RU
+              - generic [ref=e1115]:
+                - generic [ref=e1116]: 🏳️
+                - generic [ref=e1117]: RU
+              - generic [ref=e1118]: Russia
+              - generic [ref=e1119]: live
+            - link "🏳️ RW Rwanda soon" [ref=e1120] [cursor=pointer]:
+              - /url: /?country=RW
+              - generic [ref=e1121]:
+                - generic [ref=e1122]: 🏳️
+                - generic [ref=e1123]: RW
+              - generic [ref=e1124]: Rwanda
+              - generic [ref=e1125]: soon
+            - link "🏳️ SA Saudi Arabia live" [ref=e1126] [cursor=pointer]:
+              - /url: /?country=SA
+              - generic [ref=e1127]:
+                - generic [ref=e1128]: 🏳️
+                - generic [ref=e1129]: SA
+              - generic [ref=e1130]: Saudi Arabia
+              - generic [ref=e1131]: live
+            - link "🏳️ SB Solomon Islands soon" [ref=e1132] [cursor=pointer]:
+              - /url: /?country=SB
+              - generic [ref=e1133]:
+                - generic [ref=e1134]: 🏳️
+                - generic [ref=e1135]: SB
+              - generic [ref=e1136]: Solomon Islands
+              - generic [ref=e1137]: soon
+            - link "🏳️ SC Seychelles live" [ref=e1138] [cursor=pointer]:
+              - /url: /?country=SC
+              - generic [ref=e1139]:
+                - generic [ref=e1140]: 🏳️
+                - generic [ref=e1141]: SC
+              - generic [ref=e1142]: Seychelles
+              - generic [ref=e1143]: live
+            - link "🏳️ SD Sudan soon" [ref=e1144] [cursor=pointer]:
+              - /url: /?country=SD
+              - generic [ref=e1145]:
+                - generic [ref=e1146]: 🏳️
+                - generic [ref=e1147]: SD
+              - generic [ref=e1148]: Sudan
+              - generic [ref=e1149]: soon
+            - link "🇸🇪 SE Sweden live" [ref=e1150] [cursor=pointer]:
+              - /url: /?country=SE
+              - generic [ref=e1151]:
+                - generic [ref=e1152]: 🇸🇪
+                - generic [ref=e1153]: SE
+              - generic [ref=e1154]: Sweden
+              - generic [ref=e1155]: live
+            - link "🏳️ SG Singapore live" [ref=e1156] [cursor=pointer]:
+              - /url: /?country=SG
+              - generic [ref=e1157]:
+                - generic [ref=e1158]: 🏳️
+                - generic [ref=e1159]: SG
+              - generic [ref=e1160]: Singapore
+              - generic [ref=e1161]: live
+            - link "🏳️ SH Saint Helena soon" [ref=e1162] [cursor=pointer]:
+              - /url: /?country=SH
+              - generic [ref=e1163]:
+                - generic [ref=e1164]: 🏳️
+                - generic [ref=e1165]: SH
+              - generic [ref=e1166]: Saint Helena
+              - generic [ref=e1167]: soon
+            - link "🇸🇮 SI Slovenia live" [ref=e1168] [cursor=pointer]:
+              - /url: /?country=SI
+              - generic [ref=e1169]:
+                - generic [ref=e1170]: 🇸🇮
+                - generic [ref=e1171]: SI
+              - generic [ref=e1172]: Slovenia
+              - generic [ref=e1173]: live
+            - link "🇸🇰 SK Slovakia live" [ref=e1174] [cursor=pointer]:
+              - /url: /?country=SK
+              - generic [ref=e1175]:
+                - generic [ref=e1176]: 🇸🇰
+                - generic [ref=e1177]: SK
+              - generic [ref=e1178]: Slovakia
+              - generic [ref=e1179]: live
+            - link "🏳️ SL Sierra Leone soon" [ref=e1180] [cursor=pointer]:
+              - /url: /?country=SL
+              - generic [ref=e1181]:
+                - generic [ref=e1182]: 🏳️
+                - generic [ref=e1183]: SL
+              - generic [ref=e1184]: Sierra Leone
+              - generic [ref=e1185]: soon
+            - link "🏳️ SM San Marino soon" [ref=e1186] [cursor=pointer]:
+              - /url: /?country=SM
+              - generic [ref=e1187]:
+                - generic [ref=e1188]: 🏳️
+                - generic [ref=e1189]: SM
+              - generic [ref=e1190]: San Marino
+              - generic [ref=e1191]: soon
+            - link "🏳️ SN Senegal live" [ref=e1192] [cursor=pointer]:
+              - /url: /?country=SN
+              - generic [ref=e1193]:
+                - generic [ref=e1194]: 🏳️
+                - generic [ref=e1195]: SN
+              - generic [ref=e1196]: Senegal
+              - generic [ref=e1197]: live
+            - link "🏳️ SO Somalia soon" [ref=e1198] [cursor=pointer]:
+              - /url: /?country=SO
+              - generic [ref=e1199]:
+                - generic [ref=e1200]: 🏳️
+                - generic [ref=e1201]: SO
+              - generic [ref=e1202]: Somalia
+              - generic [ref=e1203]: soon
+            - link "🏳️ SR Suriname soon" [ref=e1204] [cursor=pointer]:
+              - /url: /?country=SR
+              - generic [ref=e1205]:
+                - generic [ref=e1206]: 🏳️
+                - generic [ref=e1207]: SR
+              - generic [ref=e1208]: Suriname
+              - generic [ref=e1209]: soon
+            - link "🏳️ SS South Sudan soon" [ref=e1210] [cursor=pointer]:
+              - /url: /?country=SS
+              - generic [ref=e1211]:
+                - generic [ref=e1212]: 🏳️
+                - generic [ref=e1213]: SS
+              - generic [ref=e1214]: South Sudan
+              - generic [ref=e1215]: soon
+            - link "🏳️ ST São Tomé and Príncipe soon" [ref=e1216] [cursor=pointer]:
+              - /url: /?country=ST
+              - generic [ref=e1217]:
+                - generic [ref=e1218]: 🏳️
+                - generic [ref=e1219]: ST
+              - generic [ref=e1220]: São Tomé and Príncipe
+              - generic [ref=e1221]: soon
+            - link "🏳️ SV El Salvador soon" [ref=e1222] [cursor=pointer]:
+              - /url: /?country=SV
+              - generic [ref=e1223]:
+                - generic [ref=e1224]: 🏳️
+                - generic [ref=e1225]: SV
+              - generic [ref=e1226]: El Salvador
+              - generic [ref=e1227]: soon
+            - link "🏳️ SX Sint Maarten soon" [ref=e1228] [cursor=pointer]:
+              - /url: /?country=SX
+              - generic [ref=e1229]:
+                - generic [ref=e1230]: 🏳️
+                - generic [ref=e1231]: SX
+              - generic [ref=e1232]: Sint Maarten
+              - generic [ref=e1233]: soon
+            - link "🏳️ SY Syria soon" [ref=e1234] [cursor=pointer]:
+              - /url: /?country=SY
+              - generic [ref=e1235]:
+                - generic [ref=e1236]: 🏳️
+                - generic [ref=e1237]: SY
+              - generic [ref=e1238]: Syria
+              - generic [ref=e1239]: soon
+            - link "🏳️ SZ Eswatini soon" [ref=e1240] [cursor=pointer]:
+              - /url: /?country=SZ
+              - generic [ref=e1241]:
+                - generic [ref=e1242]: 🏳️
+                - generic [ref=e1243]: SZ
+              - generic [ref=e1244]: Eswatini
+              - generic [ref=e1245]: soon
+            - link "🏳️ TC Turks and Caicos Islands soon" [ref=e1246] [cursor=pointer]:
+              - /url: /?country=TC
+              - generic [ref=e1247]:
+                - generic [ref=e1248]: 🏳️
+                - generic [ref=e1249]: TC
+              - generic [ref=e1250]: Turks and Caicos Islands
+              - generic [ref=e1251]: soon
+            - link "🏳️ TD Chad soon" [ref=e1252] [cursor=pointer]:
+              - /url: /?country=TD
+              - generic [ref=e1253]:
+                - generic [ref=e1254]: 🏳️
+                - generic [ref=e1255]: TD
+              - generic [ref=e1256]: Chad
+              - generic [ref=e1257]: soon
+            - link "🏳️ TG Togo soon" [ref=e1258] [cursor=pointer]:
+              - /url: /?country=TG
+              - generic [ref=e1259]:
+                - generic [ref=e1260]: 🏳️
+                - generic [ref=e1261]: TG
+              - generic [ref=e1262]: Togo
+              - generic [ref=e1263]: soon
+            - link "🏳️ TH Thailand live" [ref=e1264] [cursor=pointer]:
+              - /url: /?country=TH
+              - generic [ref=e1265]:
+                - generic [ref=e1266]: 🏳️
+                - generic [ref=e1267]: TH
+              - generic [ref=e1268]: Thailand
+              - generic [ref=e1269]: live
+            - link "🏳️ TJ Tajikistan soon" [ref=e1270] [cursor=pointer]:
+              - /url: /?country=TJ
+              - generic [ref=e1271]:
+                - generic [ref=e1272]: 🏳️
+                - generic [ref=e1273]: TJ
+              - generic [ref=e1274]: Tajikistan
+              - generic [ref=e1275]: soon
+            - link "🏳️ TK Tokelau soon" [ref=e1276] [cursor=pointer]:
+              - /url: /?country=TK
+              - generic [ref=e1277]:
+                - generic [ref=e1278]: 🏳️
+                - generic [ref=e1279]: TK
+              - generic [ref=e1280]: Tokelau
+              - generic [ref=e1281]: soon
+            - link "🏳️ TL Timor-Leste soon" [ref=e1282] [cursor=pointer]:
+              - /url: /?country=TL
+              - generic [ref=e1283]:
+                - generic [ref=e1284]: 🏳️
+                - generic [ref=e1285]: TL
+              - generic [ref=e1286]: Timor-Leste
+              - generic [ref=e1287]: soon
+            - link "🏳️ TM Turkmenistan soon" [ref=e1288] [cursor=pointer]:
+              - /url: /?country=TM
+              - generic [ref=e1289]:
+                - generic [ref=e1290]: 🏳️
+                - generic [ref=e1291]: TM
+              - generic [ref=e1292]: Turkmenistan
+              - generic [ref=e1293]: soon
+            - link "🏳️ TN Tunisia live" [ref=e1294] [cursor=pointer]:
+              - /url: /?country=TN
+              - generic [ref=e1295]:
+                - generic [ref=e1296]: 🏳️
+                - generic [ref=e1297]: TN
+              - generic [ref=e1298]: Tunisia
+              - generic [ref=e1299]: live
+            - link "🏳️ TO Tonga soon" [ref=e1300] [cursor=pointer]:
+              - /url: /?country=TO
+              - generic [ref=e1301]:
+                - generic [ref=e1302]: 🏳️
+                - generic [ref=e1303]: TO
+              - generic [ref=e1304]: Tonga
+              - generic [ref=e1305]: soon
+            - link "🇹🇷 TR Türkiye live" [ref=e1306] [cursor=pointer]:
+              - /url: /?country=TR
+              - generic [ref=e1307]:
+                - generic [ref=e1308]: 🇹🇷
+                - generic [ref=e1309]: TR
+              - generic [ref=e1310]: Türkiye
+              - generic [ref=e1311]: live
+            - link "🏳️ TT Trinidad and Tobago soon" [ref=e1312] [cursor=pointer]:
+              - /url: /?country=TT
+              - generic [ref=e1313]:
+                - generic [ref=e1314]: 🏳️
+                - generic [ref=e1315]: TT
+              - generic [ref=e1316]: Trinidad and Tobago
+              - generic [ref=e1317]: soon
+            - link "🏳️ TV Tuvalu soon" [ref=e1318] [cursor=pointer]:
+              - /url: /?country=TV
+              - generic [ref=e1319]:
+                - generic [ref=e1320]: 🏳️
+                - generic [ref=e1321]: TV
+              - generic [ref=e1322]: Tuvalu
+              - generic [ref=e1323]: soon
+            - link "🏳️ TW Taiwan live" [ref=e1324] [cursor=pointer]:
+              - /url: /?country=TW
+              - generic [ref=e1325]:
+                - generic [ref=e1326]: 🏳️
+                - generic [ref=e1327]: TW
+              - generic [ref=e1328]: Taiwan
+              - generic [ref=e1329]: live
+            - link "🏳️ TZ Tanzania live" [ref=e1330] [cursor=pointer]:
+              - /url: /?country=TZ
+              - generic [ref=e1331]:
+                - generic [ref=e1332]: 🏳️
+                - generic [ref=e1333]: TZ
+              - generic [ref=e1334]: Tanzania
+              - generic [ref=e1335]: live
+            - link "🏳️ UA Ukraine live" [ref=e1336] [cursor=pointer]:
+              - /url: /?country=UA
+              - generic [ref=e1337]:
+                - generic [ref=e1338]: 🏳️
+                - generic [ref=e1339]: UA
+              - generic [ref=e1340]: Ukraine
+              - generic [ref=e1341]: live
+            - link "🏳️ UG Uganda soon" [ref=e1342] [cursor=pointer]:
+              - /url: /?country=UG
+              - generic [ref=e1343]:
+                - generic [ref=e1344]: 🏳️
+                - generic [ref=e1345]: UG
+              - generic [ref=e1346]: Uganda
+              - generic [ref=e1347]: soon
+            - link "🇬🇧 UK United Kingdom live" [ref=e1348] [cursor=pointer]:
+              - /url: /?country=UK
+              - generic [ref=e1349]:
+                - generic [ref=e1350]: 🇬🇧
+                - generic [ref=e1351]: UK
+              - generic [ref=e1352]: United Kingdom
+              - generic [ref=e1353]: live
+            - link "🇺🇸 US United States live" [ref=e1354] [cursor=pointer]:
+              - /url: /?country=US
+              - generic [ref=e1355]:
+                - generic [ref=e1356]: 🇺🇸
+                - generic [ref=e1357]: US
+              - generic [ref=e1358]: United States
+              - generic [ref=e1359]: live
+            - link "🏳️ UY Uruguay live" [ref=e1360] [cursor=pointer]:
+              - /url: /?country=UY
+              - generic [ref=e1361]:
+                - generic [ref=e1362]: 🏳️
+                - generic [ref=e1363]: UY
+              - generic [ref=e1364]: Uruguay
+              - generic [ref=e1365]: live
+            - link "🏳️ UZ Uzbekistan live" [ref=e1366] [cursor=pointer]:
+              - /url: /?country=UZ
+              - generic [ref=e1367]:
+                - generic [ref=e1368]: 🏳️
+                - generic [ref=e1369]: UZ
+              - generic [ref=e1370]: Uzbekistan
+              - generic [ref=e1371]: live
+            - link "🏳️ VA Vatican City soon" [ref=e1372] [cursor=pointer]:
+              - /url: /?country=VA
+              - generic [ref=e1373]:
+                - generic [ref=e1374]: 🏳️
+                - generic [ref=e1375]: VA
+              - generic [ref=e1376]: Vatican City
+              - generic [ref=e1377]: soon
+            - link "🏳️ VC Saint Vincent and the Grenadines soon" [ref=e1378] [cursor=pointer]:
+              - /url: /?country=VC
+              - generic [ref=e1379]:
+                - generic [ref=e1380]: 🏳️
+                - generic [ref=e1381]: VC
+              - generic [ref=e1382]: Saint Vincent and the Grenadines
+              - generic [ref=e1383]: soon
+            - link "🏳️ VE Venezuela soon" [ref=e1384] [cursor=pointer]:
+              - /url: /?country=VE
+              - generic [ref=e1385]:
+                - generic [ref=e1386]: 🏳️
+                - generic [ref=e1387]: VE
+              - generic [ref=e1388]: Venezuela
+              - generic [ref=e1389]: soon
+            - link "🏳️ VG British Virgin Islands soon" [ref=e1390] [cursor=pointer]:
+              - /url: /?country=VG
+              - generic [ref=e1391]:
+                - generic [ref=e1392]: 🏳️
+                - generic [ref=e1393]: VG
+              - generic [ref=e1394]: British Virgin Islands
+              - generic [ref=e1395]: soon
+            - link "🏳️ VI US Virgin Islands soon" [ref=e1396] [cursor=pointer]:
+              - /url: /?country=VI
+              - generic [ref=e1397]:
+                - generic [ref=e1398]: 🏳️
+                - generic [ref=e1399]: VI
+              - generic [ref=e1400]: US Virgin Islands
+              - generic [ref=e1401]: soon
+            - link "🏳️ VN Vietnam live" [ref=e1402] [cursor=pointer]:
+              - /url: /?country=VN
+              - generic [ref=e1403]:
+                - generic [ref=e1404]: 🏳️
+                - generic [ref=e1405]: VN
+              - generic [ref=e1406]: Vietnam
+              - generic [ref=e1407]: live
+            - link "🏳️ VU Vanuatu soon" [ref=e1408] [cursor=pointer]:
+              - /url: /?country=VU
+              - generic [ref=e1409]:
+                - generic [ref=e1410]: 🏳️
+                - generic [ref=e1411]: VU
+              - generic [ref=e1412]: Vanuatu
+              - generic [ref=e1413]: soon
+            - link "🏳️ WF Wallis and Futuna soon" [ref=e1414] [cursor=pointer]:
+              - /url: /?country=WF
+              - generic [ref=e1415]:
+                - generic [ref=e1416]: 🏳️
+                - generic [ref=e1417]: WF
+              - generic [ref=e1418]: Wallis and Futuna
+              - generic [ref=e1419]: soon
+            - link "🏳️ WS Samoa soon" [ref=e1420] [cursor=pointer]:
+              - /url: /?country=WS
+              - generic [ref=e1421]:
+                - generic [ref=e1422]: 🏳️
+                - generic [ref=e1423]: WS
+              - generic [ref=e1424]: Samoa
+              - generic [ref=e1425]: soon
+            - link "🏳️ XK Kosovo live" [ref=e1426] [cursor=pointer]:
+              - /url: /?country=XK
+              - generic [ref=e1427]:
+                - generic [ref=e1428]: 🏳️
+                - generic [ref=e1429]: XK
+              - generic [ref=e1430]: Kosovo
+              - generic [ref=e1431]: live
+            - link "🏳️ YE Yemen soon" [ref=e1432] [cursor=pointer]:
+              - /url: /?country=YE
+              - generic [ref=e1433]:
+                - generic [ref=e1434]: 🏳️
+                - generic [ref=e1435]: YE
+              - generic [ref=e1436]: Yemen
+              - generic [ref=e1437]: soon
+            - link "🏳️ YT Mayotte soon" [ref=e1438] [cursor=pointer]:
+              - /url: /?country=YT
+              - generic [ref=e1439]:
+                - generic [ref=e1440]: 🏳️
+                - generic [ref=e1441]: YT
+              - generic [ref=e1442]: Mayotte
+              - generic [ref=e1443]: soon
+            - link "🏳️ ZA South Africa live" [ref=e1444] [cursor=pointer]:
+              - /url: /?country=ZA
+              - generic [ref=e1445]:
+                - generic [ref=e1446]: 🏳️
+                - generic [ref=e1447]: ZA
+              - generic [ref=e1448]: South Africa
+              - generic [ref=e1449]: live
+            - link "🏳️ ZM Zambia live" [ref=e1450] [cursor=pointer]:
+              - /url: /?country=ZM
+              - generic [ref=e1451]:
+                - generic [ref=e1452]: 🏳️
+                - generic [ref=e1453]: ZM
+              - generic [ref=e1454]: Zambia
+              - generic [ref=e1455]: live
+            - link "🏳️ ZW Zimbabwe live" [ref=e1456] [cursor=pointer]:
+              - /url: /?country=ZW
+              - generic [ref=e1457]:
+                - generic [ref=e1458]: 🏳️
+                - generic [ref=e1459]: ZW
+              - generic [ref=e1460]: Zimbabwe
+              - generic [ref=e1461]: live
+    - contentinfo [ref=e1462]: "Data sources: government registries (UK Companies House, SEC EDGAR, INSEE Sirene, Brønnøysund, PRH, ARES, Inforegister) + GLEIF + OpenCorporates + OpenSanctions. No commercial paid APIs in this MVP."
+  - alert [ref=e1463]

@@ -1,0 +1,30 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e4]:
+      - link "CreditLens" [ref=e5] [cursor=pointer]:
+        - /url: /
+      - navigation [ref=e6]:
+        - link "Search" [ref=e7] [cursor=pointer]:
+          - /url: /
+        - link "Coverage" [ref=e8] [cursor=pointer]:
+          - /url: /coverage
+        - link "API" [ref=e9] [cursor=pointer]:
+          - /url: http://localhost:8000/docs
+  - main [ref=e10]:
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - heading "B2B Credit Intelligence" [level=1] [ref=e13]
+        - paragraph [ref=e14]: Search real company data from official European, Turkish, and US government registries. Pull filed balance sheets, then run an AI-powered credit risk analysis end to end.
+      - generic [ref=e15]: "Could not load adapter status: fetch failed"
+      - generic [ref=e16]:
+        - generic [ref=e17]:
+          - generic [ref=e18]: Country
+          - combobox [ref=e19]
+          - generic [ref=e20]:
+            - button "Search by name" [ref=e21] [cursor=pointer]
+            - button "Lookup by Company Number" [ref=e22] [cursor=pointer]
+        - generic [ref=e23]:
+          - textbox "Company name..." [ref=e24]
+          - button "Search" [disabled] [ref=e25]
+      - heading "Live adapter coverage (0/0 usable)" [level=2] [ref=e27]
+  - contentinfo [ref=e28]: "Data sources: government registries (UK Companies House, SEC EDGAR, INSEE Sirene, Brønnøysund, PRH, ARES, Inforegister) + GLEIF + OpenCorporates + OpenSanctions. No commercial paid APIs in this MVP."

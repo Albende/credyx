@@ -11,3 +11,4 @@ celery[redis]>=5.4
 structlog>=24.1
 python-dotenv>=1.0
 pypdf>=4.3
+playwright>=1.40

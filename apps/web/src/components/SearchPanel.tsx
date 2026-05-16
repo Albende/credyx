@@ -24,19 +24,50 @@ export default function SearchPanel({ countries }: { countries: CountryHealth[] 
     setErr(null);
   }, [country, mode]);
 
+  // Debounced typeahead: fire api.search when user pauses typing in name mode.
+  useEffect(() => {
+    if (mode !== "name") return;
+    const q = value.trim();
+    if (q.length < 2) {
+      setResults([]);
+      setErr(null);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const data = await api.search(country, q);
+        if (!cancelled) setResults(data.results);
+      } catch (e) {
+        if (!cancelled) {
+          setResults([]);
+          setErr(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [value, country, mode]);
+
   const labels = IDENTIFIER_LABELS[country] || { primary: "Identifier", placeholder: "" };
 
   async function run(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    if (mode === "identifier") {
+      router.push(`/company/${country}/${encodeURIComponent(value.trim())}`);
+      return;
+    }
     setLoading(true);
     try {
-      if (mode === "name") {
-        const data = await api.search(country, value);
-        setResults(data.results);
-      } else {
-        router.push(`/company/${country}/${encodeURIComponent(value.trim())}`);
-      }
+      const data = await api.search(country, value);
+      setResults(data.results);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {

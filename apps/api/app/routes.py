@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.app.cache import (
@@ -21,13 +24,19 @@ from apps.api.app.cache import (
 )
 from apps.api.app.db import Company as CompanyRow
 from apps.api.app.db import IngestionJob
+from apps.api.app.db import PDFTextCache
 from apps.api.app.db import RiskAssessment as RiskAssessmentRow
 from apps.api.app.db import get_session
 from packages.adapters._base.errors import (
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
+from packages.adapters._global.opensanctions import (
+    OpenSanctionsClient,
+    SanctionHit,
+)
 from packages.adapters.registry import get_adapter, get_adapter_registry
+from packages.parsers.pdf import PDFExtractError, extract_from_url
 from packages.risk import get_risk_engine
 from packages.shared.models import (
     AdapterStatus,
@@ -37,19 +46,49 @@ from packages.shared.models import (
     RiskAssessment as RiskAssessmentDTO,
 )
 
+PDF_TEXT_CAP = 50_000
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 
 @router.get("/countries")
-async def list_countries() -> dict[str, Any]:
-    """List supported countries with adapter health."""
+async def list_countries(probe: bool = Query(False)) -> dict[str, Any]:
+    """List supported countries.
+
+    Static metadata by default (<100ms). Pass `?probe=true` for live health
+    checks across all adapters (~30s).
+    """
     registry = get_adapter_registry()
-    items: list[dict[str, Any]] = []
-    # Run health checks concurrently. Some may be slow; cap concurrency.
+
+    if not probe:
+        seen_ids: set[int] = set()
+        items: list[dict[str, Any]] = []
+        for cc, adapter in registry.items():
+            if id(adapter) in seen_ids:
+                continue
+            seen_ids.add(id(adapter))
+            is_real = type(adapter).__name__ != "NotImplementedAdapter"
+            api_key_env = getattr(adapter, "api_key_env", None)
+            api_key_present = (
+                bool(os.getenv(api_key_env)) if api_key_env else not getattr(adapter, "requires_api_key", False)
+            )
+            items.append({
+                "country_code": cc,
+                "name": getattr(adapter, "country_name", cc),
+                "status": "ok" if is_real else "not_implemented",
+                "capabilities": {"search": is_real, "lookup": is_real, "financials": is_real},
+                "requires_api_key": getattr(adapter, "requires_api_key", False),
+                "api_key_present": api_key_present,
+                "rate_limit_per_minute": getattr(adapter, "rate_limit_per_minute", None),
+                "notes": None,
+            })
+        items.sort(key=lambda x: x["country_code"])
+        return {"countries": items}
+
     sem = asyncio.Semaphore(10)
 
-    async def probe(cc: str, adapter) -> dict[str, Any]:
+    async def _probe(cc: str, adapter) -> dict[str, Any]:
         async with sem:
             try:
                 health = await asyncio.wait_for(adapter.health_check(), timeout=8.0)
@@ -63,14 +102,13 @@ async def list_countries() -> dict[str, Any]:
                 }
             return health.model_dump(mode="json")
 
-    # Dedupe — UK/GB share an instance.
-    seen_ids: set[int] = set()
+    seen_ids = set()
     tasks = []
     for cc, adapter in registry.items():
         if id(adapter) in seen_ids:
             continue
         seen_ids.add(id(adapter))
-        tasks.append(probe(cc, adapter))
+        tasks.append(_probe(cc, adapter))
     items = await asyncio.gather(*tasks)
     items.sort(key=lambda x: x["country_code"])
     return {"countries": items}
@@ -144,6 +182,13 @@ async def get_company_financials(
     identifier: str,
     years: int = Query(5, ge=1, le=20),
     force_refresh: bool = Query(False),
+    with_text: bool = Query(
+        False,
+        description=(
+            "Download PDF filings and extract their text into "
+            "structured_data['pdf_text_excerpts']. Slow."
+        ),
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     adapter = get_adapter(country)
@@ -162,7 +207,7 @@ async def get_company_financials(
             raise HTTPException(status_code=404, detail="Company not found")
         cached = await upsert_company(session, details)
 
-    if not force_refresh:
+    if not force_refresh and not with_text:
         rows = await get_cached_filings(session, cached.id)
         if rows:
             return {
@@ -171,17 +216,94 @@ async def get_company_financials(
                 "filings": [_filing_row_to_dict(r) for r in rows],
                 "cached": True,
             }
+
     try:
-        filings = await adapter.fetch_financials(identifier, years=years)
+        if with_text and hasattr(adapter, "fetch_financials_with_text"):
+            filings = await adapter.fetch_financials_with_text(identifier, years=years)
+        else:
+            filings = await adapter.fetch_financials(identifier, years=years)
     except AdapterNotImplementedError as exc:
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
+
+    if with_text:
+        await _attach_pdf_text_to_filings(session, filings)
+
     await upsert_filings(session, cached.id, filings)
     return {
         "country": country.upper(),
         "company_id": str(cached.id),
         "filings": [f.model_dump(mode="json") for f in filings],
         "cached": False,
+        "with_text": with_text,
     }
+
+
+async def _attach_pdf_text_to_filings(
+    session: AsyncSession,
+    filings: list[FinancialFilingDTO],
+    *,
+    concurrency: int = 3,
+) -> None:
+    """Fill `structured_data['pdf_text_excerpts']` for each PDF filing.
+
+    Uses the `pdf_text_cache` table to avoid re-downloading the same URL.
+    Failures are logged and the filing is left untouched.
+    """
+    targets = [
+        f for f in filings
+        if f.document_url and (f.document_format or "").lower() == "pdf"
+        and not (f.structured_data or {}).get("pdf_text_excerpts")
+    ]
+    if not targets:
+        return
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _attach(filing: FinancialFilingDTO) -> None:
+        url = filing.document_url
+        if not url:
+            return
+        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        cached_row = (
+            await session.execute(
+                select(PDFTextCache).where(PDFTextCache.url_hash == url_hash)
+            )
+        ).scalar_one_or_none()
+        if cached_row:
+            text = cached_row.text
+        else:
+            async with sem:
+                try:
+                    text = await extract_from_url(url)
+                except PDFExtractError as exc:
+                    logger.warning("PDF extract failed for %s: %s", url, exc)
+                    return
+                except Exception as exc:
+                    logger.warning("PDF download/parse failed for %s: %s", url, exc)
+                    return
+            await session.execute(
+                pg_insert(PDFTextCache)
+                .values(
+                    url_hash=url_hash,
+                    url=url[:2048],
+                    text=text,
+                    extracted_at=datetime.now(timezone.utc),
+                )
+                .on_conflict_do_update(
+                    index_elements=[PDFTextCache.url_hash],
+                    set_={
+                        "text": text,
+                        "url": url[:2048],
+                        "extracted_at": datetime.now(timezone.utc),
+                    },
+                )
+            )
+        base = dict(filing.structured_data or {})
+        base["pdf_text_excerpts"] = text[:PDF_TEXT_CAP]
+        filing.structured_data = base
+
+    await asyncio.gather(*(_attach(f) for f in targets))
+    await session.commit()
 
 
 class RiskAnalysisStartResponse(BaseModel):
@@ -244,6 +366,33 @@ async def get_job(job_id: UUID, session: AsyncSession = Depends(get_session)) ->
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+
+class ScreenRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    country: str | None = None
+    identifiers: list[str] | None = None
+    schema_: str = Field("Company", alias="schema")
+    limit: int = Field(5, ge=1, le=25)
+
+    model_config = {"populate_by_name": True}
+
+
+@router.post("/screen", response_model=list[SanctionHit])
+async def screen_entity(body: ScreenRequest) -> list[SanctionHit]:
+    """Standalone OpenSanctions screening.
+
+    Used by the UI for ad-hoc lookups; the risk engine has its own inline
+    screening path on every /risk-analysis run.
+    """
+    client = OpenSanctionsClient()
+    return await client.screen(
+        name=body.name,
+        country=body.country,
+        identifiers=body.identifiers,
+        schema=body.schema_,
+        limit=body.limit,
+    )
 
 
 @router.get("/healthz")

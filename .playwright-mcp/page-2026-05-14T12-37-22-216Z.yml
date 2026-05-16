@@ -1,0 +1,227 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - navigation [ref=e7]:
+      - list [ref=e8]:
+        - listitem
+        - listitem [ref=e9]:
+          - button "En" [ref=e11] [cursor=pointer]:
+            - text: En
+            - generic [ref=e12]: 
+        - listitem
+    - generic [ref=e14]:
+      - link "logo" [ref=e15] [cursor=pointer]:
+        - /url: /
+        - img "logo" [ref=e17]
+      - generic [ref=e18]:
+        - generic [ref=e19]: Central Balance Sheet Office
+        - generic [ref=e20]: Online consultation of annual accounts
+    - generic [ref=e21]:
+      - generic:
+        - generic:
+          - navigation
+  - main [ref=e22]:
+    - generic [ref=e24]:
+      - heading "Search company" [level=1] [ref=e27]
+      - generic [ref=e30]:
+        - tablist [ref=e33]:
+          - tab "By enterprise number" [ref=e34] [cursor=pointer]:
+            - generic [ref=e35]: By enterprise number
+          - tab "By a word in the name" [selected] [ref=e36] [cursor=pointer]:
+            - generic [ref=e37]: By a word in the name
+        - tabpanel "By a word in the name" [ref=e63]:
+          - generic [ref=e64]:
+            - generic [ref=e65]:
+              - generic [ref=e66]:
+                - generic [ref=e67]: Name
+                - 'textbox "Ex : Construct" [ref=e69]': Solvay
+              - generic [ref=e70]:
+                - generic [ref=e71]: Postal code
+                - 'textbox "Ex : 7000" [ref=e73]'
+              - generic [ref=e74]:
+                - generic [ref=e76]:
+                  - generic [ref=e78] [cursor=pointer]:
+                    - radio
+                  - generic [ref=e80]: Phonetic research
+                - generic [ref=e82]:
+                  - generic [ref=e84] [cursor=pointer]:
+                    - radio
+                  - generic [ref=e86]: Exact name
+              - generic [ref=e87]:
+                - button "Reset" [ref=e89] [cursor=pointer]
+                - button "Search" [active] [ref=e90] [cursor=pointer]:
+                  - generic [ref=e91]: Search
+            - paragraph [ref=e94]: Exceeded maximum number of results, output is limited to the first hundred results
+            - generic [ref=e97]:
+              - generic [ref=e98]:
+                - generic [ref=e99]: 100 results
+                - generic [ref=e102]:
+                  - text: 
+                  - button "" [disabled]:
+                    - generic: 
+                  - generic [ref=e103]:
+                    - button "1" [ref=e104] [cursor=pointer]
+                    - button "2" [ref=e105] [cursor=pointer]
+                    - button "3" [ref=e106] [cursor=pointer]
+                    - button "4" [ref=e107] [cursor=pointer]
+                    - button "5" [ref=e108] [cursor=pointer]
+                  - button "" [ref=e109] [cursor=pointer]:
+                    - generic [ref=e110]: 
+                  - text: 
+                - generic [ref=e111]:
+                  - text: Per page
+                  - generic [ref=e113] [cursor=pointer]:
+                    - generic [ref=e114]:
+                      - combobox
+                    - generic [ref=e115]: "10"
+                    - button "dropdown trigger" [ref=e116]:
+                      - generic [ref=e117]: 
+              - generic [ref=e118]:
+                - generic [ref=e120]:
+                  - generic [ref=e121]:
+                    - heading "ACP Immeuble rue Ernest Solvay 12 à Ixelles" [level=3] [ref=e122]
+                    - generic [ref=e123]: "1005429150"
+                    - generic [ref=e124]: Co-ownership association
+                    - list [ref=e125]:
+                      - listitem [ref=e126]: Normal situation
+                  - generic [ref=e127]:
+                    - generic [ref=e128]: 
+                    - generic [ref=e129]:
+                      - text: Rue Ernest Solvay 12
+                      - text: 1050 Ixelles Belgique
+                  - button "List of deposits" [ref=e132] [cursor=pointer]
+                - generic [ref=e134]:
+                  - generic [ref=e135]:
+                    - heading "Solvay Chemicals INC" [level=3] [ref=e136]
+                    - generic [ref=e137]: "1008574326"
+                    - generic [ref=e138]: Foreign entity
+                    - list [ref=e139]:
+                      - listitem [ref=e140]: Entity identification
+                  - generic [ref=e141]:
+                    - generic [ref=e142]: 
+                    - generic [ref=e143]:
+                      - text: Carnegie Center 504
+                      - text: 8540 Princeton Etats-Unis d'Amérique
+                  - button "List of deposits" [ref=e146] [cursor=pointer]
+                - generic [ref=e148]:
+                  - generic [ref=e149]:
+                    - heading "Association des Copropriétaires de la Résidence Ernest Solvay 449 à 4000 Liège rue Ernest-Solvay 449" [level=3] [ref=e150]
+                    - generic [ref=e151]: "1011152447"
+                    - generic [ref=e152]: Co-ownership association
+                    - list [ref=e153]:
+                      - listitem [ref=e154]: Normal situation
+                  - generic [ref=e155]:
+                    - generic [ref=e156]: 
+                    - generic [ref=e157]:
+                      - text: Rue Ernest-Solvay 449
+                      - text: 4000 Liège Belgique
+                  - button "List of deposits" [ref=e160] [cursor=pointer]
+                - generic [ref=e162]:
+                  - generic [ref=e163]:
+                    - heading "Solvay Group - Pillar 2" [level=3] [ref=e164]
+                    - generic [ref=e165]: "1012062465"
+                    - generic [ref=e166]: Company or association without legal personality
+                    - list [ref=e167]:
+                      - listitem [ref=e168]: Normal situation
+                  - generic [ref=e169]:
+                    - generic [ref=e170]: 
+                    - generic [ref=e171]:
+                      - text: Rue de Ransbeek 310
+                      - text: 1120 Bruxelles Belgique
+                  - button "List of deposits" [ref=e174] [cursor=pointer]
+                - generic [ref=e176]:
+                  - generic [ref=e177]:
+                    - heading "Association des Copropriétaires \"Résidence Laurel\" à La Hulpe, Avenue Ernest Solvay 7" [level=3] [ref=e178]
+                    - generic [ref=e179]: "1013086410"
+                    - generic [ref=e180]: Co-ownership association
+                    - list [ref=e181]:
+                      - listitem [ref=e182]: Normal situation
+                  - generic [ref=e183]:
+                    - generic [ref=e184]: 
+                    - generic [ref=e185]:
+                      - text: Avenue Ernest Solvay 7
+                      - text: 1310 La Hulpe Belgique
+                  - button "List of deposits" [ref=e188] [cursor=pointer]
+                - generic [ref=e190]:
+                  - generic [ref=e191]:
+                    - heading "ASSOCIATION DES COPROPRIETAIRES DE LA RESIDENCE SOLVAY" [level=3] [ref=e192]
+                    - generic [ref=e193]: "1020461972"
+                    - generic [ref=e194]: Co-ownership association
+                    - list [ref=e195]:
+                      - listitem [ref=e196]: Normal situation
+                  - generic [ref=e197]:
+                    - generic [ref=e198]: 
+                    - generic [ref=e199]:
+                      - text: Rue Solvay 38
+                      - text: 4100 Seraing Belgique
+                  - button "List of deposits" [ref=e202] [cursor=pointer]
+                - generic [ref=e204]:
+                  - generic [ref=e205]:
+                    - heading "SOLVAY CHEMIE BV" [level=3] [ref=e206]
+                    - generic [ref=e207]: "1022669911"
+                    - generic [ref=e208]: Foreign entity
+                    - list [ref=e209]:
+                      - listitem [ref=e210]: Normal situation
+                  - generic [ref=e211]:
+                    - generic [ref=e212]: 
+                    - generic [ref=e213]:
+                      - text: SCHEPERSWEG 1
+                      - text: 6049CV HERTEN Pays-Bas
+                  - button "List of deposits" [ref=e216] [cursor=pointer]
+                - generic [ref=e218]:
+                  - generic [ref=e219]:
+                    - heading "Association des Copropriétaires de l'immeuble sis Avenue Ernest Solvay 48 à 1310 La Hule" [level=3] [ref=e220]
+                    - generic [ref=e221]: "1028250478"
+                    - generic [ref=e222]: Co-ownership association
+                    - list [ref=e223]:
+                      - listitem [ref=e224]: Normal situation
+                  - generic [ref=e225]:
+                    - generic [ref=e226]: 
+                    - generic [ref=e227]:
+                      - text: Avenue Ernest Solvay 48
+                      - text: 1310 La Hulpe Belgique
+                  - button "List of deposits" [ref=e230] [cursor=pointer]
+                - generic [ref=e232]:
+                  - generic [ref=e233]:
+                    - heading "SOLVAY INTEROX PTY LTD" [level=3] [ref=e234]
+                    - generic [ref=e235]: "1032570443"
+                    - generic [ref=e236]: Foreign entity
+                    - list [ref=e237]:
+                      - listitem [ref=e238]: Normal situation
+                  - generic [ref=e239]:
+                    - generic [ref=e240]: 
+                    - generic [ref=e241]:
+                      - text: McPherson St 20-22
+                      - text: NSW 2019 Banksmeadow Australie
+                  - button "List of deposits" [ref=e244] [cursor=pointer]
+                - generic [ref=e246]:
+                  - generic [ref=e247]:
+                    - heading "Association des Copropriétaires de la Résidence Solvay 72 à 4000 Liège (Sclessin) rue Ernest Solvay 72" [level=3] [ref=e248]
+                    - generic [ref=e249]: "1037588313"
+                    - generic [ref=e250]: Co-ownership association
+                    - list [ref=e251]:
+                      - listitem [ref=e252]: Normal situation
+                  - generic [ref=e253]:
+                    - generic [ref=e254]: 
+                    - generic [ref=e255]:
+                      - text: Rue Ernest-Solvay 72
+                      - text: 4000 Liège Belgique
+                  - button "List of deposits" [ref=e258] [cursor=pointer]
+  - contentinfo [ref=e49]:
+    - list [ref=e52]:
+      - listitem [ref=e53]:
+        - link "National Bank of Belgium" [ref=e54] [cursor=pointer]:
+          - /url: https://www.nbb.be/en
+        - text: "|"
+      - listitem [ref=e55]:
+        - link "Terms and conditions of use" [ref=e56] [cursor=pointer]:
+          - /url: https://www.nbb.be/en/central-balance-sheet-office/filing
+        - text: "|"
+      - listitem [ref=e57]:
+        - link "Privacy" [ref=e58] [cursor=pointer]:
+          - /url: https://www.nbb.be/en/disclaimer-and-legal-information
+        - text: "|"
+      - listitem [ref=e59]:
+        - link "Contact" [ref=e60] [cursor=pointer]:
+          - /url: https://www.nbb.be/en/contacts/contacts-central-balance-sheet-office
+        - text: "|"
+      - listitem [ref=e61]: v.5.02.01

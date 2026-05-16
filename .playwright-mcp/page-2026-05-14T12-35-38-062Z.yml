@@ -1,0 +1,257 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - navigation [ref=e7]:
+      - list [ref=e8]:
+        - listitem
+        - listitem [ref=e9]:
+          - button "En" [ref=e11] [cursor=pointer]:
+            - text: En
+            - generic [ref=e12]: 
+        - listitem
+    - generic [ref=e14]:
+      - link "logo" [ref=e15] [cursor=pointer]:
+        - /url: /
+        - img "logo" [ref=e17]
+      - generic [ref=e18]:
+        - generic [ref=e19]: Central Balance Sheet Office
+        - generic [ref=e20]: Online consultation of annual accounts
+    - navigation [ref=e24]:
+      - list [ref=e25]:
+        - listitem [ref=e26]:
+          - link "Search by Enterprise number" [ref=e27] [cursor=pointer]:
+            - /url: /
+        - listitem [ref=e28]:
+          - text: 
+          - generic [ref=e29]: List of deposits
+  - main [ref=e30]:
+    - generic [ref=e32]:
+      - link "New search" [ref=e33] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e34]: 
+        - text: New search
+      - generic [ref=e35]:
+        - generic [ref=e38]:
+          - generic [ref=e40]: 
+          - generic [ref=e41]: "0417497106"
+          - generic [ref=e42]: Anheuser-Busch InBev
+          - list [ref=e43]:
+            - listitem [ref=e44]:
+              - generic [ref=e45]: 
+              - generic [ref=e46]:
+                - generic [ref=e47]: Grand-Place, 1
+                - text: 1000 Bruxelles Belgique
+            - listitem [ref=e48]:
+              - generic [ref=e49]: 
+              - generic [ref=e50]:
+                - paragraph [ref=e51]: Legal form
+                - paragraph [ref=e52]: Public limited company
+            - listitem [ref=e53]:
+              - generic [ref=e54]: 
+              - generic [ref=e55]:
+                - paragraph [ref=e56]: Legal situation
+                - paragraph [ref=e57]: Normal situation
+            - listitem [ref=e58]:
+              - generic [ref=e59]: 
+              - link "Crossroads Bank for Enterprises" [ref=e61] [cursor=pointer]:
+                - /url: https://kbopub.economie.fgov.be/kbopub/zoeknummerform.html?lang=en&nummer=0417497106&actionLu=Recherche
+        - generic [ref=e64]:
+          - generic [ref=e65]:
+            - heading "Annual accounts filed with and accepted by NBB" [level=2] [ref=e66]
+            - textbox "Search" [ref=e68]
+          - generic [ref=e69]:
+            - generic [ref=e73] [cursor=pointer]:
+              - checkbox
+            - heading "Select all" [level=3] [ref=e76]
+          - generic [ref=e77]:
+            - generic [ref=e78]: 168 results
+            - generic [ref=e79]:
+              - text: Per page
+              - generic [ref=e81] [cursor=pointer]:
+                - generic [ref=e82]:
+                  - combobox
+                - generic [ref=e83]: "10"
+                - button "dropdown trigger" [ref=e84]:
+                  - generic [ref=e85]: 
+          - generic [ref=e86]:
+            - generic [ref=e88]:
+              - generic [ref=e92] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e94]:
+                - heading "Modèle pour comptes consolidés" [level=3] [ref=e95]
+                - generic [ref=e96]: Initial
+                - list [ref=e97]:
+                  - listitem [ref=e98]: Reference 2025-00109963|
+                  - listitem [ref=e99]: Filing date 21/05/2025
+              - generic [ref=e100]:
+                - text: Year-end date
+                - generic [ref=e101]: 31/12/2024
+              - generic [ref=e102]: FR
+              - button "Download pdf" [ref=e105] [cursor=pointer]:
+                - generic [ref=e106]: 
+            - generic [ref=e108]:
+              - generic [ref=e112] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e114]:
+                - heading "Model voor geconsolideerde jaarrekening" [level=3] [ref=e115]
+                - generic [ref=e116]: Initial
+                - list [ref=e117]:
+                  - listitem [ref=e118]: Reference 2025-00109961|
+                  - listitem [ref=e119]: Filing date 21/05/2025
+              - generic [ref=e120]:
+                - text: Year-end date
+                - generic [ref=e121]: 31/12/2024
+              - generic [ref=e122]: NL
+              - button "Download pdf" [ref=e125] [cursor=pointer]:
+                - generic [ref=e126]: 
+            - generic [ref=e128]:
+              - generic [ref=e132] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e134]:
+                - heading "PDF-Volledig model kapitaalvennootschap" [level=3] [ref=e135]
+                - generic [ref=e136]: Initial
+                - list [ref=e137]:
+                  - listitem [ref=e138]: Reference 2025-00104060|
+                  - listitem [ref=e139]: Filing date 16/05/2025
+              - generic [ref=e140]:
+                - text: Year-end date
+                - generic [ref=e141]: 31/12/2024
+              - generic [ref=e142]: NL
+              - button "Download pdf" [ref=e145] [cursor=pointer]:
+                - generic [ref=e146]: 
+            - generic [ref=e148]:
+              - generic [ref=e152] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e154]:
+                - heading "PDF-Modèle complet société à capital" [level=3] [ref=e155]
+                - generic [ref=e156]: Initial
+                - list [ref=e157]:
+                  - listitem [ref=e158]: Reference 2025-00104055|
+                  - listitem [ref=e159]: Filing date 15/05/2025
+              - generic [ref=e160]:
+                - text: Year-end date
+                - generic [ref=e161]: 31/12/2024
+              - generic [ref=e162]: FR
+              - button "Download pdf" [ref=e165] [cursor=pointer]:
+                - generic [ref=e166]: 
+            - generic [ref=e168]:
+              - generic [ref=e172] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e174]:
+                - heading "Model voor geconsolideerde jaarrekening" [level=3] [ref=e175]
+                - generic [ref=e176]: Initial
+                - list [ref=e177]:
+                  - listitem [ref=e178]: Reference 2024-00098967|
+                  - listitem [ref=e179]: Filing date 21/05/2024
+              - generic [ref=e180]:
+                - text: Year-end date
+                - generic [ref=e181]: 31/12/2023
+              - generic [ref=e182]: NL
+              - button "Download pdf" [ref=e185] [cursor=pointer]:
+                - generic [ref=e186]: 
+            - generic [ref=e188]:
+              - generic [ref=e192] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e194]:
+                - heading "Modèle pour comptes consolidés" [level=3] [ref=e195]
+                - generic [ref=e196]: Initial
+                - list [ref=e197]:
+                  - listitem [ref=e198]: Reference 2024-00098944|
+                  - listitem [ref=e199]: Filing date 21/05/2024
+              - generic [ref=e200]:
+                - text: Year-end date
+                - generic [ref=e201]: 31/12/2023
+              - generic [ref=e202]: FR
+              - button "Download pdf" [ref=e205] [cursor=pointer]:
+                - generic [ref=e206]: 
+            - generic [ref=e208]:
+              - generic [ref=e212] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e214]:
+                - heading "PDF-Modèle complet société à capital" [level=3] [ref=e215]
+                - generic [ref=e216]: Initial
+                - list [ref=e217]:
+                  - listitem [ref=e218]: Reference 2024-00098954|
+                  - listitem [ref=e219]: Filing date 16/05/2024
+              - generic [ref=e220]:
+                - text: Year-end date
+                - generic [ref=e221]: 31/12/2023
+              - generic [ref=e222]: FR
+              - button "Download pdf" [ref=e225] [cursor=pointer]:
+                - generic [ref=e226]: 
+            - generic [ref=e228]:
+              - generic [ref=e232] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e234]:
+                - heading "PDF-Volledig model kapitaalvennootschap" [level=3] [ref=e235]
+                - generic [ref=e236]: Initial
+                - list [ref=e237]:
+                  - listitem [ref=e238]: Reference 2024-00098939|
+                  - listitem [ref=e239]: Filing date 16/05/2024
+              - generic [ref=e240]:
+                - text: Year-end date
+                - generic [ref=e241]: 31/12/2023
+              - generic [ref=e242]: NL
+              - button "Download pdf" [ref=e245] [cursor=pointer]:
+                - generic [ref=e246]: 
+            - generic [ref=e248]:
+              - generic [ref=e252] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e254]:
+                - heading "PDF-Modèle complet société à capital" [level=3] [ref=e255]
+                - generic [ref=e256]: Correction
+                - list [ref=e257]:
+                  - listitem [ref=e258]: Reference 2024-00038346|
+                  - listitem [ref=e259]: Filing date 01/03/2024
+              - generic [ref=e260]:
+                - text: Year-end date
+                - generic [ref=e261]: 31/12/2022
+              - generic [ref=e262]: FR
+              - button "Download pdf" [ref=e265] [cursor=pointer]:
+                - generic [ref=e266]: 
+            - generic [ref=e268]:
+              - generic [ref=e272] [cursor=pointer]:
+                - checkbox
+              - generic [ref=e274]:
+                - heading "PDF-Volledig model kapitaalvennootschap" [level=3] [ref=e275]
+                - generic [ref=e276]: Correction
+                - list [ref=e277]:
+                  - listitem [ref=e278]: Reference 2024-00038566|
+                  - listitem [ref=e279]: Filing date 01/03/2024
+              - generic [ref=e280]:
+                - text: Year-end date
+                - generic [ref=e281]: 31/12/2022
+              - generic [ref=e282]: NL
+              - button "Download pdf" [ref=e285] [cursor=pointer]:
+                - generic [ref=e286]: 
+            - generic [ref=e288]:
+              - text: 
+              - button "" [disabled]:
+                - generic: 
+              - generic [ref=e289]:
+                - button "1" [ref=e290] [cursor=pointer]
+                - button "2" [ref=e291] [cursor=pointer]
+                - button "3" [ref=e292] [cursor=pointer]
+                - button "4" [ref=e293] [cursor=pointer]
+                - button "5" [ref=e294] [cursor=pointer]
+              - button "" [ref=e295] [cursor=pointer]:
+                - generic [ref=e296]: 
+              - text: 
+  - contentinfo [ref=e297]:
+    - list [ref=e300]:
+      - listitem [ref=e301]:
+        - link "National Bank of Belgium" [ref=e302] [cursor=pointer]:
+          - /url: https://www.nbb.be/en
+        - text: "|"
+      - listitem [ref=e303]:
+        - link "Terms and conditions of use" [ref=e304] [cursor=pointer]:
+          - /url: https://www.nbb.be/en/central-balance-sheet-office/filing
+        - text: "|"
+      - listitem [ref=e305]:
+        - link "Privacy" [ref=e306] [cursor=pointer]:
+          - /url: https://www.nbb.be/en/disclaimer-and-legal-information
+        - text: "|"
+      - listitem [ref=e307]:
+        - link "Contact" [ref=e308] [cursor=pointer]:
+          - /url: https://www.nbb.be/en/contacts/contacts-central-balance-sheet-office
+        - text: "|"
+      - listitem [ref=e309]: v.5.02.01

@@ -13,6 +13,7 @@ from apps.api.app.db import init_db_if_needed
 from apps.api.app.logging_setup import configure_logging
 from apps.api.app.rate_limit import rate_limit_middleware
 from apps.api.app.routes import router
+from packages.adapters._base.browser import close_browser_pool
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,13 @@ async def lifespan(app: FastAPI):
         await init_db_if_needed()
     except Exception as exc:
         logger.warning("DB init skipped: %s — endpoints needing DB will fail.", exc)
-    yield
+    try:
+        yield
+    finally:
+        try:
+            await close_browser_pool()
+        except Exception as exc:
+            logger.warning("browser pool shutdown error: %s", exc)
 
 
 def create_app() -> FastAPI:

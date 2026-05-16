@@ -1,0 +1,341 @@
+{
+  "_meta": {
+    "source": "BACH (Bank for the Accounts of Companies Harmonised), Banque de France / European Committee of Central Balance-Sheet Data Offices (ECCBSO)",
+    "source_url": "https://www.bach.banque-france.fr/",
+    "source_year": 2023,
+    "size_class": "Total (all sizes)",
+    "country_scope": "Weighted-average across BACH reporting countries (AT, BE, CZ, DE, ES, FR, IT, PL, PT, SK)",
+    "caveat": "Values are BACH-derived approximations rounded to two decimals. Percentile bands (p25 / p75) reflect typical cross-country dispersion observed in the BACH outlook reports. Use as directional context only — they are not a substitute for cohort-matched peer panels.",
+    "ratio_definitions": {
+      "current_ratio": "current assets / current liabilities",
+      "quick_ratio": "(current assets - inventory) / current liabilities",
+      "debt_to_equity": "total liabilities / equity (book)",
+      "debt_to_assets": "total liabilities / total assets",
+      "roe": "net income / equity",
+      "roa": "net income / total assets",
+      "gross_margin": "gross profit / revenue",
+      "net_margin": "net income / revenue",
+      "altman_z_score": "Altman 1968 Z (book equity proxy)"
+    }
+  },
+  "01": {
+    "nace_code": "01",
+    "name": "Crop and animal production, hunting and related service activities",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.55, "p25": 1.10, "p75": 2.20},
+      "quick_ratio": {"median": 0.85, "p25": 0.55, "p75": 1.25},
+      "debt_to_equity": {"median": 1.20, "p25": 0.70, "p75": 2.00},
+      "debt_to_assets": {"median": 0.55, "p25": 0.40, "p75": 0.68},
+      "roe": {"median": 0.06, "p25": 0.01, "p75": 0.14},
+      "roa": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "gross_margin": {"median": 0.22, "p25": 0.12, "p75": 0.34},
+      "net_margin": {"median": 0.04, "p25": 0.00, "p75": 0.10},
+      "altman_z_score": {"median": 1.80, "p25": 1.20, "p75": 2.60}
+    }
+  },
+  "10": {
+    "nace_code": "10",
+    "name": "Manufacture of food products",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.30, "p25": 1.00, "p75": 1.70},
+      "quick_ratio": {"median": 0.80, "p25": 0.55, "p75": 1.15},
+      "debt_to_equity": {"median": 1.50, "p25": 0.85, "p75": 2.60},
+      "debt_to_assets": {"median": 0.60, "p25": 0.46, "p75": 0.72},
+      "roe": {"median": 0.09, "p25": 0.03, "p75": 0.18},
+      "roa": {"median": 0.04, "p25": 0.01, "p75": 0.08},
+      "gross_margin": {"median": 0.20, "p25": 0.12, "p75": 0.30},
+      "net_margin": {"median": 0.03, "p25": 0.01, "p75": 0.06},
+      "altman_z_score": {"median": 2.20, "p25": 1.60, "p75": 3.00}
+    }
+  },
+  "13": {
+    "nace_code": "13",
+    "name": "Manufacture of textiles",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.45, "p25": 1.10, "p75": 1.90},
+      "quick_ratio": {"median": 0.85, "p25": 0.60, "p75": 1.20},
+      "debt_to_equity": {"median": 1.40, "p25": 0.80, "p75": 2.40},
+      "debt_to_assets": {"median": 0.58, "p25": 0.44, "p75": 0.70},
+      "roe": {"median": 0.07, "p25": 0.01, "p75": 0.15},
+      "roa": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "gross_margin": {"median": 0.25, "p25": 0.16, "p75": 0.36},
+      "net_margin": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "altman_z_score": {"median": 2.10, "p25": 1.50, "p75": 2.90}
+    }
+  },
+  "20": {
+    "nace_code": "20",
+    "name": "Manufacture of chemicals and chemical products",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.55, "p25": 1.20, "p75": 2.00},
+      "quick_ratio": {"median": 1.05, "p25": 0.75, "p75": 1.45},
+      "debt_to_equity": {"median": 1.05, "p25": 0.55, "p75": 1.80},
+      "debt_to_assets": {"median": 0.50, "p25": 0.36, "p75": 0.64},
+      "roe": {"median": 0.12, "p25": 0.05, "p75": 0.20},
+      "roa": {"median": 0.06, "p25": 0.02, "p75": 0.11},
+      "gross_margin": {"median": 0.30, "p25": 0.20, "p75": 0.42},
+      "net_margin": {"median": 0.06, "p25": 0.02, "p75": 0.12},
+      "altman_z_score": {"median": 2.60, "p25": 1.90, "p75": 3.40}
+    }
+  },
+  "21": {
+    "nace_code": "21",
+    "name": "Manufacture of basic pharmaceutical products and pharmaceutical preparations",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.85, "p25": 1.30, "p75": 2.60},
+      "quick_ratio": {"median": 1.30, "p25": 0.90, "p75": 1.90},
+      "debt_to_equity": {"median": 0.90, "p25": 0.45, "p75": 1.60},
+      "debt_to_assets": {"median": 0.45, "p25": 0.30, "p75": 0.60},
+      "roe": {"median": 0.15, "p25": 0.06, "p75": 0.25},
+      "roa": {"median": 0.08, "p25": 0.03, "p75": 0.14},
+      "gross_margin": {"median": 0.55, "p25": 0.40, "p75": 0.68},
+      "net_margin": {"median": 0.10, "p25": 0.04, "p75": 0.18},
+      "altman_z_score": {"median": 3.10, "p25": 2.20, "p75": 4.20}
+    }
+  },
+  "24": {
+    "nace_code": "24",
+    "name": "Manufacture of basic metals",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.45, "p25": 1.10, "p75": 1.85},
+      "quick_ratio": {"median": 0.85, "p25": 0.60, "p75": 1.20},
+      "debt_to_equity": {"median": 1.30, "p25": 0.70, "p75": 2.20},
+      "debt_to_assets": {"median": 0.56, "p25": 0.42, "p75": 0.69},
+      "roe": {"median": 0.08, "p25": 0.02, "p75": 0.16},
+      "roa": {"median": 0.04, "p25": 0.01, "p75": 0.08},
+      "gross_margin": {"median": 0.18, "p25": 0.10, "p75": 0.28},
+      "net_margin": {"median": 0.04, "p25": 0.01, "p75": 0.09},
+      "altman_z_score": {"median": 2.10, "p25": 1.50, "p75": 2.90}
+    }
+  },
+  "25": {
+    "nace_code": "25",
+    "name": "Manufacture of fabricated metal products, except machinery and equipment",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.55, "p25": 1.20, "p75": 2.00},
+      "quick_ratio": {"median": 0.95, "p25": 0.65, "p75": 1.30},
+      "debt_to_equity": {"median": 1.15, "p25": 0.60, "p75": 1.95},
+      "debt_to_assets": {"median": 0.52, "p25": 0.38, "p75": 0.66},
+      "roe": {"median": 0.10, "p25": 0.03, "p75": 0.18},
+      "roa": {"median": 0.05, "p25": 0.01, "p75": 0.09},
+      "gross_margin": {"median": 0.26, "p25": 0.17, "p75": 0.36},
+      "net_margin": {"median": 0.05, "p25": 0.01, "p75": 0.09},
+      "altman_z_score": {"median": 2.50, "p25": 1.80, "p75": 3.30}
+    }
+  },
+  "26": {
+    "nace_code": "26",
+    "name": "Manufacture of computer, electronic and optical products",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.75, "p25": 1.30, "p75": 2.40},
+      "quick_ratio": {"median": 1.20, "p25": 0.85, "p75": 1.70},
+      "debt_to_equity": {"median": 0.95, "p25": 0.50, "p75": 1.65},
+      "debt_to_assets": {"median": 0.47, "p25": 0.33, "p75": 0.62},
+      "roe": {"median": 0.12, "p25": 0.04, "p75": 0.22},
+      "roa": {"median": 0.06, "p25": 0.02, "p75": 0.12},
+      "gross_margin": {"median": 0.32, "p25": 0.22, "p75": 0.45},
+      "net_margin": {"median": 0.07, "p25": 0.02, "p75": 0.13},
+      "altman_z_score": {"median": 2.80, "p25": 2.00, "p75": 3.80}
+    }
+  },
+  "27": {
+    "nace_code": "27",
+    "name": "Manufacture of electrical equipment",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.60, "p25": 1.20, "p75": 2.10},
+      "quick_ratio": {"median": 1.05, "p25": 0.75, "p75": 1.45},
+      "debt_to_equity": {"median": 1.10, "p25": 0.55, "p75": 1.85},
+      "debt_to_assets": {"median": 0.51, "p25": 0.36, "p75": 0.65},
+      "roe": {"median": 0.11, "p25": 0.04, "p75": 0.20},
+      "roa": {"median": 0.05, "p25": 0.02, "p75": 0.10},
+      "gross_margin": {"median": 0.27, "p25": 0.18, "p75": 0.38},
+      "net_margin": {"median": 0.05, "p25": 0.01, "p75": 0.10},
+      "altman_z_score": {"median": 2.60, "p25": 1.90, "p75": 3.50}
+    }
+  },
+  "28": {
+    "nace_code": "28",
+    "name": "Manufacture of machinery and equipment n.e.c.",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.70, "p25": 1.25, "p75": 2.20},
+      "quick_ratio": {"median": 1.05, "p25": 0.75, "p75": 1.45},
+      "debt_to_equity": {"median": 1.10, "p25": 0.55, "p75": 1.85},
+      "debt_to_assets": {"median": 0.51, "p25": 0.36, "p75": 0.65},
+      "roe": {"median": 0.12, "p25": 0.05, "p75": 0.20},
+      "roa": {"median": 0.06, "p25": 0.02, "p75": 0.11},
+      "gross_margin": {"median": 0.30, "p25": 0.20, "p75": 0.40},
+      "net_margin": {"median": 0.06, "p25": 0.02, "p75": 0.11},
+      "altman_z_score": {"median": 2.70, "p25": 2.00, "p75": 3.60}
+    }
+  },
+  "29": {
+    "nace_code": "29",
+    "name": "Manufacture of motor vehicles, trailers and semi-trailers",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.25, "p25": 0.95, "p75": 1.65},
+      "quick_ratio": {"median": 0.85, "p25": 0.60, "p75": 1.20},
+      "debt_to_equity": {"median": 1.80, "p25": 1.00, "p75": 3.10},
+      "debt_to_assets": {"median": 0.64, "p25": 0.50, "p75": 0.76},
+      "roe": {"median": 0.10, "p25": 0.02, "p75": 0.20},
+      "roa": {"median": 0.04, "p25": 0.01, "p75": 0.07},
+      "gross_margin": {"median": 0.15, "p25": 0.08, "p75": 0.24},
+      "net_margin": {"median": 0.04, "p25": 0.00, "p75": 0.07},
+      "altman_z_score": {"median": 1.90, "p25": 1.30, "p75": 2.60}
+    }
+  },
+  "41": {
+    "nace_code": "41",
+    "name": "Construction of buildings",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.35, "p25": 1.05, "p75": 1.75},
+      "quick_ratio": {"median": 0.95, "p25": 0.65, "p75": 1.35},
+      "debt_to_equity": {"median": 1.95, "p25": 1.05, "p75": 3.40},
+      "debt_to_assets": {"median": 0.66, "p25": 0.52, "p75": 0.78},
+      "roe": {"median": 0.08, "p25": 0.01, "p75": 0.18},
+      "roa": {"median": 0.03, "p25": 0.00, "p75": 0.06},
+      "gross_margin": {"median": 0.14, "p25": 0.07, "p75": 0.22},
+      "net_margin": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "altman_z_score": {"median": 1.70, "p25": 1.10, "p75": 2.40}
+    }
+  },
+  "45": {
+    "nace_code": "45",
+    "name": "Wholesale and retail trade and repair of motor vehicles and motorcycles",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.30, "p25": 1.05, "p75": 1.65},
+      "quick_ratio": {"median": 0.75, "p25": 0.50, "p75": 1.05},
+      "debt_to_equity": {"median": 2.00, "p25": 1.10, "p75": 3.50},
+      "debt_to_assets": {"median": 0.66, "p25": 0.52, "p75": 0.78},
+      "roe": {"median": 0.11, "p25": 0.03, "p75": 0.22},
+      "roa": {"median": 0.04, "p25": 0.01, "p75": 0.08},
+      "gross_margin": {"median": 0.15, "p25": 0.09, "p75": 0.22},
+      "net_margin": {"median": 0.02, "p25": 0.00, "p75": 0.05},
+      "altman_z_score": {"median": 1.80, "p25": 1.20, "p75": 2.50}
+    }
+  },
+  "46": {
+    "nace_code": "46",
+    "name": "Wholesale trade, except of motor vehicles and motorcycles",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.40, "p25": 1.10, "p75": 1.80},
+      "quick_ratio": {"median": 0.95, "p25": 0.65, "p75": 1.35},
+      "debt_to_equity": {"median": 1.65, "p25": 0.90, "p75": 2.80},
+      "debt_to_assets": {"median": 0.62, "p25": 0.48, "p75": 0.74},
+      "roe": {"median": 0.12, "p25": 0.04, "p75": 0.22},
+      "roa": {"median": 0.04, "p25": 0.01, "p75": 0.09},
+      "gross_margin": {"median": 0.18, "p25": 0.11, "p75": 0.26},
+      "net_margin": {"median": 0.03, "p25": 0.01, "p75": 0.06},
+      "altman_z_score": {"median": 2.20, "p25": 1.60, "p75": 3.00}
+    }
+  },
+  "47": {
+    "nace_code": "47",
+    "name": "Retail trade, except of motor vehicles and motorcycles",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.20, "p25": 0.95, "p75": 1.55},
+      "quick_ratio": {"median": 0.55, "p25": 0.35, "p75": 0.85},
+      "debt_to_equity": {"median": 1.95, "p25": 1.05, "p75": 3.40},
+      "debt_to_assets": {"median": 0.66, "p25": 0.52, "p75": 0.78},
+      "roe": {"median": 0.13, "p25": 0.04, "p75": 0.24},
+      "roa": {"median": 0.04, "p25": 0.01, "p75": 0.08},
+      "gross_margin": {"median": 0.30, "p25": 0.20, "p75": 0.42},
+      "net_margin": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "altman_z_score": {"median": 2.00, "p25": 1.40, "p75": 2.80}
+    }
+  },
+  "49": {
+    "nace_code": "49",
+    "name": "Land transport and transport via pipelines",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.15, "p25": 0.85, "p75": 1.55},
+      "quick_ratio": {"median": 1.00, "p25": 0.70, "p75": 1.40},
+      "debt_to_equity": {"median": 2.20, "p25": 1.20, "p75": 3.80},
+      "debt_to_assets": {"median": 0.68, "p25": 0.54, "p75": 0.80},
+      "roe": {"median": 0.10, "p25": 0.02, "p75": 0.20},
+      "roa": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "gross_margin": {"median": 0.18, "p25": 0.10, "p75": 0.28},
+      "net_margin": {"median": 0.03, "p25": 0.00, "p75": 0.07},
+      "altman_z_score": {"median": 1.60, "p25": 1.00, "p75": 2.30}
+    }
+  },
+  "55": {
+    "nace_code": "55",
+    "name": "Accommodation",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 0.95, "p25": 0.60, "p75": 1.40},
+      "quick_ratio": {"median": 0.85, "p25": 0.50, "p75": 1.30},
+      "debt_to_equity": {"median": 2.30, "p25": 1.20, "p75": 4.20},
+      "debt_to_assets": {"median": 0.66, "p25": 0.50, "p75": 0.80},
+      "roe": {"median": 0.05, "p25": -0.02, "p75": 0.14},
+      "roa": {"median": 0.02, "p25": -0.01, "p75": 0.06},
+      "gross_margin": {"median": 0.40, "p25": 0.28, "p75": 0.55},
+      "net_margin": {"median": 0.04, "p25": -0.02, "p75": 0.12},
+      "altman_z_score": {"median": 1.40, "p25": 0.80, "p75": 2.10}
+    }
+  },
+  "56": {
+    "nace_code": "56",
+    "name": "Food and beverage service activities",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 0.85, "p25": 0.55, "p75": 1.25},
+      "quick_ratio": {"median": 0.65, "p25": 0.40, "p75": 1.00},
+      "debt_to_equity": {"median": 2.50, "p25": 1.30, "p75": 4.50},
+      "debt_to_assets": {"median": 0.70, "p25": 0.55, "p75": 0.83},
+      "roe": {"median": 0.08, "p25": -0.02, "p75": 0.20},
+      "roa": {"median": 0.02, "p25": -0.01, "p75": 0.07},
+      "gross_margin": {"median": 0.60, "p25": 0.50, "p75": 0.70},
+      "net_margin": {"median": 0.03, "p25": -0.02, "p75": 0.10},
+      "altman_z_score": {"median": 1.40, "p25": 0.80, "p75": 2.10}
+    }
+  },
+  "62": {
+    "nace_code": "62",
+    "name": "Computer programming, consultancy and related activities",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class)",
+    "median_ratios": {
+      "current_ratio": {"median": 1.45, "p25": 1.10, "p75": 1.90},
+      "quick_ratio": {"median": 1.30, "p25": 0.95, "p75": 1.75},
+      "debt_to_equity": {"median": 0.85, "p25": 0.45, "p75": 1.50},
+      "debt_to_assets": {"median": 0.40, "p25": 0.25, "p75": 0.55},
+      "roe": {"median": 0.15, "p25": 0.05, "p75": 0.28},
+      "roa": {"median": 0.08, "p25": 0.02, "p75": 0.15},
+      "gross_margin": {"median": 0.38, "p25": 0.25, "p75": 0.52},
+      "net_margin": {"median": 0.08, "p25": 0.02, "p75": 0.16},
+      "altman_z_score": {"median": 2.50, "p25": 1.80, "p75": 3.50}
+    }
+  },
+  "64": {
+    "nace_code": "64",
+    "name": "Financial service activities, except insurance and pension funding",
+    "source": "BACH 2023, weighted-average across reporting countries (Total size class). Note: BACH coverage of credit institutions is partial — leverage ratios in this sector are not directly comparable to non-financial industries.",
+    "median_ratios": {
+      "current_ratio": {"median": 1.10, "p25": 0.85, "p75": 1.45},
+      "quick_ratio": {"median": 1.05, "p25": 0.80, "p75": 1.40},
+      "debt_to_equity": {"median": 6.00, "p25": 3.50, "p75": 10.00},
+      "debt_to_assets": {"median": 0.86, "p25": 0.78, "p75": 0.92},
+      "roe": {"median": 0.09, "p25": 0.03, "p75": 0.16},
+      "roa": {"median": 0.01, "p25": 0.00, "p75": 0.02},
+      "gross_margin": {"median": 0.50, "p25": 0.30, "p75": 0.70},
+      "net_margin": {"median": 0.15, "p25": 0.05, "p75": 0.30},
+      "altman_z_score": {"median": 1.20, "p25": 0.60, "p75": 2.00}
+    }
+  }
+}

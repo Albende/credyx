@@ -55,15 +55,21 @@ class LLMService:
         ratios: list[FinancialRatios],
         *,
         pdf_text_excerpts: dict[int, str] | None = None,
+        sanctions_context: str | None = None,
     ) -> RiskAssessment:
         """Run a credit risk analysis on a company.
 
         Pre-computed ratios are passed in so the model never does arithmetic.
         `pdf_text_excerpts` is a year -> extracted text map for filings that
-        only have a PDF (no structured XBRL/JSON).
+        only have a PDF (no structured XBRL/JSON). `sanctions_context` is a
+        pre-computed text block of OpenSanctions hits — the engine has
+        already decided how they affect the recommendation; the model just
+        needs to reflect them in its reasoning.
         """
         system_prompt = _load_prompt()
-        user_prompt = _build_user_prompt(company, filings, ratios, pdf_text_excerpts or {})
+        user_prompt = _build_user_prompt(
+            company, filings, ratios, pdf_text_excerpts or {}, sanctions_context
+        )
 
         try:
             raw = await self.provider.generate_json(
@@ -113,6 +119,7 @@ def _build_user_prompt(
     filings: list[FinancialFiling],
     ratios: list[FinancialRatios],
     pdf_text_excerpts: dict[int, str],
+    sanctions_context: str | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("## Company")
@@ -165,6 +172,14 @@ def _build_user_prompt(
                 f"format={f.document_format or 'structured' if f.structured_data else 'url'}"
             )
 
+    benchmark_block = _build_benchmark_block(company.nace_codes, ratios)
+    if benchmark_block:
+        lines.append(benchmark_block)
+
+    if sanctions_context:
+        lines.append("\n## Sanctions / PEP screening (pre-computed by engine)")
+        lines.append(sanctions_context)
+
     if pdf_text_excerpts:
         lines.append("\n## PDF excerpts (limited)")
         for year, text in sorted(pdf_text_excerpts.items(), reverse=True):
@@ -175,6 +190,62 @@ def _build_user_prompt(
         "\n## Task\nProduce the credit risk assessment as a single JSON object "
         "matching the provided schema."
     )
+    return "\n".join(lines)
+
+
+def _build_benchmark_block(
+    nace_codes: list[str], ratios: list[FinancialRatios]
+) -> str | None:
+    """Render an industry-benchmark block for the first matching NACE code.
+
+    Companies often carry several NACE codes (primary + secondary). We pick
+    the first one for which we have a benchmark and compare against the
+    most recent year of ratios. Returns ``None`` when there is no NACE
+    code, no benchmark, or no ratios to compare.
+    """
+    if not nace_codes or not ratios:
+        return None
+
+    # Deferred import: packages.risk.__init__ imports the engine which in
+    # turn imports this module — a top-level import would cycle.
+    from packages.risk.benchmarks import (
+        COMPARABLE_RATIOS,
+        IndustryBenchmark,
+        benchmark_for,
+        compare,
+    )
+
+    benchmark: IndustryBenchmark | None = None
+    for code in nace_codes:
+        match = benchmark_for(code)
+        if match is not None:
+            benchmark = match
+            break
+    if benchmark is None:
+        return None
+
+    latest = max(ratios, key=lambda r: r.year)
+    classifications = compare(latest, benchmark)
+
+    lines: list[str] = [
+        f"\n## Industry benchmarks for NACE {benchmark.nace_code} "
+        f"({benchmark.name})",
+        f"Source: {benchmark.source}",
+        f"Compared against year {latest.year} ratios. "
+        "Classifications: above_p75 / median_band / below_p25 / unknown.",
+    ]
+    for ratio_name in COMPARABLE_RATIOS:
+        band = benchmark.band(ratio_name)
+        if band is None:
+            continue
+        value = getattr(latest, ratio_name, None)
+        classification = classifications.get(ratio_name, "unknown")
+        yours = f"{value:.3f}" if isinstance(value, (int, float)) else "n/a"
+        lines.append(
+            f"- {ratio_name}: median {band.median:.2f} "
+            f"(p25 {band.p25:.2f}, p75 {band.p75:.2f}) — "
+            f"yours: {yours} — {classification}"
+        )
     return "\n".join(lines)
 
 

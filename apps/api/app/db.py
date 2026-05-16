@@ -1,16 +1,30 @@
 """SQLAlchemy 2 async session + models."""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from apps.api.app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -97,6 +111,49 @@ class IngestionJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class IngestedCompany(Base):
+    """Companies imported from bulk-data dumps (BE KBO, UA YeDR, LV UR, IL CKAN, ...).
+
+    Searchable via pg_trgm similarity over `name_normalized`. Use
+    `packages.ingestion.fts.search_ingested` to query.
+    """
+
+    __tablename__ = "ingested_companies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    country: Mapped[str] = mapped_column(String(2), index=True)
+    source_id: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(1024))
+    name_normalized: Mapped[str] = mapped_column(String(1024))
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    identifiers: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("country", "source_id", name="uq_ingested_country_source_id"),
+        Index(
+            "ix_ingested_name_trgm",
+            "name_normalized",
+            postgresql_using="gin",
+            postgresql_ops={"name_normalized": "gin_trgm_ops"},
+        ),
+    )
+
+
+class PDFTextCache(Base):
+    """Cached PDF text extracts so repeated risk analyses skip the download+parse."""
+
+    __tablename__ = "pdf_text_cache"
+
+    url_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    url: Mapped[str] = mapped_column(String(2048))
+    text: Mapped[str] = mapped_column(String)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 _engine = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
@@ -128,4 +185,10 @@ async def init_db_if_needed() -> None:
     """
     engine = get_engine()
     async with engine.begin() as conn:
+        # pg_trgm powers similarity search over `ingested_companies.name_normalized`.
+        # Enable before create_all so the trigram GIN index can be built.
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+        except Exception as exc:  # SQLite / non-postgres dev — skip silently
+            logger.warning("Could not enable pg_trgm extension: %s", exc)
         await conn.run_sync(Base.metadata.create_all)
