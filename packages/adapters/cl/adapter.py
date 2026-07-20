@@ -1,33 +1,40 @@
-"""Chile adapter — SII (Servicio de Impuestos Internos) + CMF (listed only).
+"""Chile adapter — GLEIF (registry) + SEC EDGAR (financials).
 
-Sources:
-- SII RUT verifier: https://zeus.sii.cl/cvc_cgi/stc/getstc — HTML form, free.
-  In practice the public endpoint requires a CAPTCHA token; when that
-  guard fires we raise `BlockedByRegistryError` rather than fabricate
-  data. Direct GETs occasionally succeed for cached high-volume RUTs
-  (large enterprises), so we still try and parse what comes back.
-- CMF (Comisión para el Mercado Financiero) entity portal:
-  https://www.cmfchile.cl/institucional/mercados/entidad.php?rut={RUT_NODV}
-  — free per-entity discovery page for supervised (listed/banking/
-  insurance) entities. We surface this as a `FinancialFiling`
-  `document_url` so the UI can drill into annual reports; structured
-  line items would require parsing the multi-page filings index and
-  is left for Phase 2.
+The two official Chilean registries are unusable for a free, key-free,
+programmatic MVP:
+
+- **SII** (Servicio de Impuestos Internos) RUT verifier at
+  ``zeus.sii.cl/cvc_cgi/stc/getstc`` answers direct GETs with
+  ``alert('Por favor reingrese Captcha'); history.go(-1);`` — a hard
+  CAPTCHA wall with no free API.
+- **CMF** (Comisión para el Mercado Financiero) publishes listed-company
+  IFRS filings but geoblocks non-Chilean egress; its ``api.cmfchile.cl``
+  and ``www.cmfchile.cl`` hosts are unreachable from outside CL and the
+  financial-statement API additionally requires a registered ``apikey``.
+
+So the live paths use two free, key-free, globally reachable sources:
+
+- **Registry** — GLEIF (``api.gleif.org``). Every Chilean legal entity with
+  an LEI carries its **RUT** in ``entity.registeredAs`` (the SII/CMF
+  registration authority id). This gives real name search and real
+  RUT → company lookup. Coverage is limited to LEI-registered entities
+  (listed companies, banks, insurers, funds, large corporates).
+- **Financials** — SEC EDGAR. Chilean blue-chips cross-listed in the US
+  (Banco de Chile/BCH, SQM, Enel Chile, etc.) file audited IFRS annual
+  reports as **Form 20-F**. We resolve the RUT to a legal name via GLEIF,
+  match the filer in EDGAR's full-text index, and surface each 20-F as a
+  `FinancialFiling` with a document URL that genuinely downloads. Chilean
+  issuers with no US listing have no free filing feed and return ``[]``.
 
 Identifier: **RUT** (Rol Único Tributario) — 7-9 numeric digits plus a
-Mod-11 check digit ("0"-"9" or "K"), displayed as `XX.XXX.XXX-X`. The
-RUT doubles as the corporate tax ID, so we expose it as the primary
-`VAT` identifier and also accept `COMPANY_NUMBER` as an alias.
-
-Name search is not freely available — SII has no search-by-name API and
-the only directory (datos.gob.cl tax bundles) is a 5+ GB monthly dump
-that is out of scope for live querying. `search_by_name` therefore
-raises `AdapterNotImplementedError`.
+Mod-11 check digit ("0"-"9" or "K"), displayed ``XX.XXX.XXX-X``. The RUT
+doubles as the corporate tax ID, exposed as the primary `VAT` identifier
+with `COMPANY_NUMBER` as an alias.
 """
 from __future__ import annotations
 
-import html
 import re
+from collections import Counter
 from datetime import date, datetime
 from typing import Any
 
@@ -35,7 +42,6 @@ import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
     BlockedByRegistryError,
     InvalidIdentifierError,
 )
@@ -51,16 +57,13 @@ from packages.shared.models import (
     RegistryIdentifier,
 )
 
-_DIGITS_RE = re.compile(r"\D+")
 _RUT_RE = re.compile(r"^(\d{7,9})([0-9K])$")
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
 
 
 def _normalize_rut(value: str) -> tuple[str, str]:
     """Strip "CL"/dots/dashes/spaces, return (digits, check_char).
 
-    Validates Mod-11 checksum and raises `InvalidIdentifierError` on
+    Validates the Mod-11 checksum and raises `InvalidIdentifierError` on
     bad input. The check char is uppercase "K" or a decimal digit.
     """
     raw = (value or "").strip().upper()
@@ -100,18 +103,11 @@ def _format_rut(digits: str, check: str) -> str:
     if n <= 6:
         body = digits
     elif n <= 9:
-        # Insert thousands separators from the right.
         body = digits[: n - 6] + "." + digits[n - 6 : n - 3] + "." + digits[n - 3 :]
         body = body.lstrip(".")
     else:
         body = digits
     return f"{body}-{check}"
-
-
-def _strip_html(text: str) -> str:
-    no_tags = _TAG_RE.sub(" ", text)
-    decoded = html.unescape(no_tags)
-    return _WS_RE.sub(" ", decoded).strip()
 
 
 class CLAdapter(CountryAdapter):
@@ -123,21 +119,21 @@ class CLAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    SII_BASE = "https://zeus.sii.cl"
-    SII_PATH = "/cvc_cgi/stc/getstc"
-    CMF_ENTIDAD_URL = (
-        "https://www.cmfchile.cl/institucional/mercados/entidad.php"
-    )
+    GLEIF_BASE = "https://api.gleif.org/api/v1"
+    EDGAR_FTS = "https://efts.sec.gov/LATEST/search-index"
+    EDGAR_SUBMISSIONS = "https://data.sec.gov/submissions"
+    EDGAR_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
 
     async def health_check(self) -> AdapterHealth:
-        # Probe SII with a known well-formed RUT (Empresas COPEC) and report
-        # whether the CAPTCHA wall is in force right now.
         try:
-            async with self._sii_client() as client:
+            async with self._gleif_client() as client:
                 resp = await get_with_retry(
                     client,
-                    self.SII_PATH,
-                    params=self._sii_params("90690000", "9"),
+                    "/lei-records",
+                    params={
+                        "filter[entity.legalAddress.country]": "CL",
+                        "page[size]": 1,
+                    },
                 )
         except Exception as exc:
             return AdapterHealth(
@@ -147,38 +143,50 @@ class CLAdapter(CountryAdapter):
                 capabilities={"search": False, "lookup": False, "financials": False},
                 notes=str(exc)[:200],
             )
-        body = resp.text or ""
-        if _is_captcha_response(body):
-            return AdapterHealth(
-                country_code=self.country_code,
-                name=self.country_name,
-                status=AdapterStatus.BLOCKED,
-                capabilities={"search": False, "lookup": False, "financials": True},
-                rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=(
-                    "SII RUT verifier requires CAPTCHA; direct HTTP lookup "
-                    "blocked. CMF discovery URL still available for listed "
-                    "entities."
-                ),
-            )
+        ok = resp.status_code == 200
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            status=AdapterStatus.OK if ok else AdapterStatus.DEGRADED,
+            capabilities={"search": ok, "lookup": ok, "financials": ok},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Name search unavailable (SII has no free name API). "
-                "Financials limited to CMF-supervised entities (URL only)."
+                "Registry via GLEIF (RUT in entity.registeredAs). Financials "
+                "via SEC EDGAR 20-F for US-cross-listed Chilean issuers. "
+                "SII is CAPTCHA-walled and CMF geoblocks non-CL egress."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Chilean SII does not expose a free name search; only the monthly "
-            "datos.gob.cl tax dump lists companies by name and that is "
-            "out-of-band. Use direct RUT lookup."
+        records = await self._gleif_query(
+            {
+                "filter[entity.legalName]": name,
+                "filter[entity.legalAddress.country]": "CL",
+                "page[size]": max(1, min(int(limit), 50)),
+            }
         )
+        matches: list[CompanyMatch] = []
+        for record in records:
+            entity = _entity(record)
+            legal_name = _dig(entity, "legalName", "name")
+            if not legal_name:
+                continue
+            lei = record.get("id") or _dig(record, "attributes", "lei")
+            rut = _rut_from_entity(entity)
+            matches.append(
+                CompanyMatch(
+                    id=rut or str(lei),
+                    name=legal_name,
+                    country="CL",
+                    identifiers=_identifiers(rut, lei),
+                    address=_format_address(entity.get("legalAddress")),
+                    status=_status(entity),
+                    source_url=(
+                        f"https://search.gleif.org/#/record/{lei}" if lei else None
+                    ),
+                )
+            )
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -189,67 +197,40 @@ class CLAdapter(CountryAdapter):
             )
         digits, check = _normalize_rut(value)
         rut_display = _format_rut(digits, check)
+        rut_key = f"{digits}-{check}"
 
-        try:
-            async with self._sii_client() as client:
-                resp = await get_with_retry(
-                    client,
-                    self.SII_PATH,
-                    params=self._sii_params(digits, check),
-                )
-        except httpx.HTTPError as exc:
-            raise BlockedByRegistryError(
-                f"SII transport error for RUT {rut_display}: {exc}"
-            ) from exc
-
-        if resp.status_code == 404:
+        records = await self._gleif_query(
+            {
+                "filter[entity.registeredAs]": rut_key,
+                "page[size]": 5,
+            }
+        )
+        record = _first_cl_record(records)
+        if record is None:
             return None
-        if resp.status_code >= 500:
-            raise BlockedByRegistryError(
-                f"SII returned HTTP {resp.status_code} for RUT {rut_display}"
-            )
-        body = resp.text or ""
-        if _is_captcha_response(body):
-            raise BlockedByRegistryError(
-                "SII RUT verifier requires CAPTCHA. Direct HTTP lookup blocked; "
-                "a browser/captcha-solving pipeline is required."
-            )
-
-        parsed = _parse_sii_response(body)
-        if parsed is None:
+        entity = _entity(record)
+        legal_name = _dig(entity, "legalName", "name")
+        if not legal_name:
             return None
-        name, status_value, activities = parsed
-
-        identifiers = [
-            RegistryIdentifier(
-                type=IdentifierType.VAT, value=rut_display, label="RUT"
-            ),
-            RegistryIdentifier(
-                type=IdentifierType.COMPANY_NUMBER,
-                value=rut_display,
-                label="RUT",
-            ),
-        ]
+        lei = record.get("id") or _dig(record, "attributes", "lei")
+        legal_form = _dig(entity, "legalForm", "id")
 
         return CompanyDetails(
             id=rut_display,
-            name=name,
+            name=legal_name,
             country="CL",
-            status=status_value,
-            registered_address=None,
-            nace_codes=[code for code, _ in activities],
-            identifiers=identifiers,
+            legal_form=str(legal_form) if legal_form else None,
+            status=_status(entity),
+            registered_address=_format_address(entity.get("legalAddress")),
+            identifiers=_identifiers(rut_display, lei),
             raw={
                 "rut": rut_display,
-                "activities": [
-                    {"code": code, "description": desc}
-                    for code, desc in activities
-                ],
-                "source": "sii.zeus.cvc_cgi/stc/getstc",
+                "lei": lei,
+                "registeredAt": entity.get("registeredAt"),
+                "source": "gleif.api.v1.lei-records",
             },
             source_url=(
-                f"{self.SII_BASE}{self.SII_PATH}"
-                f"?RUT={digits}&DV={check}&PRG=STC&OPC=NOR"
+                f"https://search.gleif.org/#/record/{lei}" if lei else None
             ),
         )
 
@@ -258,154 +239,199 @@ class CLAdapter(CountryAdapter):
     ) -> list[FinancialFiling]:
         digits, check = _normalize_rut(company_id)
         rut_display = _format_rut(digits, check)
-        cmf_url = (
-            f"{self.CMF_ENTIDAD_URL}?mercado=V&rut={digits}&grupo="
-            "&tipoentidad=RGC&row=&vig=VI&control=svs&pestania=1"
-        )
-        current_year = datetime.utcnow().year
-        # CMF only supervises listed/banking/insurance entities; for everyone
-        # else the URL will load an empty result. We can't reliably tell from
-        # outside without making the call, and a failed request shouldn't
-        # poison the lookup. Surface a discovery pointer for the most recent
-        # `years` cycles and let downstream decide whether to drill in.
-        filings: list[FinancialFiling] = []
-        for offset in range(years):
-            yr = current_year - 1 - offset
-            filings.append(
-                FinancialFiling(
-                    company_id=rut_display,
-                    year=yr,
-                    type=FilingType.ANNUAL_REPORT,
-                    period_end=date(yr, 12, 31),
-                    currency="CLP",
-                    structured_data=None,
-                    document_url=None,
-                    document_format=None,
-                    source_url=cmf_url,
-                )
-            )
-        return filings
 
-    def _sii_client(self) -> httpx.AsyncClient:
-        # SII is picky about Accept headers; mimic a normal browser without
-        # claiming to be one.
+        details = await self.lookup_by_identifier(IdentifierType.VAT, rut_display)
+        if details is None:
+            return []
+
+        cik = await self._edgar_cik_for_name(details.name)
+        if cik is None:
+            return []
+        submissions = await self._edgar_submissions(cik)
+        if submissions is None or not _is_chilean_filer(submissions):
+            return []
+
+        return _filings_from_submissions(submissions, cik, rut_display, years)
+
+    def _gleif_client(self) -> httpx.AsyncClient:
         return build_http_client(
-            base_url=self.SII_BASE,
-            headers={
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "es-CL,es;q=0.9,en;q=0.7",
-            },
+            base_url=self.GLEIF_BASE,
+            headers={"Accept": "application/vnd.api+json"},
             timeout=25.0,
         )
 
-    @staticmethod
-    def _sii_params(digits: str, check: str) -> dict[str, str]:
-        return {
-            "RUT": digits,
-            "DV": check,
-            "PRG": "STC",
-            "OPC": "NOR",
-        }
+    async def _gleif_query(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        try:
+            async with self._gleif_client() as client:
+                resp = await get_with_retry(client, "/lei-records", params=params)
+        except httpx.HTTPError as exc:
+            raise BlockedByRegistryError(f"GLEIF transport error: {exc}") from exc
+        if resp.status_code == 404:
+            return []
+        if resp.status_code >= 500:
+            raise BlockedByRegistryError(f"GLEIF returned HTTP {resp.status_code}")
+        return resp.json().get("data") or []
+
+    async def _edgar_cik_for_name(self, name: str) -> str | None:
+        """Resolve a Chilean legal name to its EDGAR CIK via the 20-F full-text
+        index, picking the filer that appears in the most matching documents."""
+        params = {"q": f'"{name}"', "forms": "20-F"}
+        async with build_http_client(
+            headers={"Accept": "application/json"}, timeout=25.0
+        ) as client:
+            resp = await get_with_retry(client, self.EDGAR_FTS, params=params)
+        if resp.status_code != 200:
+            return None
+        hits = _dig(resp.json(), "hits", "hits") or []
+        counter: Counter[str] = Counter()
+        for hit in hits:
+            for cik in (_dig(hit, "_source", "ciks") or []):
+                counter[str(cik)] += 1
+        if not counter:
+            return None
+        return counter.most_common(1)[0][0]
+
+    async def _edgar_submissions(self, cik: str) -> dict[str, Any] | None:
+        cik_padded = str(cik).zfill(10)
+        async with build_http_client(
+            headers={"Accept": "application/json"}, timeout=25.0
+        ) as client:
+            resp = await get_with_retry(
+                client, f"{self.EDGAR_SUBMISSIONS}/CIK{cik_padded}.json"
+            )
+        if resp.status_code != 200:
+            return None
+        return resp.json()
 
 
-def _is_captcha_response(body: str) -> bool:
-    lowered = body.lower()
-    return (
-        "captcha" in lowered
-        or "reingrese" in lowered
-        or "history.go(-1)" in lowered
-    )
+def _entity(record: dict[str, Any]) -> dict[str, Any]:
+    return _dig(record, "attributes", "entity") or {}
 
 
-def _parse_sii_response(body: str) -> tuple[str, str | None, list[tuple[str, str]]] | None:
-    """Best-effort scrape of the SII stc response page.
+def _dig(obj: Any, *keys: str) -> Any:
+    cur: Any = obj
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+        if cur is None:
+            return None
+    return cur
 
-    The page is a small HTML form-result with labelled fields like
-    "Razón Social", "Contribuyente presenta las siguientes
-    Actividades Económicas vigentes", etc. Layout has changed several
-    times — match leniently and never fabricate values.
-    """
-    if not body or "<" not in body:
+
+def _status(entity: dict[str, Any]) -> str | None:
+    raw = (entity.get("status") or "").upper()
+    if raw == "ACTIVE":
+        return "active"
+    return raw.lower() or None
+
+
+def _rut_from_entity(entity: dict[str, Any]) -> str | None:
+    registered_as = entity.get("registeredAs")
+    if not registered_as:
         return None
-
-    text = _strip_html(body)
-    if not text:
+    try:
+        digits, check = _normalize_rut(str(registered_as))
+    except InvalidIdentifierError:
         return None
-
-    # SII labels (defensive against accented vs. non-accented variants).
-    name = _extract_label(
-        text,
-        labels=(
-            "Razón Social",
-            "Razon Social",
-            "Nombre o Razón Social",
-            "Nombre o Razon Social",
-            "Contribuyente",
-        ),
-    )
-    if not name:
-        return None
-
-    status_value = _extract_label(
-        text,
-        labels=(
-            "Inicio de Actividades",
-            "Estado del Contribuyente",
-            "Situación",
-        ),
-    )
-
-    activities = _extract_activities(text)
-    return name, status_value, activities
+    return _format_rut(digits, check)
 
 
-def _extract_label(text: str, *, labels: tuple[str, ...]) -> str | None:
-    """Find the first occurrence of any label and return the value after it.
-
-    Values run until the next label or end of segment; we cap at 200 chars.
-    """
-    for label in labels:
-        idx = text.lower().find(label.lower())
-        if idx < 0:
-            continue
-        rest = text[idx + len(label) :].lstrip(" :-\t")
-        if not rest:
-            continue
-        # Cut at the next obvious label boundary.
-        cut = re.split(
-            r"\s{2,}|(?=Actividades?\s+Económic|Inicio de Actividades|"
-            r"Situaci[oó]n|Estado del Contribuyente|Tipo de Contribuyente)",
-            rest,
-            maxsplit=1,
+def _identifiers(rut: str | None, lei: Any) -> list[RegistryIdentifier]:
+    out: list[RegistryIdentifier] = []
+    if rut:
+        out.append(RegistryIdentifier(type=IdentifierType.VAT, value=rut, label="RUT"))
+        out.append(
+            RegistryIdentifier(
+                type=IdentifierType.COMPANY_NUMBER, value=rut, label="RUT"
+            )
         )
-        candidate = (cut[0] if cut else rest).strip(" :,-")
-        if candidate:
-            return candidate[:200]
-    return None
-
-
-def _extract_activities(text: str) -> list[tuple[str, str]]:
-    """Extract (CIIU code, description) pairs from the SII activities block.
-
-    SII publishes one or more economic-activity rows; each row contains a
-    6-digit CIIU code adjacent to the human description. We scan for the
-    code pattern and capture a short window of preceding/following text.
-    """
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for m in re.finditer(r"(?<!\d)(\d{6})(?!\d)", text):
-        code = m.group(1)
-        if code in seen:
-            continue
-        seen.add(code)
-        start = max(0, m.start() - 120)
-        end = min(len(text), m.end() + 60)
-        snippet = text[start:end].strip()
-        snippet = snippet.replace(code, "").strip(" -|,:")
-        if snippet:
-            out.append((code, snippet[:160]))
-        else:
-            out.append((code, ""))
-        if len(out) >= 10:
-            break
+    if lei:
+        out.append(RegistryIdentifier(type=IdentifierType.LEI, value=str(lei)))
     return out
+
+
+def _format_address(address: dict[str, Any] | None) -> str | None:
+    if not isinstance(address, dict):
+        return None
+    parts: list[str] = []
+    lines = address.get("addressLines")
+    if isinstance(lines, list):
+        parts.extend(str(line) for line in lines if line)
+    elif isinstance(lines, str) and lines:
+        parts.append(lines)
+    for key in ("city", "region", "postalCode", "country"):
+        val = address.get(key)
+        if val:
+            parts.append(str(val))
+    cleaned = [p.strip() for p in parts if p and str(p).strip()]
+    return ", ".join(cleaned) if cleaned else None
+
+
+def _first_cl_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for record in records:
+        if _dig(record, "attributes", "entity", "legalAddress", "country") == "CL":
+            return record
+    return records[0] if records else None
+
+
+def _is_chilean_filer(submissions: dict[str, Any]) -> bool:
+    for kind in ("business", "mailing"):
+        country = _dig(submissions, "addresses", kind, "stateOrCountry")
+        if country == "F3":  # EDGAR country code for Chile
+            return True
+    return False
+
+
+def _filings_from_submissions(
+    submissions: dict[str, Any],
+    cik: str,
+    rut_display: str,
+    years: int,
+) -> list[FinancialFiling]:
+    recent = _dig(submissions, "filings", "recent") or {}
+    forms = recent.get("form") or []
+    filing_dates = recent.get("filingDate") or []
+    report_dates = recent.get("reportDate") or []
+    accessions = recent.get("accessionNumber") or []
+    primary_docs = recent.get("primaryDocument") or []
+
+    cik_int = str(int(cik))
+    filings: list[FinancialFiling] = []
+    for i, form in enumerate(forms):
+        if form != "20-F":
+            continue
+        period_end = _parse_date(report_dates[i]) if i < len(report_dates) else None
+        filing_date = _parse_date(filing_dates[i]) if i < len(filing_dates) else None
+        year = (period_end or filing_date or date(1900, 1, 1)).year
+        if year < 1901:
+            continue
+        accession = accessions[i] if i < len(accessions) else ""
+        acc_nodash = accession.replace("-", "")
+        primary = primary_docs[i] if i < len(primary_docs) else ""
+        base = f"{CLAdapter.EDGAR_ARCHIVES}/{cik_int}/{acc_nodash}"
+        filings.append(
+            FinancialFiling(
+                company_id=rut_display,
+                year=year,
+                type=FilingType.ANNUAL_REPORT,
+                period_end=period_end,
+                currency="CLP",
+                structured_data=None,
+                document_url=f"{base}/{primary}" if primary else None,
+                document_format="html" if primary.endswith((".htm", ".html")) else None,
+                source_url=f"{base}/{accession}-index.htm" if accession else base,
+            )
+        )
+        if len(filings) >= max(1, years):
+            break
+    return filings
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None

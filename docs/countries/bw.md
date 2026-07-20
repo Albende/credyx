@@ -1,49 +1,66 @@
-# 🇧🇼 Botswana — CIPA + BURS + BSE
+# 🇧🇼 Botswana — CIPA OBRS + BSE
 
 ## Identifier
 
-- Type: `COMPANY_NUMBER` (CIPA registration number), also `VAT` (BURS TIN).
-- Format: CIPA numbers are alphanumeric (e.g. `CO2010/12345`). No fixed length.
+- Type: `COMPANY_NUMBER` (CIPA registration number).
+- Format: `BW` + 11 digits (e.g. `BW00001731678`). Legacy `CO####/#####`
+  numbers are mapped to the new format inside the OBRS register.
 
 ## Sources
 
-- **CIPA** — https://www.cipa.co.bw / https://eservices.cipa.co.bw
-  - Auth: none for the public form, but every search is gated by Google
-    reCAPTCHA v2. No JSON endpoint. ToS forbids automated access.
-  - Verdict: not usable for a free programmatic adapter.
-- **BURS** (tax authority) — https://www.burs.org.bw
-  - No public VAT/TIN validation endpoint. Verification is in-person /
-    eService account only.
-- **BSE** (Botswana Stock Exchange) — https://www.bse.co.bw
-  - Auth: none. Issuer pages link to annual-report PDFs for free.
+- **CIPA** — https://www.cipa.co.bw
+  - Public "Search the Register" on the Foster Moore Catalyst platform:
+    `https://www.cipa.co.bw/master/ui/start/CIPARegisterSearch`.
+  - Auth: none. The first GET issues an `x-catalyst-registry-session`
+    cookie and redirects to a per-session URL. The Angular front end talks
+    to that URL over a small JSON command protocol
+    (`view-node-set-attribute-value` to fill the search box,
+    `view-node-button-click` to submit); the response is a node-state tree
+    containing the result cards (name, number, status, entity type,
+    registration date, address). **No reCAPTCHA** on this search (the old
+    gated form is retired).
   - Rate limit: undocumented; we self-throttle to 30 / min.
-  - robots.txt: permissive for issuer pages.
+- **BSE** (Botswana Stock Exchange) — https://www.bse.co.bw
+  - Free JSON disclosure API at `https://apis.bse.co.bw`:
+    - `POST /api/v1/x-news-search` with `{"perpage":"5000","search_word":"<ticker>"}`
+      returns a listed issuer's X-News disclosures. Each row has `subject`,
+      `dateannounced`, `instrument` (ticker/issuer), and `uploaded_to` — a
+      real, downloadable PDF (annual reports, integrated reports, audited
+      financials).
+  - Auth: none. robots-friendly JSON.
+- **BURS** (tax authority) — https://www.burs.org.bw
+  - Still no public VAT/TIN validation endpoint. Not used.
 
 ## Test companies
 
+- Sefalana Holding Company Limited — CIPA `BW00001731678`, BSE ticker `SEFA`.
 - First National Bank Botswana — BSE ticker `FNBB`.
-- Sefalana Holding Company — BSE ticker `SEFA`.
-- Choppies Enterprises — BSE ticker `CHOP`.
-- Letshego Holdings — BSE ticker `LHL`.
+- Choppies Enterprises — BSE ticker `CHOPPIES`; CIPA name search "Choppies".
+- Letshego Holdings — BSE ticker `LETSHEGO`.
 
 ## Status
 
-🔴 **Blocked for general search/lookup**, 🟡 **partial** for BSE-listed
-issuers.
+🟢 **Working** for search, lookup, and (BSE-listed) financials — free, no
+API key.
 
-- `search_by_name`: raises `AdapterNotImplementedError` — CIPA is
-  reCAPTCHA-gated.
-- `lookup_by_identifier`: raises `AdapterNotImplementedError` — no free
-  CIPA / BURS endpoint.
-- `fetch_financials`: returns a BSE issuer-page pointer for the four
-  listed tickers above (currency `BWP`); empty for everything else.
-- `health_check`: probes `bse.co.bw`.
+- `search_by_name`: drives the CIPA OBRS register search; returns companies
+  (business names are filtered out) with `BW…` numbers, status, and address.
+- `lookup_by_identifier`: searches CIPA by the exact `BW…` number and returns
+  `CompanyDetails` (legal form, status, incorporation date, registered
+  address). Returns `None` if the number is not on the register.
+- `fetch_financials`: takes a BSE issuer code / ticker (or listed-company
+  name) and returns `FinancialFiling`s for that issuer's annual /
+  integrated / audited reports, each with a real downloadable PDF
+  (`document_url`), currency `BWP`. Empty for non-listed identifiers
+  (only BSE issuers publish free financials).
+- `health_check`: probes the CIPA search page and the BSE X-News API.
 
-**Recommended next steps**
+**Notes / next steps**
 
-1. Wire the cross-cutting PDF pipeline to walk BSE issuer pages and pull
-   year-by-year annual-report PDFs.
-2. Revisit CIPA once they publish their planned developer API (announced
-   under the eServices modernization programme — no ETA).
-3. If paid integration is ever in scope, consider a Botswana credit
-   bureau (TransUnion BW, Compuscan BW) — outside the free MVP rules.
+1. CIPA financials: private companies file annual returns but do not publish
+   accounts, so filed balance sheets are only available for BSE issuers.
+2. The BSE disclosure PDFs (often 20–30 MB integrated reports) are ideal
+   input for the cross-cutting PDF text-extraction pipeline.
+3. Bridging a CIPA number → BSE ticker for listed companies would let
+   `fetch_financials` be called with the same identifier as lookup; today
+   the caller passes the ticker for the listed-company path.

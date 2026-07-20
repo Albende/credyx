@@ -1,49 +1,62 @@
-# 🇪🇬 Egypt — GAFI / ETA / EGX
+# 🇪🇬 Egypt — GLEIF registry + AnnualReports.com filings
 
 ## Identifier
 
-- Primary: `COMPANY_NUMBER` — Commercial Registration Number (CR), variable digits.
+- Primary: `COMPANY_NUMBER` — Commercial Registration number (CR), variable
+  digits. A 20-character `LEI` is also accepted by `lookup_by_identifier`
+  and looked up directly.
 - Secondary: `VAT` — Egyptian Tax Authority Tax ID, 9 digits, commonly
-  formatted `NNN-NNN-NNN` (e.g. `200-118-815`).
+  formatted `NNN-NNN-NNN` (e.g. `200-118-815`). No free source indexes it.
 
 ## Sources
 
-- **GAFI** (General Authority for Investment & Free Zones) — https://www.gafi.gov.eg/
-  - Investor portal. Public data extremely limited; full CR records sit
-    behind a sessioned web form. No documented JSON API.
-- **ETA** (Egyptian Tax Authority) — tax verifier portal.
-  - Partial public lookup, captcha-gated form submissions only.
-- **EGX** (Egyptian Stock Exchange) — https://www.egx.com.eg/
-  - Free disclosure pages and annual report PDFs for listed companies
-    (Arabic + English). No documented JSON API; per-issuer pages are
-    keyed by ticker symbol (`COMI`, `ETEL`, `EAST`, `TMGH`, …).
-- **Auth**: None publicly. GAFI/ETA require interactive sessions.
+- **GLEIF** — https://api.gleif.org/api/v1 (free, key-less, JSON:API).
+  - Egyptian entities carry the CR number in `entity.registeredAs`
+    (registration authority `RA888888` — Ministry of Trade and Industry
+    Commercial Registry). Powers both `search_by_name`
+    (`filter[fulltext]` + `filter[entity.legalAddress.country]=EG`) and
+    `lookup_by_identifier` (`filter[entity.registeredAs]` → LEI → full
+    record).
+- **AnnualReports.com** — https://www.annualreports.com
+  - Hosts the actual filed annual-report PDFs of listed Egyptian issuers
+    (e.g. `.../HostedData/AnnualReportArchive/c/OTC_CIBEY_2023.pdf`).
+    `fetch_financials` resolves the company name via GLEIF, locates its
+    AnnualReports company page, and returns only PDFs that genuinely
+    download (verified `application/pdf` / `%PDF-` magic). Coverage is
+    issuer-by-issuer; uncovered companies return an empty list (no fabrication).
+- **Blocked — not used**: GAFI (gafi.gov.eg) and ETA are sessioned
+  captcha-gated web forms; the Egyptian Exchange (egx.com.eg) is behind
+  F5/Shape bot defence that FlareSolverr cannot clear (returns the F5
+  interstitial, support-ID page). No free national-registry JSON API exists.
+- **Auth**: None. No API key required.
 - **Rate limit**: None documented. Adapter throttles to 30 req/min.
-- **robots.txt / ToS**: EGX permits public access to disclosure pages.
-  GAFI/ETA disallow automated harvesting of their gated areas.
 
 ## Test companies
 
-- Commercial International Bank (CIB) — Tax ID `200-118-815`, EGX `COMI`.
-- Telecom Egypt — Tax ID `200-194-841`, EGX `ETEL`.
+- Commercial International Bank (CIB) — CR `69826`, LEI
+  `213800FIIXJAMEVRIH48`, EGX `COMI`. GLEIF search + CR lookup succeed;
+  AnnualReports has 2020–2023 annual-report PDFs.
+- Telecom Egypt — LEI `2138002G9HYJY4EDCG86`, EGX `ETEL`. GLEIF search +
+  lookup succeed; not on AnnualReports → `fetch_financials` returns `[]`.
 - Eastern Company (Eastern Tobacco) — Tax ID `200-001-068`, EGX `EAST`.
 - Talaat Moustafa Group — EGX `TMGH`.
 
 ## Status
 
-🔴 **Blocked** — no free national-registry API.
-🟡 **Partial** — EGX disclosure URLs surfaced for listed tickers via
-`fetch_financials`; PDF parsing not yet wired.
+🟢 **Working** — `search_by_name` and `lookup_by_identifier(COMPANY_NUMBER)`
+return real GLEIF registry records; `fetch_financials` returns real,
+downloadable annual-report PDFs for AnnualReports-covered issuers (verified
+live against CIB, CR `69826`).
 
-`search_by_name` and `lookup_by_identifier` raise
-`AdapterNotImplementedError` and surface as HTTP 501 to clients.
+`lookup_by_identifier(VAT, …)` raises `AdapterNotImplementedError` (surfaces
+as HTTP 501) — no free source maps the ETA Tax ID to a company.
 
 ## Recommended next steps
 
-1. Wire a Playwright-backed scraper for EGX issuer pages to fetch the
-   per-year annual-report PDFs, then pipe through the PDF text extractor
-   (see `packages/risk` / Phase 2 infra notes in `CLAUDE.md`).
-2. Evaluate paid GAFI/ETA channels in Phase 2 — out of scope today
-   (no paid APIs in MVP).
-3. Cross-reference Egyptian entities against OpenSanctions and GLEIF
-   (LEI search) inside the risk engine before the LLM step.
+1. Widen filing coverage beyond AnnualReports: an EGX scraper is blocked by
+   F5/Shape, so evaluate the FRA disclosure portal (non-bank financials
+   only) and per-issuer investor-relations PDFs.
+2. Wire the PDF text extractor (`packages/risk` / Phase-2 infra) over the
+   returned annual-report PDFs to populate `structured_data`.
+3. Cross-reference Egyptian entities against OpenSanctions and GLEIF inside
+   the risk engine before the LLM step.

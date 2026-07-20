@@ -6,13 +6,12 @@ from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.ge import GEAdapter
 from packages.adapters.ge.adapter import (
     _classify_status,
-    _extract_company_record,
-    _extract_search_results,
     _normalize_id,
-    _parse_capital,
     _parse_ge_date,
+    _parse_search_rows,
+    _reportal_directors,
 )
-from packages.shared.models import IdentifierType
+from packages.shared.models import FilingType, IdentifierType
 
 
 def test_normalize_id_accepts_clean_nine_digits():
@@ -43,86 +42,61 @@ def test_parse_ge_date_handles_common_formats():
 
 def test_classify_status_handles_georgian_and_english():
     assert _classify_status("მოქმედი") == "active"
+    assert _classify_status("აქტიური") == "active"
     assert _classify_status("Active") == "active"
     assert _classify_status("გაუქმებული") == "inactive"
     assert _classify_status("Liquidated") == "inactive"
     assert _classify_status(None) is None
 
 
-def test_parse_capital_handles_gel_amounts():
-    amount, currency = _parse_capital("100 000,00 GEL")
-    assert amount == 100000.0
-    assert currency == "GEL"
-
-    amount, currency = _parse_capital("5000 ლარი")
-    assert amount == 5000.0
-    assert currency == "GEL"
-
-    amount, currency = _parse_capital("1,500.50 USD")
-    assert amount == 1500.50
-    assert currency == "USD"
-
-    amount, currency = _parse_capital("")
-    assert amount is None
-    assert currency is None
-
-
-def test_extract_company_record_parses_two_column_table():
+def test_parse_search_rows_extracts_legal_person():
     html = """
-    <html><body>
-      <table>
-        <tr><td>დასახელება:</td><td>სს "საქართველოს ბანკი"</td></tr>
-        <tr><td>საიდენტიფიკაციო ნომერი:</td><td>204378869</td></tr>
-        <tr><td>სამართლებრივი ფორმა:</td><td>სააქციო საზოგადოება</td></tr>
-        <tr><td>სტატუსი:</td><td>მოქმედი</td></tr>
-        <tr><td>მისამართი:</td><td>თბილისი, გაგარინის ქ. 29ა</td></tr>
-        <tr><td>კაპიტალი:</td><td>100 000,00 GEL</td></tr>
-        <tr><td>რეგისტრაციის თარიღი:</td><td>21.10.1994</td></tr>
-        <tr><td>ხელმძღვანელი:</td><td>Archil Gachechiladze</td></tr>
-      </table>
-    </body></html>
-    """
-    record = _extract_company_record(html)
-    assert "საქართველოს ბანკი" in record["name"]
-    assert record["legal_form"].startswith("სააქციო")
-    assert record["status_raw"] == "მოქმედი"
-    assert "თბილისი" in record["address"]
-    assert record["capital"] == "100 000,00 GEL"
-    assert record["registration_date"] == "21.10.1994"
-    assert "Archil Gachechiladze" in record["directors"]
-
-
-def test_extract_company_record_empty_when_no_table():
-    assert _extract_company_record("") == {}
-    assert _extract_company_record("<html><body>No data</body></html>") == {}
-
-
-def test_extract_search_results_finds_anchor_matches():
-    html = """
-    <table>
-      <tr><td><a href="main.php?c=app&m=show_legal_person&legal_code=204378869">
-        სს საქართველოს ბანკი
-      </a></td><td>თბილისი</td></tr>
-      <tr><td><a href="/main.php?c=app&m=show_legal_person&legal_code=204854595">
-        სს თიბისი ბანკი
-      </a></td></tr>
+    <table class="main_tbl">
+      <tbody>
+        <tr>
+          <td><a href="javascript:void(0)" onclick="show_legal_person(244586)">
+            <img src="info.png"></a></td>
+          <td><span style="font-weight:bold">204378869</span></td>
+          <td><span style="font-weight:bold"></span></td>
+          <td> სს საქართველოს ბანკი </td>
+          <td> სააქციო საზოგადოება </td>
+          <td><span class="st1"> აქტიური </span></td>
+        </tr>
+      </tbody>
     </table>
     """
-    results = _extract_search_results(html)
-    ids = [r["id"] for r in results]
-    assert "204378869" in ids
-    assert "204854595" in ids
+    rows = _parse_search_rows(html)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "204378869"
+    assert row["record_id"] == "244586"
+    assert "საქართველოს ბანკი" in row["name"]
+    assert row["legal_form"].startswith("სააქციო")
+    assert "აქტიური" in row["status_raw"]
 
 
-def test_extract_search_results_handles_plain_text_fallback():
+def test_parse_search_rows_skips_rows_without_id_code():
     html = """
     <table>
-      <tr><td>სს საქართველოს ბანკი</td><td>204378869</td></tr>
+      <tr><td>no record link here</td><td>404788529</td></tr>
     </table>
     """
-    results = _extract_search_results(html)
-    assert results
-    assert results[0]["id"] == "204378869"
+    assert _parse_search_rows(html) == []
+    assert _parse_search_rows("") == []
+
+
+def test_reportal_directors_builds_from_json():
+    payload = {
+        "directors": [
+            {"FirstName": "დავით", "LastName": "მამულაიშვილი", "PersonType": "დირექტორი"},
+            {"FirstName": "დავით", "LastName": "მამულაიშვილი", "PersonType": "დირექტორი"},
+            {"FirstName": "ანა", "LastName": "კოსტავა", "PersonType": None},
+        ]
+    }
+    directors = _reportal_directors(payload)
+    assert [d.name for d in directors] == ["დავით მამულაიშვილი", "ანა კოსტავა"]
+    assert directors[0].role == "დირექტორი"
+    assert _reportal_directors({}) == []
 
 
 @pytest.mark.asyncio
@@ -130,12 +104,6 @@ async def test_lookup_rejects_unsupported_identifier():
     adapter = GEAdapter()
     with pytest.raises(InvalidIdentifierError):
         await adapter.lookup_by_identifier(IdentifierType.LEI, "204378869")
-
-
-@pytest.mark.asyncio
-async def test_fetch_financials_returns_empty():
-    adapter = GEAdapter()
-    assert await adapter.fetch_financials("204378869") == []
 
 
 @pytest.mark.asyncio
@@ -152,17 +120,14 @@ async def test_health_check_reports_status():
 @pytest.mark.integration
 async def test_lookup_bank_of_georgia_returns_company_details():
     adapter = GEAdapter()
-    details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "204378869"
-    )
+    details = await adapter.lookup_by_identifier(IdentifierType.VAT, "204378869")
     assert details is not None
     assert details.country == "GE"
     assert details.id == "204378869"
-    assert details.name
-    upper = details.name.upper()
-    assert any(
-        token in upper for token in ("BANK OF GEORGIA", "BOG", "ბანკი")
-    )
+    assert "ბანკი" in details.name
+    assert details.status == "active"
+    assert details.incorporation_date is not None
+    assert details.directors
 
 
 @pytest.mark.asyncio
@@ -174,17 +139,27 @@ async def test_lookup_tbc_bank_returns_company_details():
     )
     assert details is not None
     assert details.id == "204854595"
-    upper = details.name.upper()
-    assert any(token in upper for token in ("TBC", "თიბისი"))
+    assert "თიბისი" in details.name
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_search_by_name_returns_matches():
     adapter = GEAdapter()
-    results = await adapter.search_by_name("Bank of Georgia", limit=5)
-    assert isinstance(results, list)
-    if results:
-        # The NAPR result list should at least include Bank of Georgia
-        # (204378869) for this query.
-        assert any(r.id == "204378869" for r in results)
+    results = await adapter.search_by_name("სილქნეტი", limit=5)
+    assert results
+    assert any(r.id == "204566978" for r in results)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_returns_filing_metadata():
+    adapter = GEAdapter()
+    filings = await adapter.fetch_financials("204566978", years=3)
+    assert filings
+    latest = filings[0]
+    assert latest.company_id == "204566978"
+    assert latest.type == FilingType.ANNUAL_REPORT
+    assert latest.currency == "GEL"
+    assert latest.document_url is None
+    assert latest.source_url and "reportal.ge" in latest.source_url

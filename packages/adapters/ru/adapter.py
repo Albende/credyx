@@ -1,16 +1,28 @@
-"""Russia adapter — Federal Tax Service (FNS) public registries.
+"""Russia adapter — FNS registry + Bank of Russia financial disclosure.
 
 Source coverage:
 
 * https://egrul.nalog.ru/ — Unified State Register of Legal Entities /
   Individual Entrepreneurs (ЕГРЮЛ / ЕГРИП). Public name + INN + OGRN
   search. Two-step protocol: POST a form, get a token, GET the result
-  JSON by token.
-* https://bo.nalog.ru/ — State Information Resource for Accounting
-  Reports (ГИРБО). Annual balance sheets and P&L filed with the FNS
-  since 2019. Free PDF / Excel downloads.
+  JSON by token. Powers ``search_by_name`` and ``lookup_by_identifier``.
+* https://www.cbr.ru/finorg/ — Bank of Russia (Центральный банк РФ)
+  financial-organization disclosure portal. Every credit institution,
+  NPF, insurer, MFO and other supervised financial entity files its
+  statutory reporting forms here (Форма 101 turnover balance, Форма 102
+  statement of financial results, Форма 123/135 capital, consolidated
+  forms 802/803/805, and the annual RAS accounts). Powers
+  ``fetch_financials`` for financial-sector counterparties.
 
 Both are FREE government endpoints, no API key required.
+
+The FNS accounting-reports resource (ГИРБО, bo.nalog.gov.ru) covers
+*non-financial* companies' balance sheets, but its search index returns
+an empty result set to requests originating outside the Russian
+Federation — verified against a real browser session — so it is not a
+usable financials source from an ex-RU deployment. Non-financial RU
+companies therefore return no filings until the platform runs from a
+Russian egress; see docs/countries/ru.md.
 
 Identifiers (Russian numbering):
 
@@ -173,7 +185,7 @@ def _extract_name(rec: dict[str, Any]) -> str | None:
 
 
 def _extract_address(rec: dict[str, Any]) -> str | None:
-    return _first_str(rec, ("a", "adr", "address", "addr"))
+    return _first_str(rec, ("a", "adr", "address", "addr", "rn"))
 
 
 def _extract_director(rec: dict[str, Any]) -> str | None:
@@ -215,10 +227,9 @@ class RUAdapter(CountryAdapter):
     EGRUL_SEARCH_PATH = "/"
     EGRUL_RESULT_PATH = "/search-result/{token}"
 
-    BO_BASE_URL = "https://bo.nalog.ru"
-    BO_SEARCH_PATH = "/nbo/organizations/search"
-    BO_REPORTS_PATH = "/nbo/organizations/{org_id}/bfo/"
-    BO_FILE_PATH = "/nbo/bfo/{report_id}/transformation-file/"
+    CBR_BASE_URL = "https://www.cbr.ru"
+    CBR_REPORTS_PATH = "/finorg/foinfo/reports/"
+    CBR_F102_PATH = "/banking_sector/credit/coinfo/f102"
 
     def _client(self, *, base_url: str | None = None) -> httpx.AsyncClient:
         return build_http_client(
@@ -331,7 +342,8 @@ class RUAdapter(CountryAdapter):
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
                 "Lookup + name search via egrul.nalog.ru; financials via "
-                "bo.nalog.ru (PDF/Excel since 2019)."
+                "cbr.ru disclosure (banks/NFOs). Non-financial GIRBO "
+                "accounts require a RU egress (bo.nalog.gov.ru geo-blocks)."
             ),
         )
 
@@ -477,118 +489,103 @@ class RUAdapter(CountryAdapter):
             source_url=f"{self.EGRUL_BASE_URL}/?query={primary_id}",
         )
 
+    async def _resolve_ogrn(self, cleaned: str) -> tuple[str, str | None]:
+        """Return ``(ogrn, inn)`` for a cleaned INN or OGRN string.
+
+        The Bank of Russia disclosure index keys on OGRN; when only an INN
+        is supplied it is resolved to the entity's OGRN via a single EGRUL
+        round-trip.
+        """
+        if _OGRN_RE.match(cleaned):
+            ogrn = _normalize_ogrn(cleaned)
+            async with self._client() as client:
+                rows = await self._egrul_query(client, ogrn)
+            inn = _first_str(rows[0], ("i", "inn")) if rows else None
+            return ogrn, inn
+        if _INN_RE.match(cleaned):
+            inn = _normalize_inn(cleaned)
+            async with self._client() as client:
+                rows = await self._egrul_query(client, inn)
+            ogrn = _first_str(rows[0], ("o", "ogrn", "ogrnip")) if rows else None
+            return (ogrn or ""), inn
+        raise InvalidIdentifierError(
+            f"Russia fetch_financials needs an INN or OGRN, got: {cleaned}"
+        )
+
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        """Pull annual accounting reports from bo.nalog.ru by INN.
+        """Pull annual financial statements from the Bank of Russia.
 
-        The portal indexes by INN, not OGRN; if an OGRN is supplied we
-        resolve it to INN via an EGRUL round-trip first.
+        The FNS accounting resource (bo.nalog.gov.ru / ГИРБО) geo-blocks
+        its search index outside Russia, so financial-sector counterparties
+        are served from the CBR disclosure portal instead: the reports
+        index at ``/finorg/foinfo/reports/?ogrn=`` enumerates every filed
+        Форма 102 (statement of financial results), one per reporting year.
+        Non-financial entities have no CBR disclosure and return no filings.
         """
         cleaned = re.sub(r"[\s\-]", "", company_id.strip()).upper()
         if cleaned.startswith("RU"):
             cleaned = cleaned[2:]
-        if _INN_RE.match(cleaned):
-            inn = _normalize_inn(cleaned)
-        elif _OGRN_RE.match(cleaned):
-            ogrn = _normalize_ogrn(cleaned)
-            async with self._client() as client:
-                rows = await self._egrul_query(client, ogrn)
-            inn_str = None
-            if rows:
-                inn_str = _first_str(rows[0], ("i", "inn"))
-            if not inn_str:
-                return []
-            inn = _normalize_inn(inn_str)
-        else:
-            raise InvalidIdentifierError(
-                f"Russia fetch_financials needs an INN or OGRN, got: {company_id}"
-            )
+
+        ogrn, inn = await self._resolve_ogrn(cleaned)
+        if not ogrn:
+            return []
 
         async with build_http_client(
-            base_url=self.BO_BASE_URL,
+            base_url=self.CBR_BASE_URL,
             headers={
-                "Accept": "application/json, text/plain;q=0.9, */*;q=0.5",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
                 "Accept-Language": "ru,en;q=0.5",
-                "Referer": "https://bo.nalog.ru/",
+                "Referer": f"{self.CBR_BASE_URL}/finorg/foinfo/?ogrn={ogrn}",
             },
             timeout=25.0,
         ) as client:
-            search_resp = await get_with_retry(
-                client,
-                self.BO_SEARCH_PATH,
-                params={"query": inn, "page": "0"},
+            resp = await get_with_retry(
+                client, self.CBR_REPORTS_PATH, params={"ogrn": ogrn}
             )
-            if search_resp.status_code == 404:
+            if resp.status_code == 404:
                 return []
-            search_resp.raise_for_status()
-            try:
-                search_payload = search_resp.json()
-            except ValueError:
-                return []
+            resp.raise_for_status()
+            html = resp.text
 
-            orgs = (
-                search_payload.get("content")
-                if isinstance(search_payload, dict)
-                else None
-            )
-            if not isinstance(orgs, list) or not orgs:
-                return []
-            org = orgs[0]
-            org_id = org.get("id") if isinstance(org, dict) else None
-            if not org_id:
-                return []
-
-            reports_resp = await get_with_retry(
-                client, self.BO_REPORTS_PATH.format(org_id=org_id)
-            )
-            if reports_resp.status_code == 404:
-                return []
-            reports_resp.raise_for_status()
-            try:
-                reports_payload = reports_resp.json()
-            except ValueError:
-                return []
-
-        if not isinstance(reports_payload, list):
+        regnum_match = re.search(r"coinfo/f10[12]\?regnum=(\d+)", html)
+        if not regnum_match:
             return []
+        regnum = regnum_match.group(1)
 
-        filings: list[FinancialFiling] = []
-        cutoff_year = datetime.utcnow().year - years
-        for item in reports_payload:
-            if not isinstance(item, dict):
-                continue
-            period = item.get("period") or item.get("year")
-            try:
-                year = int(str(period)[:4]) if period else None
-            except (TypeError, ValueError):
-                year = None
-            if year is None or year < cutoff_year:
-                continue
-            report_id = item.get("id")
-            period_end = _parse_ru_date(item.get("dateUpdate") or item.get("date"))
-            if period_end is None and year is not None:
-                period_end = date(year, 12, 31)
-            document_url = None
-            if report_id is not None:
-                document_url = (
-                    f"{self.BO_BASE_URL}"
-                    f"{self.BO_FILE_PATH.format(report_id=report_id)}"
+        # Форма 102 dated 1 January YYYY is the statement of financial
+        # results for the full year YYYY-1.
+        year_end_dates = sorted(
+            set(
+                re.findall(
+                    r"coinfo/f102\?regnum=\d+&(?:amp;)?dt=(\d{4}-01-01)", html
                 )
+            ),
+            reverse=True,
+        )
+
+        company_key = inn or ogrn
+        cutoff_year = datetime.utcnow().year - years
+        filings: list[FinancialFiling] = []
+        for dt in year_end_dates:
+            report_year = int(dt[:4]) - 1
+            if report_year < cutoff_year:
+                continue
             filings.append(
                 FinancialFiling(
-                    company_id=inn,
-                    year=year,
+                    company_id=company_key,
+                    year=report_year,
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=period_end,
+                    period_end=date(report_year, 12, 31),
                     currency="RUB",
                     structured_data=None,
-                    document_url=document_url,
-                    document_format="pdf",
-                    source_url=f"{self.BO_BASE_URL}/organizations-card/{org_id}",
+                    document_url=None,
+                    document_format=None,
+                    source_url=(
+                        f"{self.CBR_BASE_URL}{self.CBR_F102_PATH}"
+                        f"?regnum={regnum}&dt={dt}"
+                    ),
                 )
             )
-        # bo.nalog.ru returns newest-first occasionally; normalize to
-        # descending year for predictable consumer ordering.
-        filings.sort(key=lambda f: f.year, reverse=True)
         return filings

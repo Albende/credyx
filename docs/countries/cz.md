@@ -17,13 +17,20 @@
   2. `GET /ias/ui/vypis-sl-firma?subjektId={id}` → list of filed documents; rows
      tagged `účetní závěrka` (financial statements), `výroční zpráva` (annual
      report), each with the accounting year in `[YYYY]`.
-  3. `GET /ias/ui/vypis-sl-detail?dokument={d}&subjektId={id}&spis={s}` → resolve
-     the real download link `/ias/content/download?id=…`.
+  3. `GET /ias/ui/vypis-sl-detail?dokument={d}&subjektId={id}&spis={s}` → the
+     stable, per-company detail page that resolves a `/ias/content/download?id=…`
+     link. This detail URL is what the adapter returns as `source_url`.
   - Documents are filed PDF or, for listed issuers, iXBRL/ESEF `.xhtml`. The
-    download link truly returns that company's file (verified via
-    `Content-Disposition`). Structured extraction (PDF/XBRL parsing) is a
-    separate downstream step — the adapter returns per-filing metadata +
-    document_url only.
+    `download?id=…` token is bound to the session/backend node that minted it;
+    behind or.justice.cz's round-robin a bare token URL only resolves ~half the
+    time for a stateless caller, so the adapter does **not** emit it as
+    `document_url`. Instead `source_url` points at the stable detail page — a
+    downstream fetcher re-resolves a fresh download link there within its own
+    session (verified: full re-resolve flow returns the real file with a
+    `Content-Disposition` attachment, e.g. 30 MB ESEF `.xhtml` for ČEZ 2025).
+    Structured extraction (PDF/XBRL parsing) is a separate downstream step —
+    the adapter returns per-filing metadata (year, type, currency, period_end,
+    format, source_url) only.
 
 ## Test companies
 

@@ -1,97 +1,97 @@
-# 🇵🇪 Peru — SUNAT (RUC verifier) + SMV (listed-company filings)
+# 🇵🇪 Peru — BVL / SMV listed-company data (dataondemand API)
 
 ## Identifier
 
-- Type: `VAT` (primary, since RUC doubles as the corporate tax ID), plus
-  `COMPANY_NUMBER` as an alias.
-- Format: **RUC** (Registro Único de Contribuyentes) — 11 digits.
-  - First two digits encode contributor type: `20` = corporate (persona
-    jurídica). Companies are the only contributors we care about for
-    credit-risk analysis.
-- Validation: the adapter normalizes input (strips `PE` prefix,
-  whitespace, dashes, dots) and verifies length + digit-only format.
-  - **We do not enforce the published Mod-11 checksum.** SUNAT's
-    canonical weight sequence (`5,4,3,2,7,6,5,4,3,2`) does not match
-    every live RUC — historical/transitional records exist that fail
-    strict validation but are nonetheless valid in SUNAT's database
-    (e.g. `20100068133` Credicorp Capital). Per the no-mock-data rule,
-    SUNAT itself is the authority on existence.
+- Type: `COMPANY_NUMBER` (primary) — the BVL **companyCode** (short numeric
+  BVL issuer code, e.g. `61200`), plus `OTHER` as an alias carrier for the
+  SMV **rpjCode** ("Registro Público del Mercado de Valores" code, e.g.
+  `B20003`) and the exchange **ticker/nemónico** (e.g. `BVN`, `BUENAVC1`).
+- The Peruvian tax id (**RUC**, 11 digits) is *not* carried by this source
+  and is **not** an accepted identifier here — see "SUNAT" below for why.
+- Resolution rules:
+  - A digit-only value is treated as a BVL companyCode and looked up
+    directly via `GET /v1/issuers/{companyCode}`.
+  - A non-numeric value is treated as an rpjCode or ticker and resolved by
+    scanning the full issuer list.
+  - Start from a name via `search_by_name` when you don't have a code.
 
 ## Sources
 
-- **Primary — SUNAT public RUC verifier**:
-  `https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias?accion=consPorRuc&nroRuc={RUC}`
-  - Auth: none.
-  - Method: HTTP GET, response is HTML. We strip tags and pull labelled
-    fields: `Número de RUC`, `Tipo Contribuyente`, `Estado del
-    Contribuyente`, `Condición del Contribuyente`, `Domicilio Fiscal`,
-    `Actividad(es) Económica(s)`.
-  - Rate limit: undocumented; we self-throttle to 30 req/min.
-  - **Status:** intermittent CAPTCHA wall. SUNAT periodically fronts
-    requests with `txtCodigo`-style CAPTCHA challenges. When that
-    happens the adapter raises `BlockedByRegistryError` and the health
-    check reports `blocked`. The block is real, not a bug — we don't
-    fabricate parsed values to mask it.
-- **Listed-company filings — SMV (Superintendencia del Mercado de
-  Valores)**: `https://www.smv.gob.pe/Frm_InformacionFinanciera.aspx?data={RUC}`
-  - Auth: none.
-  - SMV only covers listed/regulated entities. The adapter probes the
-    discovery page once per call and looks for SMV's filing labels
-    ("Información Financiera Anual", "Memoria Anual", "Estados
-    Financieros Auditados"). If absent — i.e. the RUC isn't supervised
-    by SMV — `fetch_financials` returns `[]`. No fabrication.
-  - Structured line-item extraction would require parsing the per-year
-    XBRL/PDF reports linked from the SMV page; that is Phase-2 work
-    once the PDF pipeline lands (see `CLAUDE.md` → Cross-cutting
-    infrastructure).
+- **Primary — BVL "data on demand" API** (`https://dataondemand.bvl.com.pe`),
+  the public backend of the Bolsa de Valores de Lima, fed by the SMV
+  (securities regulator). Auth: **none, no key**. JSON.
+  - `GET /v1/issuers` — every listed/registered issuer: name, sector,
+    address, website, founding date, tickers/ISINs (`listValue`), and the
+    list of filed annual documents (`listMemoryEEFF`: Memoria Anual,
+    Estados Financieros, gobierno corporativo, etc.).
+  - `GET /v1/issuers/{companyCode}` — a single issuer record.
+  - `GET /v1/financial-statements/{rpjCode}` — the issuer's audited
+    financial ratios per year (Liquidez, Rotación de Activos, Solvencia,
+    Deuda/Patrimonio, Rentabilidad de Patrimonio %, Valor en libros %).
+  - Self-throttled to 30 req/min. Coverage is listed/registered issuers
+    (~340 companies), not the whole SUNAT universe.
+
+- **SUNAT RUC verifier — NOT USED (blocked).**
+  `https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias` now
+  fronts every RUC lookup with an **invisible reCAPTCHA v3** challenge
+  (`site_key_sunat`, action `consultaRUC01`) and resets raw non-browser
+  connections at the TLS layer. It cannot be read key-free / without
+  solving a paid captcha, so per the no-mock-data rule we do not scrape it.
 
 ### Considered and rejected
 
-- `apis.net.pe` / `apiruc.com` community wrappers around SUNAT — both
-  require either a free token (`apis.net.pe`) or impose tight free-tier
-  rate limits. The direct SUNAT JSP is the canonical free source; we
-  don't add a community-wrapper hop that can disappear without notice.
-  If/when SUNAT's CAPTCHA wall hardens, revisit.
+- Community RUC wrappers — `apis.net.pe`, `api.decolecta.com`,
+  `apiperu.dev`, `dniruc.apisperu.com`, `api.migo.pe` — **all now
+  token-gated** (401/422 without a registered key). A user-registered key
+  does not count as key-free, so none is wired in.
+- SMV website (`www.smv.gob.pe`) — the old `Frm_InformacionFinanciera.aspx`
+  endpoints 301-redirect to `gob.pe/smv` and no longer serve data; the same
+  filings are exposed through the BVL dataondemand API used here.
+- BVL EEFF document PDFs (`/eeff/{rpjCode}/…/*.PDF` paths in
+  `listMemoryEEFF`) — the download host serves the SPA shell for these
+  paths, so a working `document_url` could not be confirmed. We therefore
+  surface the Memoria Anual reference inside `structured_data` but leave
+  `document_url = None` rather than pass off a non-downloading URL.
 
 ## Capabilities
 
 | Capability | Status |
 |------------|--------|
-| Search by name | 🔴 Not implemented — SUNAT name search requires CAPTCHA token |
-| Lookup by RUC | 🟡 Live when SUNAT serves; raises `BlockedByRegistryError` when CAPTCHA wall is up |
-| Financials | 🟡 Live for SMV-supervised entities (discovery URL only); `[]` otherwise |
+| Search by name | 🟢 Live — filters the BVL issuer list (accent-insensitive) |
+| Lookup by identifier | 🟢 Live — BVL companyCode, or SMV rpjCode / ticker alias |
+| Financials | 🟢 Live — per-year audited financial ratios as `structured_data` (PEN) |
 
 ## Adapter config
 
 - `country_code = "PE"`, `country_name = "Peru"`
-- `identifier_types = [VAT, COMPANY_NUMBER]`, primary = `VAT`
+- `identifier_types = [COMPANY_NUMBER, OTHER]`, primary = `COMPANY_NUMBER`
 - `requires_api_key = False`
 - `rate_limit_per_minute = 30`
 
 ## Test companies
 
-- Credicorp Capital S.A. — RUC `20100068133`
-- Compañía de Minas Buenaventura S.A.A. — RUC `20100079501`
-- Cementos Pacasmayo S.A.A. — RUC `20419387658`
-- Unión de Cervecerías Peruanas Backus y Johnston S.A.A. (Backus
-  Holdings) — RUC `20100113610`
+| Company | BVL companyCode | SMV rpjCode | Ticker |
+|---------|-----------------|-------------|--------|
+| Compañía de Minas Buenaventura S.A.A. | `61200` | `B20003` | `BVN` |
+| Cementos Pacasmayo S.A.A. | `23950` | `CD0005` | `CPAC` |
+| Unión de Cervecerías Peruanas Backus y Johnston S.A.A. | `21802` | `B30021` | `BACKUSI1` |
+| Credicorp Ltd. | `73250` | `B60051` | `BAP` |
 
 ## Status
 
-🟡 **Partially live.** Lookup by RUC works when SUNAT is serving;
-blocked behind CAPTCHA otherwise. SMV financial-filing discovery URL
-returned for SMV-supervised RUCs (i.e. listed companies). Name search
-not implemented.
+🟢 **Live.** Search, lookup, and financials all return real data key-free
+from the BVL/SMV dataondemand API. Coverage is limited to listed /
+registered issuers (the entities with public filed financials); there is
+no free, key-less, captcha-free source for the general Peruvian company
+universe (SUNAT RUC lookup is reCAPTCHA-v3 walled).
 
 **Recommended next steps:**
 
-1. Wire SUNAT through the planned browser pool (`packages/adapters/_base/browser.py`)
-   once it lands, so the CAPTCHA challenge can be solved on demand and
-   `lookup_by_identifier` becomes reliably live.
-2. Parse the SMV per-company XBRL/PDF filings into
-   `FinancialFiling.structured_data` (balance sheet + P&L line items)
-   once the PDF/XBRL pipeline is built.
-3. For closed-capital / non-supervised firms there is no free
-   alternative for filed balance sheets in Peru — credit signals will
-   need to come from SUNAT status fields (`HABIDO`/`NO HABIDO`,
-   `ACTIVO`/`SUSPENSION TEMPORAL`/`BAJA`) plus OpenSanctions screening.
+1. Resolve a working BVL/SMV document host so `listMemoryEEFF` Memoria
+   Anual / Estados Financieros PDFs can be attached as downloadable
+   `document_url`s and parsed into line-item `structured_data` once the
+   PDF pipeline lands.
+2. If RUC-keyed lookup becomes a requirement, wire SUNAT through the
+   planned browser pool + a reCAPTCHA-solving step (paid), or ingest the
+   SUNAT "Padrón RUC" bulk open-data dump for offline RUC→name resolution.
+3. Screen issuers against OpenSanctions before the LLM runs.

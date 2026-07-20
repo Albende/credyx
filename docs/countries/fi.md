@@ -25,6 +25,12 @@
 
 🟢 **Live** — search + lookup + financials all return real data.
 
+`search_by_name` / `lookup_by_identifier` surface the Y-tunnus, current
+company name, full registered address (street + postcode + city, city pulled
+from the localized `postOffices` array), human-readable legal form and
+registration status (from the payload's localized descriptions, EN preferred),
+the primary business line NACE code, and the website when present.
+
 Financials come from the PRH Opendata XBRL API, which covers only digital
 (iXBRL) statements — about 5% of all filers, mostly SMEs. Large listed groups
 are absent here because their IFRS filings live on Nasdaq Helsinki, not the

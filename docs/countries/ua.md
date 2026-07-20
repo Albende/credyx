@@ -78,12 +78,16 @@ filed reports of every **securities issuer** for free:
 
 ## Status
 
-✅ **Live** (July 2026, re-verified) — search + lookup via Clarity Project
-HTML with FlareSolverr bot-wall bypass; directors/KVED reduced vs. the old
-JSON API.
+✅ **Live** (2026-07-21, re-verified) — search + lookup via Clarity Project
+HTML with FlareSolverr bot-wall bypass (origin serves HTTP 403 to naked
+clients; FlareSolverr at `http://127.0.0.1:8191` clears the challenge);
+directors/KVED reduced vs. the old JSON API.
 ✅ Financials: SMIDA regular annual reports for securities issuers
 (verified live for EDRPOU `20077720` Naftogaz and `00135390` Ukrnafta —
-3 annual filings each). Non-issuers return `[]` (no free national dataset).
+3 annual filings each). The `document_url` filing viewer was confirmed
+company-specific (the page for report id `116448` embeds EDRPOU `20077720`,
+the Naftogaz name and the `2017` reporting year). Non-issuers return `[]`
+(no free national dataset).
 
 **Recommended next step:** Subscribe nightly to the data.gov.ua YeDR
 dump as a fallback when Clarity Project is unreachable, and add a parser

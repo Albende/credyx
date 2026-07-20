@@ -30,8 +30,11 @@
     **Max one-year date window per request** (larger spans → HTTP 400
     wrapped in a 500 envelope); the adapter pages backwards in yearly
     windows. `disclosureClass="FR"`, `ruleType="Annual"`,
-    `subject="Financial Report"` identify annual financial statements;
-    `disclosureIndex` links to `https://www.kap.org.tr/en/Bildirim/{index}`.
+    `subject="Financial Report"` identify annual financial statements.
+    Each disclosure carries a `disclosureIndex`; the human-readable page
+    is `https://www.kap.org.tr/en/Bildirim/{index}` (`source_url`), and
+    `GET /en/api/BildirimPdf/{index}` returns that specific filing as a
+    downloadable `application/pdf` (`document_url`, verified `%PDF-1.4`).
   - **Auth**: None. Free.
   - **Rate limit**: Not published; adapter throttles to 60 req/min.
   - **robots.txt / ToS**: Public disclosure data, free to consume.
@@ -69,8 +72,10 @@ BIST-listed companies. Non-listed lookups raise
   member list page, and the Excel export). Such lookups try the search
   once, then raise `AdapterNotImplementedError` with guidance.
 - `fetch_financials` — disclosure query filtered to
-  `ruleType="Annual"` + `subject="Financial Report"`; returns
-  `Bildirim` document URLs per fiscal year. Currency `TRY`.
+  `ruleType="Annual"` + `subject="Financial Report"`; returns one filing
+  per fiscal year with a `document_url` that truly downloads the filed
+  annual financial report as a PDF (`/en/api/BildirimPdf/{index}`) and a
+  `source_url` to the disclosure page. Currency `TRY`.
 
 **Known gaps / next steps**
 - VKN→company resolution needs an external free index (none found:

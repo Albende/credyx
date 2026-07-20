@@ -19,7 +19,12 @@
   - **Auth**: none.
   - The backend is intermittently reported as "database temporarily
     unavailable" (sometimes surfaced as a stalled connection). The
-    adapter retries across fresh clients.
+    down-windows are transient at the per-request level, so the adapter
+    retries across fresh clients with a progressive backoff
+    (`_DADOSBRASIL_ATTEMPTS`) to ride them out. During a sustained
+    multi-minute outage search returns `[]`; there is no key-free
+    fallback name-search source for BR (cnpja/CNPJ.ws search is
+    key-gated; Casa dos Dados is Cloudflare-walled and ToS-grey).
 - **Lookup by CNPJ**: BrasilAPI — `https://brasilapi.com.br/api/cnpj/v1/{cnpj}`
   - Community-maintained mirror of the official Receita Federal CNPJ
     dataset. **Auth**: none. **Rate limit**: ~3 req/s.

@@ -177,10 +177,10 @@ def _parse_annual_reports(
         period = _PERIOD_RE.search(body)
         period_end = _parse_ddmmyyyy(period.group(2)) if period else None
         file_match = file_re.search(body)
+        if file_match is None:
+            continue
         document_url = (
             f"https://ariregister.rik.ee/est/company/{reg_code}/file/{file_match.group(1)}"
-            if file_match
-            else None
         )
         seen.add(year)
         out.append(
@@ -191,7 +191,7 @@ def _parse_annual_reports(
                 period_end=period_end,
                 currency="EUR" if year >= 2011 else None,
                 document_url=document_url,
-                document_format="pdf" if document_url else None,
+                document_format="pdf",
                 source_url=page_url,
             )
         )

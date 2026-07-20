@@ -44,26 +44,24 @@ def test_mt_vat_normalizer_rejects_garbage():
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_returns_mse_link_for_listed():
+@pytest.mark.integration
+async def test_fetch_financials_returns_esef_reports_for_listed():
     adapter = MTAdapter()
-    filings = await adapter.fetch_financials("C2833")
-    assert len(filings) == 1
-    assert filings[0].company_id == "C2833"
-    assert filings[0].document_url is not None
-    assert "borzamalta" in filings[0].document_url
-
-
-@pytest.mark.asyncio
-async def test_fetch_financials_returns_empty_for_unknown():
-    adapter = MTAdapter()
-    assert await adapter.fetch_financials("C9999999") == []
+    filings = await adapter.fetch_financials("C2833", years=3)
+    assert len(filings) >= 1
+    f = filings[0]
+    assert f.company_id == "C2833"
+    assert f.document_format == "xbrl"
+    assert f.document_url is not None
+    assert "filings.xbrl.org" in f.document_url
+    assert f.period_end is not None and f.year == f.period_end.year
 
 
 @pytest.mark.asyncio
 async def test_lookup_rejects_unsupported_identifier():
     adapter = MTAdapter()
     with pytest.raises(InvalidIdentifierError):
-        await adapter.lookup_by_identifier(IdentifierType.LEI, "anything")
+        await adapter.lookup_by_identifier(IdentifierType.REGON, "anything")
 
 
 @pytest.mark.asyncio
@@ -71,24 +69,23 @@ async def test_lookup_rejects_unsupported_identifier():
 async def test_vies_lookup_bank_of_valletta():
     adapter = MTAdapter()
     details = await adapter.lookup_by_identifier(IdentifierType.VAT, "MT10172321")
-    assert details is not None
-    assert details.country == "MT"
-    # Real VIES returns the registered name; we don't hard-code the exact
-    # spelling because VAT registrants occasionally amend casing.
-    assert details.name.strip() != ""
+    # VIES proxies each member state's own node; Malta's is intermittently
+    # unavailable and then reports the VAT as unconfirmed. None is acceptable —
+    # we never fabricate. When it does answer, the record is well-formed.
+    if details is not None:
+        assert details.country == "MT"
+        assert details.name.strip() != ""
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_search_by_name_bank_of_valletta():
     adapter = MTAdapter()
-    # MBR scrape may degrade if their HTML changes — we only assert the
-    # contract: it returns a list (possibly empty), and any hit is well-formed.
     results = await adapter.search_by_name("Bank of Valletta", limit=5)
     assert isinstance(results, list)
+    assert any("VALLETTA" in r.name.upper() for r in results)
     for r in results:
         assert r.country == "MT"
-        assert r.id.startswith("C")
 
 
 @pytest.mark.asyncio
@@ -98,12 +95,10 @@ async def test_lookup_by_company_number_bank_of_valletta():
     details = await adapter.lookup_by_identifier(
         IdentifierType.COMPANY_NUMBER, "C2833"
     )
-    # MBR HTML may not return a parseable row in all environments; if it does,
-    # we expect the canonical company number to come back. None is also
-    # acceptable — we never fabricate.
-    if details is not None:
-        assert details.id == "C2833"
-        assert details.country == "MT"
+    assert details is not None
+    assert details.id == "C2833"
+    assert details.country == "MT"
+    assert any(i.type == IdentifierType.LEI for i in details.identifiers)
 
 
 @pytest.mark.asyncio

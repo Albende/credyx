@@ -1,7 +1,7 @@
 """Integration tests for the Canada adapter.
 
-These hit Corporations Canada (ic.gc.ca) and SEDAR+ live — no mocks.
-Marked `integration` so `pytest -m "not integration"` skips them.
+These hit the Corporations Canada register JSON API + SEC EDGAR live — no
+mocks. Marked `integration` so `pytest -m "not integration"` skips them.
 """
 from __future__ import annotations
 
@@ -9,13 +9,16 @@ import pytest
 
 from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.ca import CAAdapter
-from packages.adapters.ca.adapter import _normalize_corp_number
+from packages.adapters.ca.adapter import _normalize_bn, _normalize_corp_number
 from packages.shared.models import AdapterStatus, IdentifierType
+
+SHOPIFY_CORP_ID = "4261607"
+SHOPIFY_BN = "847871746"
 
 
 def test_normalize_corp_number_strips_check_digit():
-    assert _normalize_corp_number("763869-7") == "7638697"
-    assert _normalize_corp_number(" 285105 ") == "285105"
+    assert _normalize_corp_number("426160-7") == "4261607"
+    assert _normalize_corp_number(" 102784 ") == "102784"
 
 
 def test_normalize_corp_number_rejects_letters():
@@ -26,6 +29,11 @@ def test_normalize_corp_number_rejects_letters():
 def test_normalize_corp_number_rejects_too_short():
     with pytest.raises(InvalidIdentifierError):
         _normalize_corp_number("12")
+
+
+def test_normalize_bn_takes_nine_digit_stem():
+    assert _normalize_bn("847871746RC0001") == "847871746"
+    assert _normalize_bn("847871746") == "847871746"
 
 
 @pytest.mark.asyncio
@@ -51,49 +59,52 @@ async def test_search_finds_shopify():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_bombardier_by_corp_number():
+async def test_lookup_shopify_by_corp_number():
     adapter = CAAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.COMPANY_NUMBER, "285105-9"
+        IdentifierType.COMPANY_NUMBER, SHOPIFY_CORP_ID
     )
-    assert details is not None, "Bombardier federal corp # should resolve"
-    assert "bombardier" in details.name.lower()
+    assert details is not None
+    assert "shopify" in details.name.lower()
     assert details.country == "CA"
+    assert details.incorporation_date is not None
     assert any(
-        i.type == IdentifierType.COMPANY_NUMBER and i.value == "2851059"
+        i.type == IdentifierType.COMPANY_NUMBER and i.value == SHOPIFY_CORP_ID
         for i in details.identifiers
     )
+    assert any(i.type == IdentifierType.VAT for i in details.identifiers)
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_unknown_corp_returns_none_or_empty_name():
+async def test_lookup_by_business_number_resolves():
+    adapter = CAAdapter()
+    details = await adapter.lookup_by_identifier(
+        IdentifierType.VAT, f"{SHOPIFY_BN}RC0001"
+    )
+    assert details is not None
+    assert "shopify" in details.name.lower()
+    assert details.id == SHOPIFY_CORP_ID
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_lookup_unknown_corp_returns_none():
     adapter = CAAdapter()
     result = await adapter.lookup_by_identifier(
-        IdentifierType.COMPANY_NUMBER, "99999999"
+        IdentifierType.COMPANY_NUMBER, "9999998"
     )
-    assert result is None or not result.name
-
-
-@pytest.mark.asyncio
-async def test_lookup_business_number_raises():
-    adapter = CAAdapter()
-    from packages.adapters._base.errors import AdapterError
-
-    with pytest.raises(AdapterError):
-        await adapter.lookup_by_identifier(
-            IdentifierType.VAT, "123456789RC0001"
-        )
+    assert result is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_fetch_financials_shopify_returns_list():
+async def test_fetch_financials_shopify_returns_filings():
     adapter = CAAdapter()
-    # Shopify is on SEDAR+. If the SEDAR endpoint shape shifts, we still
-    # expect a list (possibly empty) — never an exception.
-    filings = await adapter.fetch_financials("763869-7", years=3)
+    filings = await adapter.fetch_financials(SHOPIFY_CORP_ID, years=5)
     assert isinstance(filings, list)
+    assert filings, "Shopify cross-lists on the NYSE — expected SEC annual reports"
     for f in filings:
-        assert f.currency == "CAD"
-        assert f.company_id
+        assert f.company_id == SHOPIFY_CORP_ID
+        assert f.document_url and f.document_url.startswith("https://www.sec.gov/")
+        assert f.year > 2000

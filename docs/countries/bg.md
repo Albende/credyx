@@ -43,9 +43,15 @@
 
 ## Test companies (REAL)
 
-- **Sopharma AD** — EIK 831902088 (listed pharmaceutical). Verified for
-  all three methods: name search, lookup, and `fetch_financials` returning
-  downloadable 2023/2024 annual + audit report PDFs.
+- **Sopharma AD** — EIK 831902088 (listed pharmaceutical). Verified LIVE
+  2026-07-21 for all three methods: name search (Cyrillic `Софарма` →
+  831902088 `"СОФАРМА" АД`), lookup (active, capital 274 970 377.53 EUR,
+  seat in София), and `fetch_financials` returning 18 filings (2020–2024
+  annual + audit + management reports). The 2024 annual-report
+  `/CR/api/Documents/{token}` URL streams a real 3.9 MB PDF
+  (`097900BGGW0000048796-20241231-BG-SEP-TR.pdf`, `application/pdf`,
+  `%PDF-1.6`). VAT lookup `BG831902088` resolves to the same EIK and VIES
+  confirms the VAT identifier.
 - **M + S Hydraulic AD** — EIK 123028180 (Kazanlak; lookup verified).
   Note: the previously listed 833067548 is a different entity
   ("Завод за каучукови уплътнители" AD) and was corrected.

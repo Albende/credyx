@@ -1,46 +1,39 @@
-"""Jordan adapter — Companies Control Department (MIT) + Amman Stock Exchange.
+"""Jordan adapter — Amman Stock Exchange (ASE) listed-issuer data.
 
-Source coverage:
+The official companies register (Companies Control Department, CCD, at
+https://www.ccd.gov.jo/) is an Arabic-only ASP.NET WebForms portal with
+no free JSON/REST contract and no bulk export, so it cannot back a live
+adapter without an interactive session replay. The Amman Stock Exchange
+— https://www.exchange.jo/ (formerly www.ase.com.jo) — is the
+authoritative *free* structured source for Jordanian listed companies and
+is what this adapter uses:
 
-* Companies Control Department (CCD) — https://www.ccd.gov.jo/ — and the
-  Ministry of Industry, Trade and Supply — https://www.mit.gov.jo/. The
-  national companies register exposes a public search portal in Arabic
-  only; the underlying JSON endpoints are protected by an ASP.NET event-
-  validation token and require an interactive session. There is no free
-  REST API for name search or identifier lookup.
-* Income and Sales Tax Department (ISTD) — https://www.istd.gov.jo/. The
-  Tax Reference Number (TRN) validator is form-based and renders results
-  client-side; no documented JSON contract.
-* Amman Stock Exchange (ASE) — https://www.ase.com.jo/. Annual reports
-  and audited financials for ASE-listed issuers are published as free
-  PDFs on each issuer's profile page. There is no documented data API,
-  but issuer pages are reachable by ticker symbol and serve as the
-  authoritative free source of financials for listed Jordanian firms.
+* ``/en/products-services/securties-types/shares`` is a public directory
+  of every listed share issuer (English + Arabic long/short name, ASE
+  ticker symbol, numeric security code, paid-up capital, market segment).
+  It backs ``search_by_name`` and ``lookup_by_identifier``.
+* ``/en/disclosures?symbol={TICKER}&category_id=1`` lists an issuer's
+  filed *Annual Financial Report* disclosures, each with a downloadable
+  audited-statements document (PDF or ZIP). It backs ``fetch_financials``.
 
-Per the project rules this adapter never fabricates data: where a source
-is gated (CCD search, MIT name lookup, ISTD validator) the call raises
-`AdapterNotImplementedError`. For ASE-listed issuers `fetch_financials`
-emits a single `FinancialFiling` per recent fiscal year that points at
-the public ASE company profile so downstream PDF-extraction can pick the
-filings up once the Playwright pool is wired.
+Per the project rules this adapter never fabricates data. Companies that
+are not ASE-listed have no free Jordanian source, so name search simply
+returns no match for them and ``fetch_financials`` returns ``[]``.
 
 Identifiers:
 
-* CCD Company Number — variable-length numeric registration number used
-  by MIT/CCD, encoded as `IdentifierType.COMPANY_NUMBER`.
-* Tax Reference Number (TRN) — 9-digit identifier issued by ISTD, mapped
-  to `IdentifierType.VAT` since it doubles as the GST/VAT registration.
+* ``OTHER`` — the ASE ticker symbol (e.g. ``JOPH``). Primary key across
+  search, lookup, and financials.
+* ``COMPANY_NUMBER`` — the ASE numeric security code (e.g. ``141018``).
+  Accepted by ``lookup_by_identifier`` as a secondary key.
 """
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -53,157 +46,304 @@ from packages.shared.models import (
     RegistryIdentifier,
 )
 
-_COMPANY_NUMBER_RE = re.compile(r"^\d{1,10}$")
-_TRN_RE = re.compile(r"^\d{9}$")
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,8}$")
+_CODE_RE = re.compile(r"^\d{3,10}$")
+_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_CELL_RE = re.compile(
+    r'views-field-([a-z0-9-]+)">\s*(?:<a[^>]*>)?\s*([^<]*)', re.S
+)
+_PUBLISHED_RE = re.compile(r"(\d{2})/(\d{2})/(\d{4})")
 
-# ASE tickers we know are listed today. The mapping is intentionally
-# small: the MVP rule is no fabricated data — if a ticker is not in this
-# list `fetch_financials` returns []. Real ticker coverage can grow as
-# the Playwright pool lands and ASE issuer lists become scrapable.
-_ASE_TICKERS: dict[str, str] = {
-    "ARBK": "Arab Bank PLC",
-    "JOPH": "Jordan Phosphate Mines Company",
-    "HIKM": "Hikma Pharmaceuticals",
-    "JTEL": "Jordan Telecom (Orange Jordan)",
-}
+_MARKETS = {"1": "ASE First Market", "2": "ASE Second Market", "3": "ASE Third Market"}
+_ANNUAL_REPORT_CATEGORY = "1"
 
 
-def _normalize_company_number(value: str) -> str:
-    cleaned = re.sub(r"[\s\-]", "", value.strip())
-    if not _COMPANY_NUMBER_RE.match(cleaned):
-        raise InvalidIdentifierError(
-            f"Jordan CCD company number must be up to 10 digits, got: {value}"
-        )
-    return cleaned
+def _collapse_ws(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def _normalize_trn(value: str) -> str:
-    cleaned = re.sub(r"[\s\-]", "", value.strip())
-    if not _TRN_RE.match(cleaned):
-        raise InvalidIdentifierError(
-            f"Jordan Tax Reference Number must be 9 digits, got: {value}"
-        )
-    return cleaned
+def _parse_capital(value: str) -> float | None:
+    cleaned = value.replace(",", "").strip()
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
-def _normalize_ticker(value: str) -> str:
-    return re.sub(r"[\s\-]", "", value.strip()).upper()
+class _Listing:
+    __slots__ = ("symbol", "code", "name", "name_short", "capital", "market")
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        code: str,
+        name: str,
+        name_short: str,
+        capital: str,
+        market: str,
+    ) -> None:
+        self.symbol = symbol
+        self.code = code
+        self.name = name
+        self.name_short = name_short
+        self.capital = capital
+        self.market = market
 
 
 class JOAdapter(CountryAdapter):
     country_code = "JO"
     country_name = "Jordan"
-    identifier_types = [IdentifierType.COMPANY_NUMBER, IdentifierType.VAT]
-    primary_identifier = IdentifierType.COMPANY_NUMBER
+    identifier_types = [IdentifierType.OTHER, IdentifierType.COMPANY_NUMBER]
+    primary_identifier = IdentifierType.OTHER
     requires_api_key = False
     api_key_env = None
     rate_limit_per_minute = 30
 
-    CCD_BASE = "https://www.ccd.gov.jo"
-    MIT_BASE = "https://www.mit.gov.jo"
-    ASE_BASE = "https://www.ase.com.jo"
+    ASE_BASE = "https://www.exchange.jo"
+    SHARES_PATH = "/en/products-services/securties-types/shares"
+    DISCLOSURES_PATH = "/en/disclosures"
+
+    async def _load_listings(self) -> list[_Listing]:
+        async with build_http_client(base_url=self.ASE_BASE, timeout=30.0) as client:
+            resp = await get_with_retry(client, self.SHARES_PATH)
+            resp.raise_for_status()
+            html = resp.text
+
+        listings: list[_Listing] = []
+        for raw_row in _ROW_RE.findall(html):
+            fields = dict(_CELL_RE.findall(raw_row))
+            symbol = fields.get("symbol-1", "").strip().upper()
+            if not symbol:
+                continue
+            listings.append(
+                _Listing(
+                    symbol=symbol,
+                    code=fields.get("code", "").strip(),
+                    name=_collapse_ws(fields.get("name-long", "")),
+                    name_short=_collapse_ws(fields.get("name-short", "")),
+                    capital=fields.get("capital", "").strip(),
+                    market=fields.get("market-id", "").strip(),
+                )
+            )
+        return listings
+
+    def _company_url(self, symbol: str) -> str:
+        return f"{self.ASE_BASE}{self.DISCLOSURES_PATH}?symbol={symbol}"
+
+    def _to_details(self, listing: _Listing) -> CompanyDetails:
+        return CompanyDetails(
+            id=listing.symbol,
+            name=listing.name or listing.name_short or listing.symbol,
+            country="JO",
+            legal_form=_MARKETS.get(listing.market),
+            status="listed",
+            capital_amount=_parse_capital(listing.capital),
+            capital_currency="JOD",
+            identifiers=[
+                RegistryIdentifier(
+                    type=IdentifierType.OTHER,
+                    value=listing.symbol,
+                    label="ASE ticker symbol",
+                ),
+                *(
+                    [
+                        RegistryIdentifier(
+                            type=IdentifierType.COMPANY_NUMBER,
+                            value=listing.code,
+                            label="ASE security code",
+                        )
+                    ]
+                    if listing.code
+                    else []
+                ),
+            ],
+            raw={
+                "symbol": listing.symbol,
+                "code": listing.code,
+                "name_short": listing.name_short,
+                "capital": listing.capital,
+                "market_id": listing.market,
+            },
+            source_url=self._company_url(listing.symbol),
+        )
 
     async def health_check(self) -> AdapterHealth:
-        reachable: list[str] = []
-        for label, base in (
-            ("ASE", self.ASE_BASE),
-            ("CCD", self.CCD_BASE),
-        ):
-            try:
-                async with build_http_client(base_url=base, timeout=10.0) as client:
-                    resp = await get_with_retry(client, "/", max_attempts=1)
-                    if 200 <= resp.status_code < 500:
-                        reachable.append(label)
-            except Exception:
-                continue
+        try:
+            async with build_http_client(base_url=self.ASE_BASE, timeout=10.0) as client:
+                resp = await get_with_retry(client, self.SHARES_PATH, max_attempts=1)
+                reachable = 200 <= resp.status_code < 500
+        except Exception:
+            reachable = False
 
-        if not reachable:
-            return AdapterHealth(
-                country_code=self.country_code,
-                name=self.country_name,
-                status=AdapterStatus.ERROR,
-                capabilities={"search": False, "lookup": False, "financials": False},
-                requires_api_key=False,
-                api_key_present=True,
-                rate_limit_per_minute=self.rate_limit_per_minute,
-                last_checked_at=datetime.utcnow(),
-                notes="Neither ASE nor CCD reachable from host.",
-            )
-
+        status = AdapterStatus.OK if reachable else AdapterStatus.ERROR
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.DEGRADED,
-            capabilities={"search": False, "lookup": False, "financials": True},
+            status=status,
+            capabilities={
+                "search": reachable,
+                "lookup": reachable,
+                "financials": reachable,
+            },
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             last_checked_at=datetime.utcnow(),
             notes=(
-                "Financials available only for ASE-listed issuers via free "
-                "PDF annual reports. CCD/MIT name search and TRN validator "
-                "are gated (Arabic-only ASP.NET sessions, no public JSON). "
-                "Reachable: " + ", ".join(reachable) + "."
+                "ASE-listed issuers only: directory + annual-report filings "
+                "from exchange.jo. CCD/MIT name search and ISTD TRN lookup "
+                "remain gated (Arabic-only ASP.NET, no public JSON)."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Jordan CCD/MIT name search has no free public JSON endpoint; "
-            "the official portal is Arabic-only and session-gated."
-        )
+        needle = _collapse_ws(name).lower()
+        if not needle:
+            return []
+
+        matches: list[CompanyMatch] = []
+        for listing in await self._load_listings():
+            haystack = f"{listing.name} {listing.name_short}".lower()
+            if needle not in haystack:
+                continue
+            identifiers = [
+                RegistryIdentifier(
+                    type=IdentifierType.OTHER,
+                    value=listing.symbol,
+                    label="ASE ticker symbol",
+                )
+            ]
+            if listing.code:
+                identifiers.append(
+                    RegistryIdentifier(
+                        type=IdentifierType.COMPANY_NUMBER,
+                        value=listing.code,
+                        label="ASE security code",
+                    )
+                )
+            matches.append(
+                CompanyMatch(
+                    id=listing.symbol,
+                    name=listing.name or listing.name_short or listing.symbol,
+                    country="JO",
+                    identifiers=identifiers,
+                    status="listed",
+                    source_url=self._company_url(listing.symbol),
+                )
+            )
+            if len(matches) >= limit:
+                break
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
+        needle = re.sub(r"[\s\-]", "", value.strip())
+        if id_type == IdentifierType.OTHER:
+            key = needle.upper()
+            if not _SYMBOL_RE.match(key):
+                raise InvalidIdentifierError(
+                    f"Jordan ASE ticker symbol must be 2-8 alphanumerics, got: {value}"
+                )
+            for listing in await self._load_listings():
+                if listing.symbol == key:
+                    return self._to_details(listing)
+            return None
+
         if id_type == IdentifierType.COMPANY_NUMBER:
-            _normalize_company_number(value)
-            raise AdapterNotImplementedError(
-                "Jordan CCD does not expose a free identifier lookup endpoint; "
-                "company details require the gated CCD eServices portal."
-            )
-        if id_type == IdentifierType.VAT:
-            _normalize_trn(value)
-            raise AdapterNotImplementedError(
-                "Jordan ISTD TRN validator is form-only with no public JSON "
-                "response; no free structured details available."
-            )
+            if not _CODE_RE.match(needle):
+                raise InvalidIdentifierError(
+                    f"Jordan ASE security code must be 3-10 digits, got: {value}"
+                )
+            for listing in await self._load_listings():
+                if listing.code == needle:
+                    return self._to_details(listing)
+            return None
+
         raise InvalidIdentifierError(
-            f"Jordan supports COMPANY_NUMBER and VAT (TRN), got {id_type}"
+            f"Jordan supports OTHER (ASE ticker) and COMPANY_NUMBER "
+            f"(ASE security code), got {id_type}"
         )
+
+    async def _resolve_symbol(self, company_id: str) -> str | None:
+        key = re.sub(r"[\s\-]", "", company_id.strip()).upper()
+        if _CODE_RE.match(key):
+            for listing in await self._load_listings():
+                if listing.code == key:
+                    return listing.symbol
+            return None
+        return key if _SYMBOL_RE.match(key) else None
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        ticker = _normalize_ticker(company_id)
-        issuer_name = _ASE_TICKERS.get(ticker)
-        if not issuer_name:
-            # Unlisted (or unknown-ticker) issuers have no free Jordanian
-            # filings source. Returning an empty list — never invented PDFs —
-            # is the contracted behaviour.
+        symbol = await self._resolve_symbol(company_id)
+        if not symbol:
             return []
 
-        profile_url = f"{self.ASE_BASE}/en/Company-Profile/{ticker}"
+        params = {"symbol": symbol, "category_id": _ANNUAL_REPORT_CATEGORY}
+        async with build_http_client(base_url=self.ASE_BASE, timeout=30.0) as client:
+            resp = await get_with_retry(client, self.DISCLOSURES_PATH, params=params)
+            resp.raise_for_status()
+            html = resp.text
 
-        # ASE keeps annual financial PDFs on the issuer profile; we cannot
-        # enumerate them without rendering the SPA. Emit one filing record
-        # per recent fiscal year pointing at the public profile so the PDF
-        # pipeline (once enabled) can pick up the artefacts. Period_end and
-        # structured_data are intentionally left null — no fabrication.
-        current_year = datetime.utcnow().year
+        source_url = f"{self.ASE_BASE}{self.DISCLOSURES_PATH}?symbol={symbol}&category_id={_ANNUAL_REPORT_CATEGORY}"
+        body = html[html.find("<tbody") : html.rfind("</tbody")]
+
+        best_by_year: dict[int, tuple[date, str, str]] = {}
+        for raw_row in _ROW_RE.findall(body):
+            published = _PUBLISHED_RE.search(
+                _field(raw_row, "views-field-published")
+            )
+            if not published:
+                continue
+            day, month, pub_year = (int(g) for g in published.groups())
+            published_on = date(pub_year, month, day)
+
+            doc_url, doc_format = _document_link(raw_row)
+            if not doc_url:
+                continue
+
+            fiscal_year = pub_year - 1
+            existing = best_by_year.get(fiscal_year)
+            if existing is None or published_on > existing[0]:
+                best_by_year[fiscal_year] = (published_on, doc_url, doc_format)
+
         filings: list[FinancialFiling] = []
-        for year in range(current_year - 1, current_year - 1 - years, -1):
+        for fiscal_year in sorted(best_by_year, reverse=True)[:years]:
+            _published_on, doc_url, doc_format = best_by_year[fiscal_year]
             filings.append(
                 FinancialFiling(
-                    company_id=ticker,
-                    year=year,
+                    company_id=symbol,
+                    year=fiscal_year,
                     type=FilingType.ANNUAL_REPORT,
                     period_end=None,
                     currency="JOD",
                     structured_data=None,
-                    document_url=None,
-                    document_format="pdf",
-                    source_url=profile_url,
+                    document_url=f"{self.ASE_BASE}{doc_url}",
+                    document_format=doc_format,
+                    source_url=source_url,
                 )
             )
         return filings
+
+
+def _field(row: str, css_class: str) -> str:
+    match = re.search(rf'{css_class}">(.*?)</td>', row, re.S)
+    return match.group(1) if match else ""
+
+
+def _document_link(row: str) -> tuple[str | None, str | None]:
+    for css_class, fmt in (
+        ("views-field-filename", "pdf"),
+        ("views-field-filename-zip", "zip"),
+        ("views-field-filename-xls", "xls"),
+    ):
+        cell = _field(row, css_class)
+        href = re.search(r'href="([^"]+)"', cell)
+        if href:
+            return href.group(1), fmt
+    return None, None

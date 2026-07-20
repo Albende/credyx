@@ -11,63 +11,86 @@
 ## Sources
 
 - https://enreg.reestri.gov.ge/main.php — bilingual (ქართული / English)
-  public business register operated by NAPR. Per-company HTML lookup by
-  9-digit Identification Number; name search via the public form.
+  public business register operated by NAPR. The search form POSTs
+  `c=search&m=find_legal_persons` and server-renders a result table
+  (9-digit Identification Number, name, legal form, status). Used for
+  both name search and ID lookup. **No browser and no captcha needed** —
+  the plain POST is authoritative. The per-company `show_legal_person`
+  detail page is now CAPTCHA-gated ("entered code does not match the
+  image") and is deliberately not used.
+- https://reportal.ge — the SARAS Reporting Portal (Service for
+  Accounting, Reporting and Auditing Supervision). Key-free JSON/HTML
+  endpoints:
+  - `/en/Reports/GetProfileData?q=<id>` → JSON profile (registration
+    date, registered address, phone, web, activity, directors) used to
+    enrich the registry record captcha-free.
+  - `/en/Reports/OrgReports?q=<id>` → company-specific list of reporting
+    years that actually have filings.
+  - `/en/Reports/OrgReportsByYear?q=<id>&year=<yyyy>` → per-year filing
+    page whose public audit tab exposes the auditor firm + partner.
 - https://rs.ge/ — Revenue Service VAT validator (partial public; not
   used by the adapter).
 - https://gse.ge/ — Georgian Stock Exchange, limited free coverage of
   listed-issuer disclosures (not wired).
 - **Auth**: None.
 - **Rate limit**: Self-imposed at 30 req/min — no published budget.
-- **robots.txt / ToS**: enreg.reestri.gov.ge serves a permissive
-  robots policy; the registry is a public-disclosure utility. We send
-  an identifiable User-Agent and keep volume polite.
+- **robots.txt / ToS**: enreg.reestri.gov.ge and reportal.ge serve
+  permissive robots policies; both are public-disclosure utilities. We
+  send an identifiable User-Agent and keep volume polite.
 
 ## Test companies
 
-- Bank of Georgia JSC — `204378869`
-- TBC Bank JSC — `204854595`
-- JSC Telasi — `200032475`
-- Wissol Petroleum Georgia — `211302796`
+Verified live present in NAPR + reportal (2026-07):
+
+- Bank of Georgia JSC — `204378869` (reporter; NBG-regulated)
+- TBC Bank JSC — `204854595` (reporter; NBG-regulated)
+- Silknet JSC — `204566978` (reporter; non-financial)
+
+Note: the previously listed `200032475` (Telasi) and `211302796`
+(Wissol) no longer return a row from NAPR's `find_legal_persons` search
+and were removed.
 
 ## Status
 
-🟡 **Partial — search + lookup; no financials.**
+🟢 **Live — search + lookup + financial filing metadata.**
 
-| Capability      | Status                |
-|-----------------|-----------------------|
-| Name search     | ✅ Live (HTML scrape) |
-| ID lookup       | ✅ Live (HTML scrape) |
-| Financials      | ❌ Not published      |
-| Health          | ✅ Probes Bank of Georgia |
+| Capability      | Status                                        |
+|-----------------|-----------------------------------------------|
+| Name search     | ✅ Live (NAPR find_legal_persons POST)        |
+| ID lookup       | ✅ Live (NAPR + reportal profile enrichment)  |
+| Financials      | ✅ Live filing metadata (reportal.ge)         |
+| Health          | ✅ Probes Bank of Georgia via NAPR POST       |
 
 ## Limitations
 
-- **No centralized free financial dataset.** NAPR does not publish
-  balance sheets. The Service for Accounting, Reporting and Auditing
-  Supervision (saras.gov.ge) operates a reporting portal whose public
-  search is captcha-gated and whose documents are PDFs — out of scope
-  for the free MVP. `fetch_financials` returns `[]` honestly rather
-  than fabricating filings.
-- **HTML scrape is brittle.** The per-company page renders a two-column
-  table with Georgian (Mkhedruli script) labels and occasional English
-  transliterations. The parser matches loosely on both. Encoding
-  fallback covers UTF-8 and windows-1251.
-- **Search uses the public form.** NAPR exposes no JSON contract; the
-  adapter submits the same query parameters the search form does and
-  parses the resulting `<a href="...legal_code=...">` anchors. If the
-  page layout changes, callers can still look up known IDs directly.
-- **No separate company number.** Unlike most EU registries, Georgia
-  uses a single 9-digit ID for tax and registry purposes, so both
-  `VAT` and `COMPANY_NUMBER` identifier types resolve to the same
-  number.
+- **Financial-statement PDFs are SMS-gated.** reportal.ge releases the
+  actual statement document only after an SMS one-time-code flow
+  (`RequestCode` → `DownloadReport`). `fetch_financials` therefore
+  returns real per-company filing metadata — reporting `year`, `type`
+  (`annual_report`), `currency` (GEL), the company-specific reportal
+  `source_url`, and the audit-tab auditor firm/partner in
+  `structured_data` — but never a `document_url`, because the document
+  does not download key-free. No fabricated numbers.
+- **reportal covers only mandatory reporters.** Category I–IV entities
+  file there; a company absent from reportal returns `[]` from
+  `fetch_financials` and simply loses the profile enrichment on lookup
+  (NAPR name/form/status still resolve).
+- **Search is Georgian-script.** NAPR's name field matches the
+  registered Georgian (Mkhedruli) name; Latin/English queries generally
+  return nothing. Callers with only a Latin name should resolve the
+  9-digit ID first.
+- **No separate company number.** Georgia uses a single 9-digit ID for
+  tax and registry purposes, so both `VAT` and `COMPANY_NUMBER`
+  identifier types resolve to the same number.
+- **No capital figure.** The declared-capital field lived only on the
+  now-captcha-gated NAPR detail page, so `capital_amount` stays `None`.
 
 ## Recommended next steps
 
-1. Wire a captcha-tolerant client for reportal.saras.gov.ge so the
-   ~3,500 mandatory reporters' annual PDFs surface through
-   `fetch_financials`.
-2. Add a free name → ID fuzzy bridge through OpenCorporates' GE tier
-   for queries where the registry search returns no anchor results.
-3. Investigate whether NAPR exposes a structured XML or CSV feed under
-   data.gov.ge — if so, swap the HTML scrape for it.
+1. Add a captcha/OCR or session path for the NAPR `show_legal_person`
+   detail page to recover declared capital + full director roles.
+2. Wire the reportal SMS one-time-code flow (or an authenticated SARAS
+   account) so statement PDFs can be downloaded and parsed into
+   structured financials.
+3. Add a free name → ID fuzzy bridge (e.g. OpenCorporates GE tier) for
+   Latin-name queries the Georgian-script NAPR search can't match.

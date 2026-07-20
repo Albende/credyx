@@ -1,4 +1,4 @@
-# 🇮🇳 India — MCA21 + BSE/NSE
+# 🇮🇳 India — GLEIF + BSE
 
 ## Identifier
 
@@ -19,19 +19,30 @@ from packages.adapters.in_ import INAdapter
 
 ## Sources
 
-- **MCA21 Company Master Data** (free, HTML scrape):
-  https://www.mca.gov.in/mcafoportal/viewCompanyMasterData.do?companyID={CIN}
-- **MCA Open Data dumps** (monthly CSV, all active CIN + basic info):
-  https://www.mca.gov.in/content/mca/global/en/data-and-reports/datasets.html
-- **BSE Annual Reports** (free, listed companies):
-  https://www.bseindia.com/corporates/ann.html
-- **NSE Annual Reports** (free, listed companies):
-  https://www.nseindia.com/companies-listing/corporate-filings-annual-reports
+- **GLEIF LEI records** (free, no key) — search + CIN lookup:
+  https://api.gleif.org/api/v1/lei-records
+  Indian entities carry their MCA CIN in `entity.registeredAs`, so the Global
+  LEI index doubles as a free, key-less CIN lookup and name search. Filters
+  used: `filter[entity.legalName]` + `filter[entity.legalAddress.country]=IN`
+  for search, `filter[entity.registeredAs]={CIN}` for lookup.
+- **BSE Annual Reports JSON** (free, no key) — financials:
+  https://api.bseindia.com/BseIndiaAPI/api/AnnualReport_New/w?scripcode={code}
+  Returns filed annual-report PDFs per BSE scrip code. Scrip code is resolved
+  from the company's legal name via BSE PeerSmartSearch
+  (`/BseIndiaAPI/api/PeerSmartSearch/w?Type=SS&text={name}`). Both api.bseindia.com
+  routes require a browser User-Agent and a `bseindia.com` Referer header.
 - **Auth**: None for any of the above.
-- **Rate limit**: We self-throttle to 30 req/min. MCA21 is brittle under
-  load; respect 5xx with backoff.
-- **robots.txt / ToS**: MCA datasets are explicitly open. BSE/NSE pages
-  permit non-commercial scraping with attribution.
+- **Rate limit**: We self-throttle to 30 req/min.
+- **robots.txt / ToS**: GLEIF data is CC0 open data. BSE JSON endpoints back
+  the public bseindia.com site; used for non-commercial lookups with attribution.
+
+### Why not MCA21
+
+The MCA V3 migration retired the old `mcafoportal/viewCompanyMasterData.do`
+master-data route — it now 302s to `errorpage.html` (verified 2026-07). The V3
+master-data screen sits behind a login. GLEIF provides registry-grade identity
+data (legal name, address, status, legal form, CIN, LEI) for free without a
+session or CAPTCHA.
 
 ## Test companies
 
@@ -42,37 +53,41 @@ from packages.adapters.in_ import INAdapter
 
 ## Status
 
-🟡 **Partial** — CIN lookup ✅; name search ❌ (CAPTCHA); financials ❌ (BSE
-scripcode index not available for free).
+🟢 **Working** — name search ✅; CIN lookup ✅; financials ✅ (listed companies).
 
 ### What works
 
-- `lookup_by_identifier(COMPANY_NUMBER, CIN)` — scrapes MCA21 master data
-  (name, status, class, incorporation date, registered office address,
-  paid-up capital, email, industry SIC). Returns `None` for unknown CINs.
+- `search_by_name(name)` — GLEIF `filter[entity.legalName]` scoped to India.
+  Returns `CompanyMatch` per entity with the MCA CIN (COMPANY_NUMBER) and LEI,
+  legal name, registered address, and status. The exact/closest legal name
+  ranks first.
+- `lookup_by_identifier(COMPANY_NUMBER, CIN)` — GLEIF `filter[entity.registeredAs]`.
+  Returns `CompanyDetails` (legal name, status, ELF legal-form code, registered
+  address, industry SIC from CIN, CIN + LEI identifiers). Returns `None` for a
+  CIN with no LEI record.
+- `fetch_financials(CIN, years)` — for listed companies (CIN prefix `L`):
+  resolves the BSE scrip code from the GLEIF legal name via BSE PeerSmartSearch,
+  then lists filed annual reports (year + real per-company PDF `document_url`)
+  from BSE `AnnualReport_New`. PDFs are the company's actual filed reports
+  (verified `application/pdf`, multi-MB downloads). Returns `[]` for unlisted
+  (`U…`) companies.
 
-### What does not work in MVP
+### Coverage limits
 
-- **`search_by_name`**: MCA21's name search is session-bound and gated
-  by a CAPTCHA. Raises `AdapterNotImplementedError` (501) per the
-  no-mock-data rule. The intended replacement is to ingest the monthly
-  MCA Open Data CSV dumps into Postgres and serve search from that index.
-- **`fetch_financials`**: BSE annual reports are keyed by scripcode, not
-  CIN; the free CIN→scripcode mapping is not exposed. Listed-company
-  filings would require ingesting BSE's `EQ_ISINCODE.csv` master file
-  (free) to build a CIN→scripcode index. Unlisted (`U…`) company
-  filings live behind MCA21 paid per-document downloads (₹100/doc) —
-  out of scope for the free MVP.
+- **CIN lookup / search require an LEI.** Every listed company and the large
+  body of firms that trade or borrow internationally hold LEIs and resolve
+  cleanly. Purely domestic small private companies without an LEI return `None`
+  / no match — an honest gap, not mock data.
+- **`fetch_financials` covers listed (`L…`) companies only.** Unlisted company
+  filings sit behind MCA21 paid per-document downloads (₹100/doc) — out of
+  scope for the free MVP.
+- **GSTIN (`VAT`) lookup** raises `AdapterNotImplementedError` — the gst.gov.in
+  full lookup is OTP-gated.
 
 ## Recommended next steps
 
-1. Nightly ingest of MCA Open Data CSV dumps → Postgres → wire
-   `search_by_name` to the local index.
-2. Ingest BSE `EQ_ISINCODE.csv` (scripcode ↔ ISIN ↔ company name)
-   nightly, then fuzzy-join CIN by company name to enable
-   `fetch_financials` for listed companies (CIN prefix `L`).
-3. Add NSE corporate-filings JSON endpoint (`/api/corp-info`) with the
-   browser-style `Cookie` and `Referer` headers it requires.
-4. Phase-2: integrate the BSE XBRL annual report endpoint per scripcode
-   so structured balance-sheet data feeds into
-   `packages/risk/xbrl_esef.py` (or an India-specific Ind-AS parser).
+1. Parse the BSE annual-report PDFs (or the BSE XBRL financial-results endpoint
+   per scrip code) into structured Ind-AS balance sheets feeding the risk engine.
+2. Add a local CIN index from the monthly MCA Open Data CSV dumps to extend
+   search/lookup to LEI-less domestic companies.
+3. Fall back to NSE corporate-filings JSON for companies listed only on NSE.

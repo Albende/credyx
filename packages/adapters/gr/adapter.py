@@ -299,7 +299,9 @@ class GRAdapter(CountryAdapter):
                             f"{self.GEMI_BASE_URL}/api/download/financial/"
                             f"{int(file_id)}?companyId={gemi}"
                         ),
-                        document_format="pdf",
+                        document_format=_doc_format(
+                            _str_or_none(sheet.get("bal_file_system_file_path"))
+                        ),
                         source_url=f"{self.GEMI_BASE_URL}/company/{gemi}",
                     )
                 )
@@ -518,6 +520,17 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _doc_format(file_path: str | None) -> str:
+    """GEMI filings are iXBRL packages (``.xbri``/``.zip``) or plain PDFs."""
+    if file_path:
+        ext = file_path.rsplit(".", 1)[-1].lower()
+        if ext == "pdf":
+            return "pdf"
+        if ext in ("xbri", "zip", "xbrl", "xhtml", "html"):
+            return "xbrl"
+    return "xbrl"
 
 
 def _period_end(reference_period: str | None) -> date | None:

@@ -1,46 +1,48 @@
-"""Colombia adapter — RUES (Registro Único Empresarial y Social) + SFC.
+"""Colombia adapter — RUES (registry) + Supersociedades (financials).
 
 Sources:
 
-* RUES — https://www.rues.org.co/
-  Operated by CONFECAMARAS (Confederación Colombiana de Cámaras de
-  Comercio). Public, free, no auth. Backing API for the public
-  Consultas form lives at
-  https://www.rues.org.co/RM/Consultas — JSON responses for both name
-  and NIT lookups. The portal HTML wraps the same endpoints, so we hit
-  the JSON path directly and only fall back to scraping if it shifts.
-* SuperFinanciera de Colombia — https://www.superfinanciera.gov.co/
-  Publishes XBRL/PDF annual reports for SFC-supervised entities
-  (banks, insurers, listed issuers). The public index is reachable
-  per-NIT but is not a structured API; we surface the index URL as a
-  pointer rather than parse PDFs in MVP scope.
+* RUES — Registro Único Empresarial y Social, operated by CONFECAMARAS
+  (the umbrella body for Colombia's chambers of commerce). Public, free,
+  no auth. The modernised backend exposes two JSON services:
+  - ``https://elasticprd.rues.org.co/api/ConsultasRUES/BusquedaAvanzadaRM``
+    (POST) — advanced search over the mercantile register by ``razon``
+    (name) or ``nit``. Returns summary records keyed by ``id_rm``.
+  - ``https://ruesapi.rues.org.co/WEB2/api/Expediente/DetalleRM/{id_rm}``
+    (GET) — the full expediente for one register entry (address, CIIU,
+    dates, legal form, tax id + check digit).
+  Both hosts reject non-browser clients with a bare ``403``; we send a
+  browser ``User-Agent`` + ``Origin`` / ``Referer`` (the same headers the
+  public portal sends) and parse the JSON directly.
 
-Identifier:
+* Supersociedades — the Superintendencia de Sociedades publishes the NIIF
+  (IFRS) financial statements every non-financial company is legally
+  required to file, as open data on ``datos.gov.co`` (Socrata / SODA API,
+  no key required). Four datasets, joined by ``codigo_instancia``:
+  ``pfdp-zks5`` (statement of financial position), ``prwj-nzxa`` (income
+  statement), ``ctcp-462n`` (cash flow), ``y3gh-x5g7`` (OCI). We map the
+  filed line items into the unified ``structured_data`` schema the risk
+  engine consumes, per year, entity-level (non-consolidated) statements
+  preferred.
 
-- NIT (Número de Identificación Tributaria) — DIAN-issued tax ID. 9–10
-  body digits plus a single check digit, often displayed as
-  ``XXX.XXX.XXX-D``. The same number serves the corporate VAT role, so
-  we expose it as both ``VAT`` (primary) and ``COMPANY_NUMBER``.
-- Check digit is computed with weights
-  ``[71, 67, 59, 53, 47, 43, 41, 37, 29, 23, 19, 17, 13, 7, 3]`` applied
-  right-to-left over the body, summed mod 11; results 0/1 map directly,
-  otherwise ``11 - r``.
+Identifier — NIT (Número de Identificación Tributaria), the DIAN-issued
+tax + corporate id. 9–10 body digits plus a single check digit, displayed
+as ``XXX.XXX.XXX-D``. Exposed as both ``VAT`` (primary) and
+``COMPANY_NUMBER``.
 
-No-mock-data rule: if RUES is unreachable or its shape changes, raise —
-never invent. Search and lookup attempt the JSON endpoint first and fall
-back to a defensive HTML scrape of the public Consultas results table
-using the stdlib HTML parser; no third-party HTML lib is added.
+No-mock-data rule: RUES and Supersociedades are the only sources. SFC-
+supervised entities (banks, insurers, listed issuers) report to the
+Superintendencia Financiera, not Supersociedades, so ``fetch_financials``
+returns ``[]`` for them rather than fabricate figures. If a source's shape
+changes so it can't be parsed, we raise — never invent.
 """
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import re
 from datetime import date, datetime
-from html import unescape
-from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlencode
 
 import httpx
 
@@ -49,7 +51,7 @@ from packages.adapters._base.errors import (
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
-from packages.adapters._base.http import build_http_client, get_with_retry
+from packages.adapters._base.http import build_http_client
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
@@ -74,6 +76,18 @@ _NIT_WEIGHTS = [3, 7, 13, 17, 19, 23, 29, 37, 41, 43, 47, 53, 59, 67, 71]
 # Ecopetrol — a stable, always-active anchor for liveness probes.
 _HEALTH_PROBE_NIT = "899999068"
 
+# The RUES hosts 403 any client without the portal's browser headers.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-CO,es;q=0.9,en;q=0.7",
+    "Origin": "https://www.rues.org.co",
+    "Referer": "https://www.rues.org.co/",
+}
+
 
 class COAdapter(CountryAdapter):
     country_code = "CO"
@@ -84,38 +98,32 @@ class COAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    RUES_BASE = "https://www.rues.org.co"
-    # The public Consultas form posts to /RM/ConsultaRUES; the JSON
-    # endpoint that backs it is /RM/Consultas (GET with razon/nit params).
-    RUES_SEARCH_PATH = "/RM/Consultas"
-    RUES_LOOKUP_PATH = "/RM/ConsultaRUES"
-    # SFC has no per-NIT REST endpoint; the supervised-entities lookup
-    # is the closest public deeplink.
-    SFC_INDEX_TEMPLATE = (
-        "https://www.superfinanciera.gov.co/inicio/industrias-supervisadas"
-        "/entidades-vigiladas/buscador-de-entidades-vigiladas-10082930"
+    RUES_SEARCH_URL = (
+        "https://elasticprd.rues.org.co/api/ConsultasRUES/BusquedaAvanzadaRM"
     )
+    RUES_DETAIL_URL = "https://ruesapi.rues.org.co/WEB2/api/Expediente/DetalleRM/{id_rm}"
 
-    def _client(self) -> httpx.AsyncClient:
+    # Supersociedades NIIF financial statements, open data on datos.gov.co.
+    SODA_BASE = "https://www.datos.gov.co/resource"
+    DS_BALANCE = "pfdp-zks5"
+    DS_INCOME = "prwj-nzxa"
+    DS_CASHFLOW = "ctcp-462n"
+    SODA_DATASET_URL = "https://www.datos.gov.co/d/{ds}"
+
+    def _rues_client(self) -> httpx.AsyncClient:
+        return build_http_client(headers=_BROWSER_HEADERS, timeout=30.0)
+
+    def _soda_client(self) -> httpx.AsyncClient:
         return build_http_client(
-            base_url=self.RUES_BASE,
-            headers={
-                "Accept": "application/json, text/html;q=0.8",
-                "Accept-Language": "es-CO,es;q=0.9,en;q=0.7",
-                "X-Requested-With": "XMLHttpRequest",
-            },
-            timeout=25.0,
+            base_url=self.SODA_BASE,
+            headers={"Accept": "application/json"},
+            timeout=30.0,
         )
 
     async def health_check(self) -> AdapterHealth:
         try:
-            async with self._client() as client:
-                resp = await get_with_retry(
-                    client,
-                    self.RUES_SEARCH_PATH,
-                    params={"nit": _HEALTH_PROBE_NIT},
-                )
-                resp.raise_for_status()
+            async with self._rues_client() as client:
+                records = await _rues_search(client, {"nit": _HEALTH_PROBE_NIT})
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -127,38 +135,45 @@ class COAdapter(CountryAdapter):
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
+        reachable = any(r.get("nit") == _HEALTH_PROBE_NIT for r in records)
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.OK,
+            status=AdapterStatus.OK if reachable else AdapterStatus.ERROR,
             capabilities={"search": True, "lookup": True, "financials": True},
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "RUES public Consultas. Financials limited to "
-                "SFC-supervised entities (banks, insurers, listed issuers)."
+                "RUES BusquedaAvanzadaRM + DetalleRM for registry; "
+                "Supersociedades NIIF filings (datos.gov.co) for financials. "
+                "SFC-supervised entities report to SuperFinanciera and return "
+                "no Supersociedades filings."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
         if not name or not name.strip():
             return []
-        raw = await self._fetch_consulta(razon=name.strip())
-        records = _coerce_records(raw)
-        if records is None:
-            raise AdapterNotImplementedError(
-                "RUES response shape changed and could not be parsed; "
-                "see docs/countries/co.md."
+        async with self._rues_client() as client:
+            records = await _rues_search(client, {"razon": name.strip()})
+            ranked = sorted(records, key=_principal_rank)
+            id_rms = [r["id_rm"] for r in ranked if r.get("id_rm")][: max(limit * 2, limit)]
+            details = await asyncio.gather(
+                *(_rues_detail(client, id_rm) for id_rm in id_rms),
+                return_exceptions=True,
             )
+
         matches: list[CompanyMatch] = []
         seen: set[str] = set()
-        for rec in records[: max(limit * 2, limit)]:
-            nit = _extract_nit(rec)
-            if not nit or nit in seen:
+        for detail in details:
+            if isinstance(detail, BaseException) or not detail:
                 continue
-            seen.add(nit)
-            matches.append(_match_from_record(nit, rec, self.country_code))
+            nit_body = _detail_nit(detail)
+            if not nit_body or nit_body in seen:
+                continue
+            seen.add(nit_body)
+            matches.append(_match_from_detail(nit_body, detail, self.country_code))
             if len(matches) >= limit:
                 break
         return matches
@@ -171,8 +186,6 @@ class COAdapter(CountryAdapter):
                 f"CO only supports VAT/COMPANY_NUMBER (NIT), got {id_type}"
             )
         nit_body, supplied_check = _normalize_nit(value)
-        # If the caller supplied a check digit we validate it; if they
-        # gave us just the body we accept it (RUES looks up by body).
         if supplied_check is not None:
             expected = _nit_check_digit(nit_body)
             if supplied_check != expected:
@@ -181,89 +194,137 @@ class COAdapter(CountryAdapter):
                     f"(expected {expected}, got {supplied_check})"
                 )
 
-        raw = await self._fetch_consulta(nit=nit_body)
-        records = _coerce_records(raw)
-        if records is None:
-            raise AdapterNotImplementedError(
-                "RUES response shape changed and could not be parsed; "
-                "see docs/countries/co.md."
-            )
-        rec = _first_record_for_nit(records, nit_body)
-        if rec is None:
+        async with self._rues_client() as client:
+            records = await _rues_search(client, {"nit": nit_body})
+            record = _principal_for_nit(records, nit_body)
+            if record is None:
+                return None
+            detail = await _rues_detail(client, record["id_rm"])
+        if not detail:
             return None
-        return _details_from_record(nit_body, rec, self.country_code)
+        return _details_from_detail(nit_body, detail, self.country_code)
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         nit_body, _ = _normalize_nit(company_id)
-        # RUES exposes only registry metadata, not balance sheets.
-        # SuperFinanciera publishes per-entity reports but solely for
-        # supervised institutions; without a directory API we surface a
-        # discovery pointer that the operator can drill into. Closed-
-        # capital firms get an empty list per the no-mock-data rule.
-        if not await self._is_sfc_supervised(nit_body):
+        async with self._soda_client() as client:
+            rows = await asyncio.gather(
+                _soda_rows(client, self.DS_BALANCE, nit_body),
+                _soda_rows(client, self.DS_INCOME, nit_body),
+                _soda_rows(client, self.DS_CASHFLOW, nit_body),
+            )
+
+        instances = _group_instances(rows)
+        if not instances:
             return []
 
-        current_year = datetime.utcnow().year
-        index_url = self.SFC_INDEX_TEMPLATE
+        chosen = _select_annual_instances(instances, years)
         filings: list[FinancialFiling] = []
-        for offset in range(years):
-            yr = current_year - offset
+        for inst in chosen:
+            structured = _structured_from_instance(inst)
+            if not any(structured.get(s) for s in ("balance_sheet", "income_statement", "cash_flow")):
+                continue
+            corte = inst["fecha_corte"]
+            doc_url = (
+                f"{self.SODA_BASE}/{self.DS_BALANCE}.json"
+                f"?nit={nit_body}&fecha_corte={corte}"
+            )
             filings.append(
                 FinancialFiling(
                     company_id=nit_body,
-                    year=yr,
+                    year=inst["year"],
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=date(yr, 12, 31),
+                    period_end=date(inst["year"], 12, 31),
                     currency="COP",
-                    structured_data=None,
-                    document_url=index_url,
-                    document_format="html",
-                    source_url=index_url,
+                    structured_data=structured,
+                    document_url=doc_url,
+                    document_format="json",
+                    source_url=self.SODA_DATASET_URL.format(ds=self.DS_BALANCE),
                 )
             )
         return filings
 
-    async def _fetch_consulta(
-        self, *, razon: str | None = None, nit: str | None = None
-    ) -> Any:
-        params: dict[str, str] = {}
-        if razon:
-            params["razon"] = razon
-        if nit:
-            params["nit"] = nit
-        async with self._client() as client:
-            resp = await get_with_retry(
-                client, self.RUES_SEARCH_PATH, params=params
-            )
-            if resp.status_code in (404, 204):
-                return []
-            resp.raise_for_status()
-            ctype = (resp.headers.get("content-type") or "").lower()
-            text = resp.text
-            if "json" in ctype:
-                try:
-                    return resp.json()
-                except json.JSONDecodeError:
-                    return _parse_rues_html(text)
-            # Some deployments return the SPA shell even on the JSON path;
-            # try JSON first, fall back to HTML table parsing.
-            stripped = text.lstrip()
-            if stripped.startswith(("{", "[")):
-                try:
-                    return json.loads(stripped)
-                except json.JSONDecodeError:
-                    pass
-            return _parse_rues_html(text)
 
-    async def _is_sfc_supervised(self, nit_body: str) -> bool:
-        # The SFC public site does not expose a stable per-NIT JSON
-        # endpoint; the supervised-entities buscador is a JS SPA. Until a
-        # signed dataset is wired in, treat every NIT as unsupervised and
-        # return an empty filings list rather than fabricate a hit.
-        del nit_body
-        return False
+async def _rues_search(
+    client: httpx.AsyncClient, payload: dict[str, str]
+) -> list[dict[str, Any]]:
+    resp = await _post_with_retry(client, COAdapter.RUES_SEARCH_URL, payload)
+    if resp.status_code in (204, 404):
+        return []
+    resp.raise_for_status()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise AdapterNotImplementedError(
+            "RUES search returned non-JSON; see docs/countries/co.md."
+        ) from exc
+    if not isinstance(data, dict) or "registros" not in data:
+        raise AdapterNotImplementedError(
+            "RUES search response shape changed; see docs/countries/co.md."
+        )
+    registros = data.get("registros")
+    if registros is None:
+        return []
+    if not isinstance(registros, list):
+        raise AdapterNotImplementedError(
+            "RUES search 'registros' was not a list; see docs/countries/co.md."
+        )
+    return [r for r in registros if isinstance(r, dict)]
+
+
+async def _rues_detail(
+    client: httpx.AsyncClient, id_rm: str
+) -> dict[str, Any] | None:
+    resp = await client.get(COAdapter.RUES_DETAIL_URL.format(id_rm=id_rm))
+    if resp.status_code in (204, 404):
+        return None
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        return None
+    registros = data.get("registros")
+    if isinstance(registros, dict):
+        return registros
+    return None
+
+
+async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    json_body: dict[str, str],
+    *,
+    max_attempts: int = 3,
+) -> httpx.Response:
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = await client.post(url, json=json_body)
+            if resp.status_code == 429:
+                await asyncio.sleep(float(resp.headers.get("Retry-After", 5)))
+                continue
+            return resp
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            await asyncio.sleep(0.8 * (2 ** (attempt - 1)))
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _soda_rows(
+    client: httpx.AsyncClient, dataset: str, nit_body: str
+) -> list[dict[str, Any]]:
+    params = {
+        "nit": nit_body,
+        "periodo": "Periodo Actual",
+        "$limit": "10000",
+    }
+    resp = await client.get(f"/{dataset}.json", params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict)]
 
 
 def _normalize_nit(value: str) -> tuple[str, str | None]:
@@ -290,9 +351,6 @@ def _normalize_nit(value: str) -> tuple[str, str | None]:
         check = check_digits
     else:
         digits = _DIGITS_RE.sub("", cleaned)
-        # 9 or 10 digits = body only. 10 or 11 digits may be body + check;
-        # we cannot tell without context, so treat 10 as body-only (the
-        # common DIAN form) and 11 as body(10) + check.
         if len(digits) == 11:
             body = digits[:-1]
             check = digits[-1]
@@ -318,55 +376,46 @@ def _nit_check_digit(body: str) -> str:
     return str(11 - rem)
 
 
-def _coerce_records(payload: Any) -> list[dict[str, Any]] | None:
-    """Normalize the heterogeneous RUES response shapes to a list of dicts.
-
-    Returns None if the payload doesn't resemble anything we know — that
-    triggers AdapterNotImplementedError upstream rather than silent
-    fabrication.
-    """
-    if payload is None:
-        return []
-    if isinstance(payload, list):
-        return [r for r in payload if isinstance(r, dict)]
-    if isinstance(payload, dict):
-        for key in ("registros", "Registros", "data", "Data", "result", "results", "rows"):
-            inner = payload.get(key)
-            if isinstance(inner, list):
-                return [r for r in inner if isinstance(r, dict)]
-        # Single-record dict response.
-        if any(
-            k in payload
-            for k in ("nit", "NIT", "razon_social", "razonSocial", "RAZON_SOCIAL")
-        ):
-            return [payload]
-        return []
-    return None
+def _principal_rank(rec: dict[str, Any]) -> int:
+    categoria = (rec.get("categoria") or "").upper()
+    return 0 if "PRINCIPAL" in categoria else 1
 
 
-def _extract_nit(rec: dict[str, Any]) -> str | None:
-    for key in ("nit", "NIT", "Nit", "numero_identificacion", "numeroIdentificacion"):
-        v = rec.get(key)
-        if v is None:
-            continue
-        digits = _DIGITS_RE.sub("", str(v))
-        if 9 <= len(digits) <= 11:
-            return digits[:-1] if len(digits) == 11 else digits
-    return None
-
-
-def _first_record_for_nit(
+def _principal_for_nit(
     records: list[dict[str, Any]], nit_body: str
 ) -> dict[str, Any] | None:
-    for rec in records:
-        candidate = _extract_nit(rec)
-        if candidate == nit_body:
-            return rec
-    # If RUES echoed back a single record (common for direct NIT lookups)
-    # but the field naming was odd, accept it.
-    if len(records) == 1:
-        return records[0]
+    candidates = [
+        r for r in records if _digits(r.get("nit")) == nit_body and r.get("id_rm")
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=_principal_rank)
+    return candidates[0]
+
+
+def _digits(value: Any) -> str:
+    if value is None:
+        return ""
+    return _DIGITS_RE.sub("", str(value))
+
+
+def _detail_nit(detail: dict[str, Any]) -> str | None:
+    raw = detail.get("numero_identificacion") or detail.get("numero_identificacion_2")
+    digits = _digits(raw).lstrip("0")
+    if 9 <= len(digits) <= 10:
+        return digits
     return None
+
+
+def _detail_dv(detail: dict[str, Any], nit_body: str) -> str:
+    dv = _digits(detail.get("dv"))
+    if len(dv) == 1:
+        return dv
+    return _nit_check_digit(nit_body)
+
+
+def _formatted_nit(detail: dict[str, Any], nit_body: str) -> str:
+    return f"{nit_body}-{_detail_dv(detail, nit_body)}"
 
 
 def _pick(rec: dict[str, Any], *keys: str) -> str | None:
@@ -380,76 +429,19 @@ def _pick(rec: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _match_from_record(
-    nit_body: str, rec: dict[str, Any], country_code: str
-) -> CompanyMatch:
-    name = _pick(rec, "razon_social", "razonSocial", "RAZON_SOCIAL", "nombre") or nit_body
-    status = _pick(rec, "estado", "ESTADO", "estado_matricula", "estadoMatricula")
-    address = _compose_address(rec)
-    check = _nit_check_digit(nit_body)
-    formatted = f"{nit_body}-{check}"
-    return CompanyMatch(
-        id=nit_body,
-        name=name,
-        country=country_code,
-        identifiers=[
-            RegistryIdentifier(
-                type=IdentifierType.VAT, value=formatted, label="NIT"
-            ),
-            RegistryIdentifier(
-                type=IdentifierType.COMPANY_NUMBER, value=formatted, label="NIT"
-            ),
-        ],
-        address=address,
-        status=status,
-        source_url=_rues_source_url(nit_body),
-    )
-
-
-def _details_from_record(
-    nit_body: str, rec: dict[str, Any], country_code: str
-) -> CompanyDetails:
-    name = _pick(rec, "razon_social", "razonSocial", "RAZON_SOCIAL", "nombre") or nit_body
-    legal_form = _pick(
-        rec, "organizacion_juridica", "organizacionJuridica", "tipo_sociedad", "tipoSociedad"
-    )
-    status = _pick(rec, "estado", "ESTADO", "estado_matricula", "estadoMatricula")
-    inc_date = _parse_co_date(
-        _pick(rec, "fecha_matricula", "fechaMatricula", "fecha_constitucion", "fechaConstitucion")
-    )
-    ciiu_codes = _ciiu_codes(rec)
-    check = _nit_check_digit(nit_body)
-    formatted = f"{nit_body}-{check}"
-
-    return CompanyDetails(
-        id=nit_body,
-        name=name,
-        country=country_code,
-        legal_form=legal_form,
-        status=status,
-        incorporation_date=inc_date,
-        registered_address=_compose_address(rec),
-        capital_amount=None,
-        capital_currency="COP",
-        nace_codes=ciiu_codes,
-        identifiers=[
-            RegistryIdentifier(
-                type=IdentifierType.VAT, value=formatted, label="NIT"
-            ),
-            RegistryIdentifier(
-                type=IdentifierType.COMPANY_NUMBER, value=formatted, label="NIT"
-            ),
-        ],
-        raw=dict(rec),
-        source_url=_rues_source_url(nit_body),
-    )
+def _identifiers(formatted: str) -> list[RegistryIdentifier]:
+    return [
+        RegistryIdentifier(type=IdentifierType.VAT, value=formatted, label="NIT"),
+        RegistryIdentifier(
+            type=IdentifierType.COMPANY_NUMBER, value=formatted, label="NIT"
+        ),
+    ]
 
 
 def _compose_address(rec: dict[str, Any]) -> str | None:
     parts = [
-        _pick(rec, "direccion_comercial", "direccionComercial", "direccion", "DIRECCION"),
-        _pick(rec, "municipio", "MUNICIPIO", "ciudad"),
-        _pick(rec, "departamento", "DEPARTAMENTO"),
+        _pick(rec, "dir_comercial", "dir_fiscal"),
+        _pick(rec, "mun_comercial", "mun_fiscal"),
     ]
     cleaned = [p for p in parts if p]
     return ", ".join(cleaned) if cleaned else None
@@ -458,27 +450,66 @@ def _compose_address(rec: dict[str, Any]) -> str | None:
 def _ciiu_codes(rec: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for key in (
-        "ciiu1",
-        "ciiu2",
+        "cod_ciiu_act_econ_pri",
+        "cod_ciiu_act_econ_sec",
         "ciiu3",
         "ciiu4",
-        "codigo_ciiu",
-        "codigoCiiu",
-        "CIIU",
     ):
-        v = rec.get(key)
-        if v is None:
-            continue
-        digits = _DIGITS_RE.sub("", str(v))
+        digits = _digits(rec.get(key))
         if digits and digits not in out:
             out.append(digits)
     return out
+
+
+def _detail_source_url(detail: dict[str, Any]) -> str:
+    id_rm = _pick(detail, "id") or ""
+    return COAdapter.RUES_DETAIL_URL.format(id_rm=id_rm)
+
+
+def _match_from_detail(
+    nit_body: str, detail: dict[str, Any], country_code: str
+) -> CompanyMatch:
+    name = _pick(detail, "razon_social") or nit_body
+    return CompanyMatch(
+        id=nit_body,
+        name=name,
+        country=country_code,
+        identifiers=_identifiers(_formatted_nit(detail, nit_body)),
+        address=_compose_address(detail),
+        status=_pick(detail, "estado", "estado_matricula", "motivo_cancelacion"),
+        source_url=_detail_source_url(detail),
+    )
+
+
+def _details_from_detail(
+    nit_body: str, detail: dict[str, Any], country_code: str
+) -> CompanyDetails:
+    return CompanyDetails(
+        id=nit_body,
+        name=_pick(detail, "razon_social") or nit_body,
+        country=country_code,
+        legal_form=_pick(detail, "organizacion_juridica", "tipo_sociedad"),
+        status=_pick(detail, "estado", "estado_matricula", "motivo_cancelacion"),
+        incorporation_date=_parse_co_date(_pick(detail, "fecha_matricula")),
+        registered_address=_compose_address(detail),
+        capital_amount=None,
+        capital_currency="COP",
+        nace_codes=_ciiu_codes(detail),
+        identifiers=_identifiers(_formatted_nit(detail, nit_body)),
+        raw=dict(detail),
+        source_url=_detail_source_url(detail),
+    )
 
 
 def _parse_co_date(value: str | None) -> date | None:
     if not value:
         return None
     s = value.strip()
+    if s.isdigit() and len(s) == 8:
+        try:
+            return datetime.strptime(s, "%Y%m%d").date()
+        except ValueError:
+            return None
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(s[:10], fmt).date()
@@ -487,128 +518,154 @@ def _parse_co_date(value: str | None) -> date | None:
     return None
 
 
-def _rues_source_url(nit_body: str) -> str:
-    qs = urlencode({"nit": nit_body})
-    return f"https://www.rues.org.co/RM/ConsultaRUES?{qs}"
+# --- Supersociedades NIIF concept mapping -----------------------------------
 
+def _skeleton(concept: str) -> str:
+    """ASCII skeleton of a filed concept label.
 
-class _RuesTableParser(HTMLParser):
-    """Defensive scraper for the fallback HTML render.
-
-    Walks `<table>` rows and pulls out (header, value) pairs whenever the
-    page uses a label-cell layout. Also collects any inline JSON dropped
-    into a ``window.__RUES_DATA__`` or similar bootstrap script.
+    Supersociedades' published data corrupts many accented characters to
+    U+FFFD inconsistently, so we drop every non-``[a-z0-9 ]`` character
+    (accents, U+FFFD, punctuation alike) and collapse whitespace. Applied
+    identically to the data and to the map keys below so both sides fold
+    the same way regardless of how the accent survived ingestion.
     """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._depth_table = 0
-        self._in_row = False
-        self._in_cell = False
-        self._cells: list[str] = []
-        self._cell_buf: list[str] = []
-        self.rows: list[list[str]] = []
-        self._in_script = False
-        self._script_buf: list[str] = []
-        self.scripts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "table":
-            self._depth_table += 1
-        elif tag == "tr" and self._depth_table > 0:
-            self._in_row = True
-            self._cells = []
-        elif tag in ("td", "th") and self._in_row:
-            self._in_cell = True
-            self._cell_buf = []
-        elif tag == "script":
-            self._in_script = True
-            self._script_buf = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "table" and self._depth_table > 0:
-            self._depth_table -= 1
-        elif tag == "tr" and self._in_row:
-            self._in_row = False
-            if self._cells:
-                self.rows.append(self._cells)
-        elif tag in ("td", "th") and self._in_cell:
-            self._in_cell = False
-            self._cells.append(unescape("".join(self._cell_buf)).strip())
-        elif tag == "script" and self._in_script:
-            self._in_script = False
-            self.scripts.append("".join(self._script_buf))
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._cell_buf.append(data)
-        elif self._in_script:
-            self._script_buf.append(data)
+    lowered = concept.lower()
+    ascii_only = re.sub(r"[^a-z0-9 ]+", " ", lowered)
+    return re.sub(r"\s+", " ", ascii_only).strip()
 
 
-_BOOTSTRAP_JSON_RE = re.compile(
-    r"window\.__RUES_DATA__\s*=\s*(\[.*?\]|\{.*?\})\s*;", re.DOTALL
-)
+# Filed NIIF concept label -> (unified section, unified key). Entity-level
+# NIIF Plenas / Pymes line items as filed with Supersociedades; matched via
+# the ASCII skeleton above.
+_CONCEPT_MAP: dict[str, tuple[str, str]] = {
+    "total de activos": ("balance_sheet", "total_assets"),
+    "activos corrientes totales": ("balance_sheet", "current_assets"),
+    "total de activos no corrientes": ("balance_sheet", "non_current_assets"),
+    "efectivo y equivalentes al efectivo": ("balance_sheet", "cash_and_equivalents"),
+    "inventarios corrientes": ("balance_sheet", "inventories"),
+    "cuentas comerciales por cobrar y otras cuentas por cobrar corrientes": (
+        "balance_sheet",
+        "trade_receivables",
+    ),
+    "total pasivos": ("balance_sheet", "total_liabilities"),
+    "pasivos corrientes totales": ("balance_sheet", "current_liabilities"),
+    "total de pasivos no corrientes": ("balance_sheet", "non_current_liabilities"),
+    "patrimonio total": ("balance_sheet", "total_equity"),
+    "capital emitido": ("balance_sheet", "share_capital"),
+    "ganancias acumuladas": ("balance_sheet", "retained_earnings"),
+    "ingresos de actividades ordinarias": ("income_statement", "revenue"),
+    "ganancia bruta": ("income_statement", "gross_profit"),
+    "ganancia (pérdida) por actividades de operación": (
+        "income_statement",
+        "operating_profit",
+    ),
+    "ganancia (pérdida)": ("income_statement", "net_income"),
+    "costos financieros": ("income_statement", "interest_expense"),
+    "flujos de efectivo netos procedentes de (utilizados en) actividades de operación": (
+        "cash_flow",
+        "operating_cf",
+    ),
+    "flujos de efectivo netos procedentes de (utilizados en) actividades de inversión": (
+        "cash_flow",
+        "investing_cf",
+    ),
+    "flujos de efectivo netos procedentes de (utilizados en) actividades de financiación": (
+        "cash_flow",
+        "financing_cf",
+    ),
+}
+
+# Map keys folded through the same skeleton used on the incoming data.
+_CONCEPT_LOOKUP: dict[str, tuple[str, str]] = {
+    _skeleton(label): target for label, target in _CONCEPT_MAP.items()
+}
 
 
-def _parse_rues_html(html_text: str) -> list[dict[str, Any]]:
-    """Best-effort HTML fallback.
-
-    RUES occasionally returns a server-rendered results table or embeds the
-    payload as a bootstrap JSON literal. We try the literal first, then
-    fall back to row-pair extraction. Returns an empty list if nothing
-    structured is found — never invents fields.
-    """
-    parser = _RuesTableParser()
+def _to_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
     try:
-        parser.feed(html_text)
-    except Exception as exc:
-        logger.debug("RUES HTML parse failed: %s", exc)
-        return []
+        return float(s)
+    except ValueError:
+        return None
 
-    for script in parser.scripts:
-        m = _BOOTSTRAP_JSON_RE.search(script)
-        if not m:
-            continue
-        try:
-            payload = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        records = _coerce_records(payload) or []
-        if records:
-            return records
 
-    # Label/value table fallback. Each row pairs of (label, value).
-    record: dict[str, Any] = {}
-    label_map = {
-        "nit": "nit",
-        "razón social": "razon_social",
-        "razon social": "razon_social",
-        "estado": "estado",
-        "estado matrícula": "estado_matricula",
-        "estado matricula": "estado_matricula",
-        "dirección": "direccion_comercial",
-        "direccion": "direccion_comercial",
-        "municipio": "municipio",
-        "departamento": "departamento",
-        "ciiu": "codigo_ciiu",
-        "actividad económica": "codigo_ciiu",
-        "actividad economica": "codigo_ciiu",
-        "fecha de matrícula": "fecha_matricula",
-        "fecha matricula": "fecha_matricula",
-        "tipo de sociedad": "tipo_sociedad",
-        "organización jurídica": "organizacion_juridica",
-        "organizacion juridica": "organizacion_juridica",
+def _group_instances(
+    rows_per_dataset: tuple[list[dict[str, Any]], ...]
+) -> dict[str, dict[str, Any]]:
+    """Merge the three SODA datasets into one record per ``codigo_instancia``.
+
+    Each instance is a single filed statement set (one taxonomy /
+    punto_entrada). Only annual (Dec-31) filings are kept.
+    """
+    instances: dict[str, dict[str, Any]] = {}
+    for rows in rows_per_dataset:
+        for row in rows:
+            corte = str(row.get("fecha_corte") or "")
+            if corte[5:10] != "12-31":
+                continue
+            code = str(row.get("codigo_instancia") or "")
+            if not code:
+                continue
+            inst = instances.get(code)
+            if inst is None:
+                inst = {
+                    "year": int(corte[:4]),
+                    "fecha_corte": corte,
+                    "punto_entrada": str(row.get("punto_entrada") or ""),
+                    "concepts": {},
+                }
+                instances[code] = inst
+            mapped = _CONCEPT_LOOKUP.get(_skeleton(str(row.get("concepto") or "")))
+            if mapped is None:
+                continue
+            number = _to_number(row.get("valor"))
+            if number is None:
+                continue
+            inst["concepts"].setdefault(mapped, number)
+    return instances
+
+
+def _select_annual_instances(
+    instances: dict[str, dict[str, Any]], years: int
+) -> list[dict[str, Any]]:
+    by_year: dict[int, dict[str, Any]] = {}
+    for inst in instances.values():
+        year = inst["year"]
+        current = by_year.get(year)
+        if current is None or _instance_rank(inst) > _instance_rank(current):
+            by_year[year] = inst
+    ordered = [by_year[y] for y in sorted(by_year, reverse=True)]
+    return ordered[:years]
+
+
+def _instance_rank(inst: dict[str, Any]) -> tuple[int, int]:
+    """Prefer entity-level (non-consolidated) and more-complete filings."""
+    consolidated = "consolidad" in inst["punto_entrada"].lower()
+    return (0 if consolidated else 1, len(inst["concepts"]))
+
+
+def _structured_from_instance(inst: dict[str, Any]) -> dict[str, Any]:
+    sections: dict[str, dict[str, float]] = {
+        "balance_sheet": {},
+        "income_statement": {},
+        "cash_flow": {},
     }
-    for row in parser.rows:
-        if len(row) < 2:
-            continue
-        label = row[0].lower().rstrip(":").strip()
-        value = row[1].strip()
-        key = label_map.get(label)
-        if key and value:
-            record[key] = value
-    return [record] if record else []
+    for (section, key), value in inst["concepts"].items():
+        sections[section][key] = value
+    result: dict[str, Any] = {
+        "currency": "COP",
+        "units": "thousands",
+        "basis": inst["punto_entrada"],
+        "source": "Supersociedades (datos.gov.co)",
+    }
+    for section, values in sections.items():
+        if values:
+            result[section] = values
+    return result
 
 
 __all__ = [

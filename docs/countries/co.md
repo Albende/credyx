@@ -1,4 +1,4 @@
-# 🇨🇴 Colombia — RUES (CONFECAMARAS) + SuperFinanciera
+# 🇨🇴 Colombia — RUES (CONFECAMARAS) + Supersociedades (datos.gov.co)
 
 ## Identifier
 
@@ -21,38 +21,65 @@
 
 - **RUES (Registro Único Empresarial y Social)** — `https://www.rues.org.co/`
   - Operated by **CONFECAMARAS** (Confederación Colombiana de Cámaras
-    de Comercio), the umbrella body for the country's 57 chambers of
+    de Comercio), the umbrella body for the country's chambers of
     commerce.
-  - **Auth**: none. **Cost**: free.
+  - **Auth**: none. **Cost**: free. The modernised (2024→) JSON backend
+    replaced the old `/RM/Consultas` form path. Both hosts return a bare
+    `403` unless the request carries the portal's browser headers
+    (`User-Agent` + `Origin`/`Referer`), which the adapter sends.
   - **Endpoints used**:
-    - `GET /RM/Consultas?nit={nit_body}` — direct NIT lookup.
-    - `GET /RM/Consultas?razon={name}` — name search.
-  - Both endpoints back the public Consultas web form; the JSON shape
-    is unstable enough that the adapter accepts several common
-    response envelopes (`registros`, `data`, `results`, top-level
-    array) and falls back to a defensive HTML parse when the portal
-    returns its SPA shell rather than JSON. If neither parse
-    succeeds, `AdapterNotImplementedError` is raised — never invent.
+    - `POST https://elasticprd.rues.org.co/api/ConsultasRUES/BusquedaAvanzadaRM`
+      — advanced search. JSON body `{"nit": "<body>"}` for a direct NIT
+      lookup or `{"razon": "<name>"}` for a name search. Returns
+      `{"registros": [...], "cant_registros": N, "error": {...}}` where
+      each record carries an `id_rm` (register-entry id). Name-search
+      records do **not** include the NIT — only `id_rm`.
+    - `GET https://ruesapi.rues.org.co/WEB2/api/Expediente/DetalleRM/{id_rm}`
+      — the full expediente for one entry (`razon_social`,
+      `numero_identificacion` + `dv`, address, CIIU codes, `fecha_matricula`,
+      `organizacion_juridica`, `estado`). The adapter resolves each search
+      hit through this endpoint to recover the NIT and enrich details.
+  - If a response is not JSON or lacks `registros`,
+    `AdapterNotImplementedError` is raised — never invent.
   - **Rate limit**: undocumented; we self-throttle at 30 req/min.
-- **SuperFinanciera de Colombia (SFC)** —
-  `https://www.superfinanciera.gov.co/`
-  - Publishes annual reports (XBRL / PDF) for SFC-supervised entities
-    only: banks, insurers, listed issuers, fiduciaries, broker-dealers.
-  - There is **no public per-NIT REST endpoint** to check
-    supervision; the buscador de entidades vigiladas is a JavaScript
-    SPA. Until a signed dataset is wired up, the adapter conservatively
-    returns `[]` from `fetch_financials` rather than fabricate
-    supervision status.
+- **Supersociedades — NIIF financial statements (open data)** —
+  `https://www.datos.gov.co/` (Socrata / SODA API, **no key required**).
+  - The Superintendencia de Sociedades publishes the IFRS/NIIF financial
+    statements every non-financial company is legally required to file.
+    Four datasets, joined by `codigo_instancia` (one filed statement set):
+    - `pfdp-zks5` — Estado de Situación Financiera (balance sheet)
+    - `prwj-nzxa` — Estado de Resultado Integral (income statement)
+    - `ctcp-462n` — Estado de Flujo de Efectivo (cash flow)
+    - `y3gh-x5g7` — Otro Resultado Integral (OCI)
+  - Long format: `nit`, `fecha_corte`, `concepto`, `periodo` (we take
+    `Periodo Actual`), `valor`, `punto_entrada`. The adapter keeps annual
+    (Dec-31) filings, prefers **entity-level (non-consolidated)** over
+    consolidated statements, maps the filed line items into the unified
+    `structured_data` schema (`balance_sheet` / `income_statement` /
+    `cash_flow`), and returns one `FinancialFiling` per year. Values are
+    in **thousands of COP**. Coverage runs from FY2015 to the latest
+    filed year (FY2025 as of writing).
+  - **Encoding caveat**: the published data corrupts many accented
+    characters to `U+FFFD` inconsistently, so concept labels are matched
+    through an ASCII skeleton (`_skeleton`) that drops every non-`[a-z0-9 ]`
+    character from both the data and the map keys.
+  - **Not covered**: SFC-supervised entities (banks, insurers, listed
+    issuers such as Ecopetrol, Bancolombia, Grupo Argos, Avianca) report
+    to the **Superintendencia Financiera**, not Supersociedades, so they
+    are absent from these datasets and `fetch_financials` returns `[]`
+    for them rather than fabricate figures.
 
 ## Capabilities
 
 | Capability | Status |
 |------------|--------|
-| Search by name | 🟢 Live (RUES Consultas) |
-| Lookup by NIT (`VAT` / `COMPANY_NUMBER`) | 🟢 Live (RUES Consultas) |
-| Financials | 🟡 Limited — `[]` for unsupervised NITs; SFC index URL for supervised entities (no SFC directory wired yet, so currently always `[]`) |
+| Search by name | 🟢 Live (RUES BusquedaAvanzadaRM → DetalleRM) |
+| Lookup by NIT (`VAT` / `COMPANY_NUMBER`) | 🟢 Live (RUES BusquedaAvanzadaRM → DetalleRM) |
+| Financials | 🟢 Live for Supersociedades filers (structured NIIF statements, 2015→latest); `[]` for SFC-supervised entities and unknown NITs |
 
 ## Test companies (real)
+
+Registry (RUES) — search + lookup:
 
 - **Ecopetrol S.A.** — NIT `899.999.068-1` — state-owned oil & gas.
 - **Bancolombia S.A.** — NIT `890.903.938-8` — largest Colombian bank.
@@ -61,25 +88,31 @@
 - **Avianca Group International Limited (Avianca Holdings)** — NIT
   `890.100.577-6` — flag carrier.
 
-All four NIT check digits are verified by the adapter's
-`_nit_check_digit` function (see unit tests in
-`packages/adapters/co/tests/test_co.py`).
+Financials (Supersociedades) — a company that files with Supersociedades
+(not SFC-supervised), so all three methods return live data end-to-end:
+
+- **Alpina Productos Alimenticios S.A.S. BIC** — NIT `860.025.900-2` —
+  dairy/food manufacturer. Files entity-level NIIF Plenas statements;
+  FY2023–FY2025 all present (e.g. FY2024 total assets ≈ 1.43 trillion
+  thousand-COP, revenue ≈ 2.10 trillion thousand-COP).
+
+All NIT check digits are verified by the adapter's `_nit_check_digit`
+function (see unit tests in `packages/adapters/co/tests/test_co.py`); the
+DV returned by RUES is used directly when present.
 
 ## Status
 
-🟢 **Live** for RUES lookup + name search. 🟡 Financials limited:
-SFC-supervised entities need a directory feed before per-year filings
-can be surfaced; closed-capital companies have no public balance sheet
-source.
+🟢 **Live** for RUES lookup + name search and for Supersociedades NIIF
+financials. Financials are `[]` for SFC-supervised entities (see below)
+and for NITs with no filed statements — never fabricated.
 
 ## Phase-2 follow-ups
 
-1. **SFC supervised-entity directory**: ingest the
-   "Entidades vigiladas" downloadable CSV (Excel today, occasionally
-   refreshed) to populate `_is_sfc_supervised`. Once known, each
-   supervised entity has annual reports under
-   `superfinanciera.gov.co/.../entidades-vigiladas/{slug}` — those
-   become structured `FinancialFiling` rows.
+1. **SFC-supervised financials**: entities supervised by the
+   Superintendencia Financiera (banks, insurers, listed issuers) file
+   XBRL/PDF with SFC, not Supersociedades. Wire the SFC "Entidades
+   vigiladas" directory + report index so these get per-year
+   `FinancialFiling` rows too.
 2. **CIIU enrichment**: RUES exposes 1–4 CIIU codes per company
    (Colombia's adaptation of NACE Rev. 2). The adapter already
    surfaces them as `nace_codes`; cross-reference DANE's CIIU

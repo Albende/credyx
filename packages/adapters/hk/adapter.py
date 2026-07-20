@@ -1,42 +1,46 @@
-"""Hong Kong adapter — Companies Registry (ICRIS) + HKEX.
+"""Hong Kong adapter — HKEXnews (listed issuers) + optional OpenCorporates.
 
 Free public sources only, per the project's no-paid-API rule.
 
-- **Registry** — Hong Kong Companies Registry "Cyber Search Centre"
-  (https://www.icris.cr.gov.hk/csci/). The free tier exposes name search +
-  CR number + status. Full company extracts and document downloads are
-  HK$8/doc and not used here. ICRIS itself is a JSF/SPA that requires CSRF
-  tokens and browser-rendered JavaScript — not scrapeable with plain httpx.
-  We therefore route name search + CR-number lookup through the free
-  OpenCorporates HK mirror (`jurisdiction_code=hk`) when an
-  `OPENCORPORATES_API_KEY` is configured. Without a key the public ICRIS
-  page is still surfaced as the `source_url`, but programmatic search /
-  lookup raises `AdapterNotImplementedError` rather than fabricating data.
+- **Primary (key-free) — HKEXnews.** The Hong Kong Companies Registry
+  (ICRIS / e-Services) is a CSRF/SPA front-end whose full extracts sit
+  behind a HK$8/doc paywall, so it is not usable programmatically for
+  free. HKEXnews (https://www1.hkexnews.hk), the Stock Exchange's public
+  disclosure portal, exposes two undocumented-but-stable JSON endpoints
+  that need no key:
+    - ``/search/prefix.do`` — autocomplete: name/stock-code -> the
+      issuer's internal ``stockId``, 5-digit ``code`` and short ``name``.
+      Powers ``search_by_name`` and ``lookup_by_identifier``.
+    - ``/search/titleSearchServlet.do`` — per-issuer filing list with the
+      real PDF ``FILE_LINK``. Filtered to ``Annual Report`` this yields the
+      actual filed annual reports. Powers ``fetch_financials``.
+  Coverage is therefore HK **listed issuers** (SEHK main board). For a
+  listed issuer the free identifier is its HKEX **stock code**
+  (5-digit, zero-padded, e.g. ``00700`` = Tencent).
 
-- **Financials** — Listed issuers file annual reports with HKEX
-  (https://www.hkexnews.hk). The HKEX title-search backend is also a JSF
-  page; we therefore expose the canonical listed-issuer Title Search URL
-  per HKEX stock code when one is provided in `company_id` as
-  `CR/HKEX:nnnn` (or just `HKEX:nnnn`). Plain CR-number callers with no
-  HKEX code attached get `[]` — unlisted HK companies have no free
-  financial source and we never invent one.
+- **Optional (key-gated) — OpenCorporates HK mirror.** When
+  ``OPENCORPORATES_API_KEY`` is present we additionally accept the ICRIS
+  **CR number** in ``lookup_by_identifier`` and use it to resolve a stock
+  code for ``fetch_financials``. Absent the key we neither reach ICRIS nor
+  fabricate CR data — CR lookups return ``None`` / raise.
 
 Identifiers
-- `COMPANY_NUMBER` — 7-digit CR (Companies Registry) number, zero-padded.
-- `OTHER` — 8-digit BR (Business Registration) number. Not the primary
-  identifier (CR and BR diverge after company reorganizations); we accept
-  it for normalization only.
+- ``COMPANY_NUMBER`` — HKEX stock code (5-digit, key-free) for listed
+  issuers; or a 7-digit ICRIS CR number when an OpenCorporates key is set.
+- ``OTHER`` — 8-digit BR (Business Registration) number. IRD's BR Number
+  Enquiry is paid; accepted for normalization only, never looked up.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from datetime import date, datetime
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
-    AdapterError,
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
@@ -55,12 +59,12 @@ from packages.shared.models import (
 
 _CR_RE = re.compile(r"^\d{1,7}$")
 _BR_RE = re.compile(r"^\d{8}$")
-_HKEX_RE = re.compile(r"^\d{1,5}$")
+_STOCK_RE = re.compile(r"^\d{1,5}$")
+_YEAR_RE = re.compile(r"(19|20)\d{2}")
 
-# CR codes can be packed alongside an HKEX stock code via the conventions
-# "CR:1234567", "1234567/HKEX:0700", or "0700@hk" — these are accepted by
-# fetch_financials so callers can pre-resolve the listing without us doing
-# a second registry round-trip.
+# CR/stock codes can be packed via "CR:1234567", "HKEX:00700",
+# "1234567/HKEX:00700" or "0700@hk" — accepted by fetch_financials so a
+# caller can pre-resolve the listing without a second round-trip.
 _PACKED_RE = re.compile(
     r"^(?:CR[:/])?(?P<cr>\d{1,7})?"
     r"(?:[/@]HKEX[:/]?(?P<hkex>\d{1,5}))?$",
@@ -73,32 +77,36 @@ def _normalize_cr_number(value: str) -> str:
     if cleaned.upper().startswith("CR"):
         cleaned = cleaned[2:].lstrip(":/")
     if not _CR_RE.match(cleaned):
-        raise InvalidIdentifierError(
-            f"HK CR number must be up to 7 digits: {value}"
-        )
+        raise InvalidIdentifierError(f"HK CR number must be up to 7 digits: {value}")
     return cleaned.zfill(7)
 
 
 def _normalize_br_number(value: str) -> str:
     cleaned = value.strip().replace(" ", "").replace("-", "")
     if not _BR_RE.match(cleaned):
-        raise InvalidIdentifierError(
-            f"HK BR number must be 8 digits: {value}"
-        )
+        raise InvalidIdentifierError(f"HK BR number must be 8 digits: {value}")
     return cleaned
 
 
+def _try_stock_code(value: str) -> str | None:
+    """Return a 5-digit zero-padded HKEX stock code, or None if not code-shaped."""
+    cleaned = value.strip().replace(" ", "").replace("-", "")
+    if cleaned.upper().startswith("HKEX"):
+        cleaned = cleaned[4:].lstrip(":/")
+    if _STOCK_RE.match(cleaned):
+        return cleaned.zfill(5)
+    return None
+
+
 def _split_packed_id(value: str) -> tuple[str | None, str | None]:
-    """Return (cr_number, hkex_code) parsed from a caller-supplied id."""
+    """Return (cr_number, stock_code) parsed from a caller-supplied id."""
     raw = value.strip().replace(" ", "")
     m = _PACKED_RE.match(raw)
     if not m:
         return None, None
     cr = m.group("cr")
     hkex = m.group("hkex")
-    cr_n = cr.zfill(7) if cr else None
-    hkex_n = hkex.zfill(4) if hkex else None
-    return cr_n, hkex_n
+    return (cr.zfill(7) if cr else None, hkex.zfill(5) if hkex else None)
 
 
 class HKAdapter(CountryAdapter):
@@ -109,33 +117,122 @@ class HKAdapter(CountryAdapter):
     requires_api_key = False
     rate_limit_per_minute = 30
 
-    ICRIS_BASE = "https://www.icris.cr.gov.hk/csci/"
     HKEX_BASE = "https://www1.hkexnews.hk"
-    HKEX_TITLE_SEARCH = (
-        "https://www1.hkexnews.hk/search/titlesearch.xhtml"
-        "?lang=EN&category=0&market=SEHK&stockId={hkex}"
-        "&from={dfrom}&to={dto}"
-    )
+    ICRIS_BASE = "https://www.icris.cr.gov.hk/csci/"
 
     def __init__(self, opencorporates_api_key: str | None = None) -> None:
-        # OpenCorporates is optional; when its key is absent we degrade
-        # gracefully rather than fabricating registry data.
-        self.oc_key = opencorporates_api_key or os.getenv(
-            "OPENCORPORATES_API_KEY"
-        )
+        self.oc_key = opencorporates_api_key or os.getenv("OPENCORPORATES_API_KEY")
         self._oc = OpenCorporatesClient(api_key=self.oc_key) if self.oc_key else None
 
+    def _titlesearch_url(self, code: str) -> str:
+        return (
+            f"{self.HKEX_BASE}/search/titlesearch.xhtml"
+            f"?lang=EN&category=0&market=SEHK&searchType=1&t2Gp=-2&t2Code=-2"
+            f"&stockId=&stockCode={code}"
+        )
+
+    async def _prefix_search(self, query: str) -> list[dict[str, Any]]:
+        """Query HKEXnews autocomplete; returns [{stockId, code, name}, ...]."""
+        async with build_http_client(base_url=self.HKEX_BASE, timeout=20.0) as client:
+            resp = await get_with_retry(
+                client,
+                "/search/prefix.do",
+                params={
+                    "callback": "c",
+                    "lang": "EN",
+                    "type": "A",
+                    "name": query,
+                    "market": "SEHK",
+                },
+                headers={"Referer": f"{self.HKEX_BASE}/search/titlesearch.xhtml"},
+            )
+            resp.raise_for_status()
+            body = resp.text.strip()
+            m = re.search(r"\((.*)\)\s*;?\s*$", body, re.DOTALL)
+            if not m:
+                return []
+            payload = json.loads(m.group(1))
+        rows = payload.get("stockInfo") or []
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            code = str(r.get("code") or "").strip()
+            if not _STOCK_RE.match(code.lstrip("0") or "0"):
+                continue
+            out.append(
+                {
+                    "stockId": r.get("stockId"),
+                    "code": code.zfill(5),
+                    "name": (r.get("name") or "").strip(),
+                }
+            )
+        return out
+
+    async def _resolve_stock(self, code: str) -> dict[str, Any] | None:
+        """Resolve a 5-digit stock code to its {stockId, code, name} row."""
+        for row in await self._prefix_search(code):
+            if row["code"] == code:
+                return row
+        return None
+
+    async def _annual_reports(
+        self, stock_id: Any, code: str, years: int
+    ) -> list[FinancialFiling]:
+        current_year = datetime.utcnow().year
+        from_date = f"{current_year - max(years, 1) - 1}0101"
+        to_date = datetime.utcnow().strftime("%Y%m%d")
+        async with build_http_client(base_url=self.HKEX_BASE, timeout=30.0) as client:
+            resp = await get_with_retry(
+                client,
+                "/search/titleSearchServlet.do",
+                params={
+                    "sortDir": "0",
+                    "sortByOptions": "DateTime",
+                    "category": "0",
+                    "market": "SEHK",
+                    "stockId": stock_id,
+                    "documentType": "-1",
+                    "fromDate": from_date,
+                    "toDate": to_date,
+                    "title": "Annual Report",
+                    "searchType": "1",
+                    "t": str(int(time.time() * 1000)),
+                    "lang": "EN",
+                },
+                headers={"Referer": f"{self.HKEX_BASE}/search/titlesearch.xhtml"},
+            )
+            resp.raise_for_status()
+            rows = json.loads(resp.json().get("result") or "[]")
+
+        seen_years: set[int] = set()
+        filings: list[FinancialFiling] = []
+        for row in rows:
+            title = (row.get("TITLE") or "").strip()
+            link = (row.get("FILE_LINK") or "").strip()
+            if "annual report" not in title.lower() or not link:
+                continue
+            year = _report_year(title, row.get("DATE_TIME"))
+            if year is None or year in seen_years:
+                continue
+            seen_years.add(year)
+            filings.append(
+                FinancialFiling(
+                    company_id=code,
+                    year=year,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=None,
+                    currency=None,
+                    document_url=f"{self.HKEX_BASE}{link}",
+                    document_format="pdf",
+                    source_url=self._titlesearch_url(code),
+                )
+            )
+        filings.sort(key=lambda f: f.year, reverse=True)
+        return filings[:years]
+
     async def health_check(self) -> AdapterHealth:
-        notes: str | None
-        capabilities = {
-            "search": bool(self._oc),
-            "lookup": bool(self._oc),
-            "financials": True,
-        }
         try:
-            async with build_http_client(base_url=self.ICRIS_BASE, timeout=15.0) as client:
-                resp = await get_with_retry(client, "/")
-                resp.raise_for_status()
+            rows = await self._prefix_search("00700")
+            reachable = any(r["code"] == "00700" for r in rows)
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -145,24 +242,19 @@ class HKAdapter(CountryAdapter):
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
-        if not self._oc:
-            status = AdapterStatus.DEGRADED
-            notes = (
-                "ICRIS reachable. Set OPENCORPORATES_API_KEY to enable HK "
-                "registry search/lookup (free tier, 500 req/month). "
-                "Financials best-effort: HKEX index URL per listed issuer."
-            )
-        else:
-            status = AdapterStatus.OK
-            notes = (
-                "Registry via OpenCorporates HK mirror. Financials "
-                "best-effort: HKEX Title Search URL per listed issuer."
-            )
+        status = AdapterStatus.OK if reachable else AdapterStatus.DEGRADED
+        notes = (
+            "HKEXnews reachable — search/lookup/financials for HK listed "
+            "issuers (SEHK) key-free. "
+            + ("OpenCorporates key present: CR-number lookups enabled."
+               if self._oc else
+               "Set OPENCORPORATES_API_KEY to also resolve ICRIS CR numbers.")
+        )
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
             status=status,
-            capabilities=capabilities,
+            capabilities={"search": True, "lookup": True, "financials": True},
             requires_api_key=False,
             api_key_present=bool(self._oc),
             rate_limit_per_minute=self.rate_limit_per_minute,
@@ -170,41 +262,24 @@ class HKAdapter(CountryAdapter):
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        if not self._oc:
-            raise AdapterNotImplementedError(
-                "HK ICRIS Cyber Search Centre is a CSRF/SPA front-end that "
-                "blocks programmatic clients, and the free CR open-data "
-                "feed only ships full extracts behind a HK$8 paywall. Set "
-                "OPENCORPORATES_API_KEY to enable HK name search via the "
-                "free OpenCorporates HK mirror."
-            )
-        rows = await self._oc.search_companies(
-            name, jurisdiction="hk", per_page=limit
-        )
+        rows = await self._prefix_search(name)
         matches: list[CompanyMatch] = []
         for row in rows[:limit]:
-            cn = row.get("company_number")
-            if not cn:
-                continue
-            try:
-                cr = _normalize_cr_number(str(cn))
-            except InvalidIdentifierError:
-                continue
+            code = row["code"]
             matches.append(
                 CompanyMatch(
-                    id=cr,
-                    name=(row.get("name") or "").strip(),
+                    id=code,
+                    name=row["name"],
                     country=self.country_code,
                     identifiers=[
                         RegistryIdentifier(
                             type=IdentifierType.COMPANY_NUMBER,
-                            value=cr,
-                            label="CR Number",
+                            value=code,
+                            label="HKEX Stock Code",
                         )
                     ],
-                    address=_address_from_oc(row),
-                    status=_status_from_oc(row),
-                    source_url=row.get("opencorporates_url"),
+                    status="listed",
+                    source_url=self._titlesearch_url(code),
                 )
             )
         return matches
@@ -212,86 +287,97 @@ class HKAdapter(CountryAdapter):
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
-        if id_type == IdentifierType.COMPANY_NUMBER:
-            cr = _normalize_cr_number(value)
-        elif id_type == IdentifierType.OTHER:
-            # BR cannot be looked up on the free mirror (it isn't the
-            # OpenCorporates primary key for HK); we don't fabricate a
-            # CR <-> BR mapping.
+        if id_type == IdentifierType.OTHER:
             _normalize_br_number(value)
             raise AdapterNotImplementedError(
-                "HK BR (Business Registration) lookup needs the paid IRD "
-                "BR Number Enquiry. Pass the 7-digit CR number instead."
+                "HK BR (Business Registration) lookup needs the paid IRD BR "
+                "Number Enquiry. Pass the HKEX stock code (or a CR number "
+                "with OPENCORPORATES_API_KEY set) instead."
             )
-        else:
+        if id_type != IdentifierType.COMPANY_NUMBER:
             raise InvalidIdentifierError(
-                f"HK supports COMPANY_NUMBER (CR) and OTHER (BR), got {id_type}"
+                f"HK supports COMPANY_NUMBER and OTHER, got {id_type}"
             )
 
-        if not self._oc:
-            raise AdapterNotImplementedError(
-                "HK CR lookup requires OPENCORPORATES_API_KEY (free tier) "
-                "because ICRIS itself blocks programmatic clients."
-            )
-        company = await self._oc.get_company("hk", cr)
-        if company is None:
+        code = _try_stock_code(value)
+        if code is not None:
+            row = await self._resolve_stock(code)
+            if row is not None:
+                return _details_from_hkex(row, self._titlesearch_url(code))
+
+        if self._oc is not None:
+            cr = _normalize_cr_number(value)
+            company = await self._oc.get_company("hk", cr)
+            if company is None:
+                return None
+            return _details_from_oc(company, cr)
+
+        if code is not None:
             return None
-        return _details_from_oc(company, cr)
+        raise AdapterNotImplementedError(
+            "HK CR-number lookup requires OPENCORPORATES_API_KEY (ICRIS blocks "
+            "programmatic clients). Pass an HKEX stock code for key-free lookup."
+        )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        cr, hkex = _split_packed_id(company_id)
-        if cr is None and hkex is None:
-            try:
-                cr = _normalize_cr_number(company_id)
-            except InvalidIdentifierError:
-                cr = None
-        if hkex is None and self._oc and cr is not None:
-            hkex = await self._resolve_hkex_code(cr)
-        if hkex is None:
-            # Unlisted HK companies have no free financial source. Per
-            # spec we return [] rather than inventing filings.
+        cr, packed_code = _split_packed_id(company_id)
+        code = packed_code or _try_stock_code(company_id)
+        if code is None and cr is not None and self._oc is not None:
+            code = await self._resolve_hkex_code(cr)
+        if code is None:
             return []
 
-        filings: list[FinancialFiling] = []
-        current_year = datetime.utcnow().year
-        for year in range(current_year - years, current_year + 1):
-            url = self.HKEX_TITLE_SEARCH.format(
-                hkex=hkex,
-                dfrom=f"{year}0101",
-                dto=f"{year}1231",
-            )
-            filings.append(
-                FinancialFiling(
-                    company_id=cr or f"HKEX:{hkex}",
-                    year=year,
-                    type=FilingType.ANNUAL_REPORT,
-                    period_end=date(year, 12, 31),
-                    currency="HKD",
-                    document_url=url,
-                    document_format="html",
-                    source_url=self.HKEX_BASE,
-                )
-            )
-        return filings
+        row = await self._resolve_stock(code)
+        if row is None:
+            return []
+        return await self._annual_reports(row["stockId"], code, years)
 
     async def _resolve_hkex_code(self, cr: str) -> str | None:
-        if not self._oc:
+        if self._oc is None:
             return None
         company = await self._oc.get_company("hk", cr)
         if not company:
             return None
-        # OpenCorporates HK rows occasionally carry the listing ticker in
-        # the identifiers array (free tier). Treat anything else as
-        # "unknown" — never guess.
         for ident in company.get("identifiers", []) or []:
             scheme = (ident.get("identifier_system_code") or "").lower()
             if "hkex" in scheme or "stock_exchange_of_hong_kong" in scheme:
                 raw = str(ident.get("uid") or "").strip()
-                if _HKEX_RE.match(raw):
-                    return raw.zfill(4)
+                if _STOCK_RE.match(raw):
+                    return raw.zfill(5)
         return None
+
+
+def _report_year(title: str, date_time: str | None) -> int | None:
+    m = _YEAR_RE.search(title)
+    if m:
+        return int(m.group(0))
+    if date_time:
+        dm = re.search(r"/(\d{4})\b", date_time)
+        if dm:
+            return int(dm.group(1)) - 1
+    return None
+
+
+def _details_from_hkex(row: dict[str, Any], source_url: str) -> CompanyDetails:
+    code = row["code"]
+    return CompanyDetails(
+        id=code,
+        name=row["name"],
+        country="HK",
+        status="listed",
+        capital_currency="HKD",
+        identifiers=[
+            RegistryIdentifier(
+                type=IdentifierType.COMPANY_NUMBER,
+                value=code,
+                label="HKEX Stock Code",
+            )
+        ],
+        raw=row,
+        source_url=source_url,
+    )
 
 
 def _address_from_oc(row: dict[str, Any]) -> str | None:
@@ -372,7 +458,6 @@ def _details_from_oc(company: dict[str, Any], cr: str) -> CompanyDetails:
         identifiers=identifiers,
         raw=company,
         source_url=(
-            company.get("opencorporates_url")
-            or f"https://www.icris.cr.gov.hk/csci/"
+            company.get("opencorporates_url") or "https://www.icris.cr.gov.hk/csci/"
         ),
     )

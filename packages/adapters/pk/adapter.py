@@ -193,34 +193,38 @@ class PKAdapter(CountryAdapter):
         async with self._client() as client:
             symbols = await self._fetch_symbols(client)
 
-        matches: list[CompanyMatch] = []
+        scored: list[tuple[int, CompanyMatch]] = []
         for entry in symbols:
             symbol = entry.get("symbol", "")
             company_name = entry.get("name", "")
             if not symbol or not company_name:
                 continue
             if needle in company_name.lower() or needle == symbol.lower():
-                sector = entry.get("sectorName") or None
-                matches.append(
-                    CompanyMatch(
-                        id=symbol,
-                        name=company_name,
-                        country=self.country_code,
-                        identifiers=[
-                            RegistryIdentifier(
-                                type=IdentifierType.OTHER,
-                                value=symbol,
-                                label="PSX Symbol",
-                            )
-                        ],
-                        status="listed",
-                        source_url=f"{self.PSX_BASE}/company/{symbol}",
+                is_instrument = bool(entry.get("isDebt") or entry.get("isETF"))
+                exact_symbol = needle == symbol.lower()
+                rank = (0 if exact_symbol else 1, 1 if is_instrument else 0)
+                scored.append(
+                    (
+                        rank,
+                        CompanyMatch(
+                            id=symbol,
+                            name=company_name,
+                            country=self.country_code,
+                            identifiers=[
+                                RegistryIdentifier(
+                                    type=IdentifierType.OTHER,
+                                    value=symbol,
+                                    label="PSX Symbol",
+                                )
+                            ],
+                            status="listed",
+                            source_url=f"{self.PSX_BASE}/company/{symbol}",
+                        ),
                     )
                 )
-                if len(matches) >= limit:
-                    break
-        if matches:
-            return matches
+        if scored:
+            scored.sort(key=lambda pair: pair[0])
+            return [match for _, match in scored[:limit]]
         raise AdapterNotImplementedError(
             "No PSX-listed company matched. SECP eServices name search for "
             "unlisted companies is CAPTCHA + ViewState gated and unavailable "

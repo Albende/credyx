@@ -1,33 +1,35 @@
-"""Albania adapter — QKB / QKR (National Business Center).
+"""Albania adapter — OpenCorporates.al (Albanian Institute of Science).
 
 Source coverage:
 
-* https://www.qkb.gov.al/ — Qendra Kombëtare e Biznesit (National
-  Business Center), the unified Albanian commercial registry operated
-  by the Ministry of Economy. It publishes a free public search portal
-  keyed by NIPT (Numri i Identifikimit te Personit te Tatueshëm) or by
-  company name. The same record also serves as the VAT registration
-  number. No authentication.
-* https://www.tatime.gov.al/ — General Directorate of Taxes (DPT). It
-  hosts a per-NIPT validator used here as a liveness probe and a soft
-  fallback when QKB markup changes.
-* https://www.bse.com.al/ — Bursa e Tiranës (Tirana Stock Exchange).
-  Very small (single-digit listed issuers) and serves filings as
-  PDFs only — out of scope for the free MVP.
+* https://opencorporates.al/ — the free, no-auth open-data mirror of the
+  Albanian commercial registry (QKB / QKR) published by the Albanian
+  Institute of Science (AIS), the same civil-society group behind Open
+  Data Albania and Open Procurement Albania. It exposes a per-company
+  detail page keyed by NIPT and a name/NIPT search form. Crucially, each
+  detail page also re-publishes the company's filed annual accounts:
+  ``Annual Turnover`` and ``Profit before Tax`` per year, plus links to
+  the actual filed financial-statement documents (``Pasqyra
+  Financiare``) hosted on the same host. No authentication, no API key.
+
+  This replaces the earlier qkb.gov.al HTML scrape, which exposed no
+  financials in machine-readable form.
 
 Identifier:
 - VAT → NIPT. 10 characters in the canonical ``L\\d{8}L`` form
-  (letter + 8 digits + letter, e.g. ``J91904005U``). The taxpayer ID
+  (letter + 8 digits + letter, e.g. ``J61814094W``). The taxpayer ID
   doubles as VAT identifier; under the EU prefix convention this is
   rendered ``AL`` + NIPT.
-- COMPANY_NUMBER → also the NIPT. Albania uses a single registry
-  number across QKB and DPT, so we accept the same value under either
-  identifier label.
+- COMPANY_NUMBER → also the NIPT. Albania uses a single registry number
+  across QKB and DPT, so we accept the same value under either label.
 
-No centralized free source of filed financial statements exists for
-Albanian companies; ``fetch_financials`` therefore returns an empty
-list rather than fabricating data. (Bursa e Tiranës PDFs are out of
-scope for the free MVP.)
+Financials:
+- ``fetch_financials`` returns one ``FinancialFiling`` per reported year
+  carrying the company's real published annual turnover and profit-
+  before-tax figures (``structured_data``) and, where present, a
+  ``document_url`` pointing at the actual filed statement document on
+  opencorporates.al. Never fabricated: a year is only emitted when the
+  source page carries a real figure or a real document link for it.
 """
 from __future__ import annotations
 
@@ -35,7 +37,6 @@ import logging
 import re
 from datetime import date, datetime
 from html import unescape
-from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -48,6 +49,7 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -58,81 +60,8 @@ logger = logging.getLogger(__name__)
 # Canonical NIPT shape: leading letter + 8 digits + trailing letter.
 _NIPT_RE = re.compile(r"^[A-Z]\d{8}[A-Z]$")
 
-# Telekom Albania / ONE Telecommunications — used as a liveness probe.
-_HEALTH_PROBE_NIPT = "J91904005U"
-
-# QKB renders the company card as a two-column label/value table. Labels
-# appear in Albanian and (depending on language toggle) English. Match
-# loosely on either.
-_LABEL_NAME = (
-    "emri i subjektit",
-    "emertimi",
-    "emërtimi",
-    "emri",
-    "subject name",
-    "name",
-    "company name",
-)
-_LABEL_STATUS = (
-    "statusi",
-    "gjendja",
-    "status",
-    "state",
-)
-_LABEL_ADDRESS = (
-    "adresa",
-    "selia",
-    "address",
-    "registered address",
-    "seat",
-)
-_LABEL_REG_DATE = (
-    "data e regjistrimit",
-    "data e themelimit",
-    "data e krijimit",
-    "registration date",
-    "date of registration",
-    "incorporation date",
-)
-_LABEL_LEGAL_FORM = (
-    "forma ligjore",
-    "lloji i subjektit",
-    "legal form",
-    "type",
-    "entity type",
-)
-_LABEL_NIPT = (
-    "nipt",
-    "nuis",
-    "numri unik i identifikimit",
-    "tax id",
-    "vat",
-)
-_LABEL_DIRECTOR = (
-    "administrator",
-    "administratori",
-    "drejtues",
-    "drejtuesi",
-    "perfaqesues",
-    "përfaqësues",
-    "director",
-    "manager",
-)
-_LABEL_CAPITAL = (
-    "kapitali",
-    "kapitali themeltar",
-    "share capital",
-    "charter capital",
-)
-_LABEL_OBJECT = (
-    "objekti i veprimtarise",
-    "objekti i veprimtarisë",
-    "fusha e veprimtarise",
-    "fusha e veprimtarisë",
-    "activity",
-    "business activity",
-    "scope",
-)
+# ONE ALBANIA (ex Telekom Albania) — used as a liveness probe.
+_HEALTH_PROBE_NIPT = "J61814094W"
 
 _STATUS_ACTIVE_TOKENS = (
     "aktiv",
@@ -161,23 +90,31 @@ _STATUS_INACTIVE_TOKENS = (
     "closed",
 )
 
+# Detail-page <th> labels (English UI). Values live in the sibling <td>.
+_TH_TAX_ID = "tax registration number"
+_TH_STATUS = "status"
+_TH_LEGAL_FORM = "legal form"
+_TH_FOUNDATION = "foundation year"
+_TH_CAPITAL = "initial capital"
+_TH_ADMIN = "administrators"
+_TH_SCOPE = "scope"
+_TH_ADDRESS = "address"
+_TH_DISTRICT = "district"
+
 
 def _normalize_nipt(value: str) -> str:
     cleaned = re.sub(r"[\s\-]", "", value.strip()).upper()
-    # Albania VAT under the EU convention is written "AL" + NIPT. Strip
-    # the prefix only when followed by a valid NIPT body; otherwise we'd
-    # be silently truncating real input.
     if cleaned.startswith("AL") and _NIPT_RE.match(cleaned[2:]):
         cleaned = cleaned[2:]
     if not _NIPT_RE.match(cleaned):
         raise InvalidIdentifierError(
-            f"Albania NIPT must be letter+8 digits+letter (e.g. J91904005U), got: {value}"
+            f"Albania NIPT must be letter+8 digits+letter (e.g. J61814094W), got: {value}"
         )
     return cleaned
 
 
 def _parse_al_date(value: str | None) -> date | None:
-    """QKB renders dates as DD/MM/YYYY or DD.MM.YYYY; tolerate ISO."""
+    """opencorporates.al renders dates as DD/MM/YYYY; tolerate ISO/dots."""
     if not value:
         return None
     s = value.strip()
@@ -204,31 +141,25 @@ def _classify_status(raw: str | None) -> str | None:
     return raw.strip() or None
 
 
-def _parse_capital_amount(raw: str | None) -> float | None:
+def _parse_amount(raw: str | None) -> float | None:
+    """Albanian figures use space (or dot) thousands and ',' decimals.
+
+    Examples: ``863 826 822,00`` → 863826822.0; ``-539 854 000,00`` →
+    -539854000.0. A leading '-' is preserved as sign.
+    """
     if not raw:
         return None
-    cleaned = re.sub(r"[^\d.,]", "", raw)
+    s = raw.strip()
+    negative = s.startswith("-")
+    cleaned = re.sub(r"[^\d,]", "", s.replace(".", ""))
     if not cleaned:
         return None
-    # Albanian convention uses '.' as thousands and ',' as decimal.
-    if "," in cleaned and "." in cleaned:
-        cleaned = cleaned.replace(".", "").replace(",", ".")
-    elif "," in cleaned:
-        cleaned = cleaned.replace(",", ".")
-    elif cleaned.count(".") >= 1:
-        # Multiple dots, or a single dot followed by exactly 3 digits, is
-        # the Albanian thousands separator. A single dot followed by 1-2
-        # decimals (rare in capital values) is a decimal point.
-        if cleaned.count(".") > 1:
-            cleaned = cleaned.replace(".", "")
-        else:
-            tail = cleaned.rsplit(".", 1)[1]
-            if len(tail) == 3:
-                cleaned = cleaned.replace(".", "")
+    cleaned = cleaned.replace(",", ".")
     try:
-        return float(cleaned)
+        val = float(cleaned)
     except ValueError:
         return None
+    return -val if negative else val
 
 
 class ALAdapter(CountryAdapter):
@@ -240,17 +171,16 @@ class ALAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    BASE_URL = "https://www.qkb.gov.al"
-    SEARCH_PATH = "/search/"
-    LOOKUP_PATH = "/search/search-in-trade-register/"
-    TAX_PROBE_URL = "https://www.tatime.gov.al/"
+    BASE_URL = "https://opencorporates.al"
+    SEARCH_PATH = "/sq/search/"
+    DETAIL_PATH = "/en/nipt/"
 
     def _client(self) -> httpx.AsyncClient:
         return build_http_client(
             base_url=self.BASE_URL,
             headers={
                 "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "sq;q=0.9,en;q=0.8",
+                "Accept-Language": "en;q=0.9,sq;q=0.8",
             },
             timeout=25.0,
         )
@@ -258,112 +188,74 @@ class ALAdapter(CountryAdapter):
     async def health_check(self) -> AdapterHealth:
         try:
             async with self._client() as client:
-                resp = await get_with_retry(client, "/")
+                resp = await get_with_retry(client, self.DETAIL_PATH + _HEALTH_PROBE_NIPT)
                 resp.raise_for_status()
-                page_text = _decode_response(resp)
+                page_text = _decode(resp).lower()
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={
-                    "search": False,
-                    "lookup": False,
-                    "financials": False,
-                },
+                capabilities={"search": False, "lookup": False, "financials": False},
                 requires_api_key=False,
                 api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
 
-        low = page_text.lower()
-        portal_alive = "qkb" in low or "biznes" in low or "register" in low
-        if not portal_alive:
+        alive = "opencorporates" in page_text or "nipt" in page_text
+        financials_live = "annual turnover" in page_text or "profit before tax" in page_text
+        if not alive:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={
-                    "search": True,
-                    "lookup": True,
-                    "financials": False,
-                },
+                capabilities={"search": True, "lookup": True, "financials": False},
                 requires_api_key=False,
                 api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=(
-                    "qkb.gov.al responded but markup unrecognised; site may "
-                    "be under maintenance."
-                ),
+                notes="opencorporates.al responded but markup unrecognised.",
             )
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={
-                "search": True,
-                "lookup": True,
-                "financials": False,
-            },
+            capabilities={"search": True, "lookup": True, "financials": financials_live},
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
-            notes=(
-                "Lookup live via qkb.gov.al HTML scrape. Financial "
-                "statements are not centrally published in machine-readable "
-                "form."
-            ),
+            notes="Registry + filed annual accounts live via opencorporates.al (AIS).",
         )
 
-    async def search_by_name(
-        self, name: str, limit: int = 10
-    ) -> list[CompanyMatch]:
+    async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
         query = name.strip()
         if not query:
             return []
         async with self._client() as client:
             resp = await get_with_retry(
-                client,
-                self.LOOKUP_PATH,
-                params={"search": query, "q": query, "name": query},
+                client, self.SEARCH_PATH, params={"name": query}
             )
             if resp.status_code == 404:
                 return []
             resp.raise_for_status()
-            page_text = _decode_response(resp)
+            page_text = _decode(resp)
 
-        rows = _extract_search_rows(page_text)
         matches: list[CompanyMatch] = []
-        for row in rows[:limit]:
-            nipt = row.get("nipt")
-            if not nipt or not row.get("name"):
-                continue
-            ids = [
-                RegistryIdentifier(
-                    type=IdentifierType.VAT,
-                    value=nipt,
-                    label="NIPT",
-                ),
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER,
-                    value=nipt,
-                    label="NIPT",
-                ),
-            ]
+        for card in _extract_search_cards(page_text):
+            nipt = card["nipt"]
             matches.append(
                 CompanyMatch(
                     id=nipt,
-                    name=row["name"],
+                    name=card["name"],
                     country=self.country_code,
-                    identifiers=ids,
-                    address=row.get("address"),
-                    status=_classify_status(row.get("status_raw")),
-                    source_url=(
-                        f"{self.BASE_URL}{self.LOOKUP_PATH}?search={nipt}"
-                    ),
+                    identifiers=_identifiers(nipt),
+                    address=card.get("address"),
+                    status=_classify_status(card.get("status_raw")),
+                    source_url=f"{self.BASE_URL}{self.DETAIL_PATH}{nipt}",
                 )
             )
+            if len(matches) >= limit:
+                break
         return matches
 
     async def lookup_by_identifier(
@@ -376,47 +268,14 @@ class ALAdapter(CountryAdapter):
             )
         nipt = _normalize_nipt(value)
 
-        async with self._client() as client:
-            resp = await get_with_retry(
-                client,
-                self.LOOKUP_PATH,
-                params={"search": nipt, "q": nipt, "nipt": nipt},
-            )
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
-
+        page_text = await self._fetch_detail(nipt)
+        if page_text is None:
+            return None
         record = _extract_company_record(page_text)
         if not record.get("name"):
-            low = page_text.lower()
-            if any(
-                token in low
-                for token in (
-                    "nuk u gjet",
-                    "asnje rezultat",
-                    "asnjë rezultat",
-                    "no results",
-                    "not found",
-                )
-            ):
-                return None
             return None
 
-        identifiers = [
-            RegistryIdentifier(
-                type=IdentifierType.VAT,
-                value=nipt,
-                label="NIPT",
-            ),
-            RegistryIdentifier(
-                type=IdentifierType.COMPANY_NUMBER,
-                value=nipt,
-                label="NIPT",
-            ),
-        ]
         director_name = (record.get("director") or "").strip()
-
         return CompanyDetails(
             id=nipt,
             name=record["name"],
@@ -425,281 +284,215 @@ class ALAdapter(CountryAdapter):
             status=_classify_status(record.get("status_raw")),
             incorporation_date=_parse_al_date(record.get("registration_date")),
             registered_address=record.get("address"),
-            capital_amount=_parse_capital_amount(record.get("capital")),
+            capital_amount=_parse_amount(record.get("capital")),
             capital_currency="ALL",
-            identifiers=identifiers,
+            identifiers=_identifiers(nipt),
             raw={
-                "source": "qkb.gov.al",
+                "source": "opencorporates.al",
                 "fields": record,
                 "director_name": director_name or None,
                 "business_object": record.get("business_object"),
+                "district": record.get("district"),
             },
-            source_url=f"{self.BASE_URL}{self.LOOKUP_PATH}?search={nipt}",
+            source_url=f"{self.BASE_URL}{self.DETAIL_PATH}{nipt}",
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # QKB exposes filed balance sheets only as scanned PDFs behind a
-        # session-bound page and only on a per-document fee basis through
-        # the historical archive. Bursa e Tiranës issuer reports are
-        # PDF-only and out of scope for the free MVP. Returning an empty
-        # list here honors the "no mock data" rule while keeping the API
-        # contract intact (callers should not see a 501 for a known gap).
-        return []
+        nipt = _normalize_nipt(company_id)
+        page_text = await self._fetch_detail(nipt)
+        if page_text is None:
+            return []
+
+        turnover = _extract_year_series(page_text, r"Annual Turnover \(ALL")
+        profit = _extract_year_series(page_text, r"Profit before Tax \(ALL")
+        documents = _extract_document_links(page_text)
+
+        reported_years = set(turnover) | set(profit) | set(documents)
+        source_url = f"{self.BASE_URL}{self.DETAIL_PATH}{nipt}"
+
+        filings: list[FinancialFiling] = []
+        for year in sorted(reported_years, reverse=True):
+            structured: dict[str, Any] = {}
+            if year in turnover:
+                structured["annual_turnover"] = turnover[year]
+            if year in profit:
+                structured["profit_before_tax"] = profit[year]
+            doc_path = documents.get(year)
+            document_url = f"{self.BASE_URL}{doc_path}" if doc_path else None
+            document_format = _doc_format(doc_path) if doc_path else None
+            filings.append(
+                FinancialFiling(
+                    company_id=nipt,
+                    year=year,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=date(year, 12, 31),
+                    currency="ALL",
+                    structured_data=structured or None,
+                    document_url=document_url,
+                    document_format=document_format,
+                    source_url=source_url,
+                )
+            )
+        return filings[:years]
+
+    async def _fetch_detail(self, nipt: str) -> str | None:
+        async with self._client() as client:
+            resp = await get_with_retry(client, self.DETAIL_PATH + nipt)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return _decode(resp)
 
 
-def _decode_response(resp: httpx.Response) -> str:
-    """Decode the body, preferring UTF-8 (qkb.gov.al uses UTF-8 throughout).
+def _identifiers(nipt: str) -> list[RegistryIdentifier]:
+    return [
+        RegistryIdentifier(type=IdentifierType.VAT, value=nipt, label="NIPT"),
+        RegistryIdentifier(type=IdentifierType.COMPANY_NUMBER, value=nipt, label="NIPT"),
+    ]
 
-    Falls back to Latin-1 derivatives only as a defensive measure for
-    Albanian diacritics (ë, ç) when an upstream proxy strips encoding
-    headers.
-    """
+
+def _decode(resp: httpx.Response) -> str:
+    """opencorporates.al is predominantly UTF-8 with occasional stray
+    Latin-1 accents in free-text fields; decode UTF-8 and replace the rare
+    invalid byte rather than mangling every ``ë``/``ç`` via a Latin-1 pass."""
     body = resp.content
     if not body:
         return ""
-    for encoding in ("utf-8", "cp1252", "iso-8859-1"):
-        try:
-            return body.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return resp.text
+    return body.decode("utf-8", errors="replace")
 
 
-class _TableParser(HTMLParser):
-    """Flatten every <td>/<th> cell into a list of stripped text strings."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.cells: list[str] = []
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag in ("td", "th"):
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self.cells.append(text)
-            self._in_cell -= 1
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
+def _clean(fragment: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", fragment)
+    return unescape(re.sub(r"\s+", " ", text)).strip()
 
 
-class _SearchRowParser(HTMLParser):
-    """Capture every <tr>'s flattened cell list, for search-results tables."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.rows: list[list[str]] = []
-        self._row: list[str] = []
-        self._in_row = False
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag == "tr":
-            self._in_row = True
-            self._row = []
-        elif tag in ("td", "th") and self._in_row:
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self._row.append(text)
-            self._in_cell -= 1
-            self._buf = []
-        elif tag == "tr" and self._in_row:
-            if self._row:
-                self.rows.append(self._row)
-            self._in_row = False
-            self._row = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-def _match_label(cell: str, candidates: tuple[str, ...]) -> bool:
-    low = cell.lower().strip().rstrip(":").strip()
-    return any(label in low for label in candidates)
+_TH_TD_RE = re.compile(r"<th[^>]*>(.*?)</th>\s*<td[^>]*>(.*?)</td>", re.S | re.I)
 
 
 def _extract_company_record(html: str) -> dict[str, Any]:
-    """Pull the company fields out of a qkb.gov.al detail page."""
     if not html:
         return {}
-
-    parser = _TableParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("AL QKB HTML parse failed: %s", exc)
-        return {}
-
-    cells = [c for c in parser.cells if c]
     record: dict[str, Any] = {}
-    for label_cell, value_cell in zip(cells, cells[1:]):
-        if not value_cell:
+
+    m = re.search(
+        r'<h2 class="title-divider">\s*<span>(.*?)</span>', html, re.S | re.I
+    )
+    if m:
+        record["name"] = _clean(m.group(1))
+
+    for label_html, value_html in _TH_TD_RE.findall(html):
+        label = _clean(label_html).lower().rstrip(":")
+        value = _clean(value_html)
+        if not value:
             continue
-        if "name" not in record and _match_label(label_cell, _LABEL_NAME):
-            record["name"] = value_cell
-        elif "status_raw" not in record and _match_label(
-            label_cell, _LABEL_STATUS
-        ):
-            record["status_raw"] = value_cell
-        elif "address" not in record and _match_label(
-            label_cell, _LABEL_ADDRESS
-        ):
-            record["address"] = value_cell
-        elif "registration_date" not in record and _match_label(
-            label_cell, _LABEL_REG_DATE
-        ):
-            record["registration_date"] = value_cell
-        elif "legal_form" not in record and _match_label(
-            label_cell, _LABEL_LEGAL_FORM
-        ):
-            record["legal_form"] = value_cell
-        elif "nipt" not in record and _match_label(label_cell, _LABEL_NIPT):
-            up = value_cell.upper().replace(" ", "")
+        if label == _TH_TAX_ID:
+            up = value.upper().replace(" ", "")
             if _NIPT_RE.match(up):
                 record["nipt"] = up
-        elif "director" not in record and _match_label(
-            label_cell, _LABEL_DIRECTOR
-        ):
-            record["director"] = value_cell
-        elif "capital" not in record and _match_label(
-            label_cell, _LABEL_CAPITAL
-        ):
-            record["capital"] = value_cell
-        elif "business_object" not in record and _match_label(
-            label_cell, _LABEL_OBJECT
-        ):
-            record["business_object"] = value_cell
-
-    if "name" not in record:
-        # QKB sometimes renders the company name above the table inside
-        # a heading element when only one match is returned.
-        m = re.search(
-            r"<h[12][^>]*>\s*([^<]{3,200})\s*</h[12]>",
-            html,
-            re.IGNORECASE,
-        )
-        if m:
-            candidate = unescape(re.sub(r"\s+", " ", m.group(1)).strip())
-            low = candidate.lower()
-            if "qkb" not in low and "kerko" not in low and "kërko" not in low:
-                record["name"] = candidate
+        elif label == _TH_STATUS:
+            record.setdefault("status_raw", value)
+        elif label == _TH_LEGAL_FORM:
+            record.setdefault("legal_form", value)
+        elif label == _TH_FOUNDATION:
+            record.setdefault("registration_date", value)
+        elif label == _TH_CAPITAL:
+            record.setdefault("capital", value)
+        elif label == _TH_ADMIN:
+            record.setdefault("director", value)
+        elif label == _TH_SCOPE:
+            record.setdefault("business_object", value)
+        elif label == _TH_DISTRICT:
+            record.setdefault("district", value)
+        elif label == _TH_ADDRESS:
+            record.setdefault("address", value)
     return record
 
 
-def _extract_search_rows(html: str) -> list[dict[str, Any]]:
-    """Best-effort parse of the QKB name-search results page.
+_CARD_RE = re.compile(
+    r'<h4 class="mb-0">(?P<name>.*?)</h4>(?P<body>.*?)'
+    r'(?=<h4 class="mb-0">|<div id="footer"|\Z)',
+    re.S | re.I,
+)
+_NIPT_LINK_RE = re.compile(r"/(?:en|sq)/nipt/([A-Za-z0-9]+)", re.I)
+_MARKER_RE = re.compile(r'fa-map-marker"></i>\s*(.*?)</span>', re.S | re.I)
 
-    Result rows expose the company name and NIPT side-by-side; the NIPT
-    is uniquely shaped (letter + 8 digits + letter), so we use that as
-    the anchor.
-    """
+
+def _extract_search_cards(html: str) -> list[dict[str, Any]]:
     if not html:
         return []
-    parser = _SearchRowParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("AL QKB search parse failed: %s", exc)
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for cells in parser.rows:
-        cleaned = [c for c in cells if c]
-        if len(cleaned) < 2:
+    cards: list[dict[str, Any]] = []
+    for m in _CARD_RE.finditer(html):
+        body = m.group("body")
+        link = _NIPT_LINK_RE.search(body)
+        if not link:
             continue
-        nipt_match: str | None = None
-        for c in cleaned:
-            up = c.upper().replace(" ", "")
-            if _NIPT_RE.match(up):
-                nipt_match = up
+        name = _clean(m.group("name"))
+        if not name:
+            continue
+        addr_m = _MARKER_RE.search(body)
+        address = _clean(addr_m.group(1)) if addr_m else None
+        status_raw: str | None = None
+        for token in _STATUS_INACTIVE_TOKENS + _STATUS_ACTIVE_TOKENS:
+            if token in body.lower():
+                status_raw = token
                 break
-        if not nipt_match:
-            continue
-        name_candidate: str | None = None
-        for c in cleaned:
-            if c.upper().replace(" ", "") == nipt_match:
-                continue
-            if re.fullmatch(r"[\d\s./\-]+", c):
-                continue
-            if len(c) < 3:
-                continue
-            if name_candidate is None or len(c) > len(name_candidate):
-                name_candidate = c
-        if not name_candidate:
-            continue
-        if name_candidate.lower() in {
-            "name",
-            "emri",
-            "emertimi",
-            "emërtimi",
-        }:
-            continue
-        rows.append(
+        cards.append(
             {
-                "name": name_candidate,
-                "nipt": nipt_match,
-                "address": _pick_address(cleaned),
-                "status_raw": _pick_status(cleaned),
+                "name": name,
+                "nipt": link.group(1).upper(),
+                "address": address or None,
+                "status_raw": status_raw,
             }
         )
-    return rows
+    return cards
 
 
-def _pick_address(cells: list[str]) -> str | None:
-    for c in cells:
-        low = c.lower()
-        if any(
-            token in low
-            for token in (
-                "tirane",
-                "tiranë",
-                "tirana",
-                "durres",
-                "durrës",
-                "vlore",
-                "vlorë",
-                "shkoder",
-                "shkodër",
-                "rruga",
-                "rr.",
-                "street",
-            )
-        ):
-            return c
-    return None
+def _extract_year_series(html: str, label_prefix: str) -> dict[int, float]:
+    """Pull ``<label> YYYY: <amount>`` pairs from a detail page section."""
+    pattern = re.compile(
+        label_prefix + r"[^)]*\)\s*(\d{4})\s*:\s*(-?[\d  .,]+)",
+        re.I,
+    )
+    series: dict[int, float] = {}
+    for year_str, raw in pattern.findall(html):
+        amount = _parse_amount(raw)
+        if amount is None:
+            continue
+        year = int(year_str)
+        if 1990 <= year <= datetime.utcnow().year and year not in series:
+            series[year] = amount
+    return series
 
 
-def _pick_status(cells: list[str]) -> str | None:
-    for c in cells:
-        low = c.lower()
-        if any(token in low for token in _STATUS_ACTIVE_TOKENS):
-            return c
-        if any(token in low for token in _STATUS_INACTIVE_TOKENS):
-            return c
+_DOC_RE = re.compile(
+    r'href="(/documents/bilanci/[^"]+)"[^>]*>\s*([^<]*?(\d{4}))', re.I
+)
+
+
+def _extract_document_links(html: str) -> dict[int, str]:
+    """Map a reporting year to the first filed-statement document for it."""
+    docs: dict[int, str] = {}
+    for href, _text, year_str in _DOC_RE.findall(html):
+        # A stray Latin-1 byte in the filename decodes to U+FFFD; that URL
+        # 404s, so never surface it as a downloadable document.
+        if "�" in href:
+            continue
+        year = int(year_str)
+        if 1990 <= year <= datetime.utcnow().year and year not in docs:
+            docs[year] = href
+    return docs
+
+
+def _doc_format(path: str) -> str | None:
+    low = path.lower()
+    if ".pdf" in low:
+        return "pdf"
+    if ".xlsx" in low:
+        return "xlsx"
+    if ".xls" in low:
+        return "xls"
+    if ".doc" in low:
+        return "doc"
     return None

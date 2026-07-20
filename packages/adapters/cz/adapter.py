@@ -7,6 +7,12 @@ Financial filings come from the Sbírka listin (collection of documents) of the
 public register at or.justice.cz. Each company's filed financial statements
 (účetní závěrka) and annual reports (výroční zpráva) are public downloads
 (PDF or iXBRL/ESEF xhtml). No auth, no bot wall.
+
+The final `/ias/content/download?id=…` link carries a token bound to the
+backend node/session that minted it; behind or.justice.cz's round-robin it
+only resolves for a caller sharing that session, so it is never handed out as
+`document_url`. `source_url` is the stable, per-company detail page from which
+any caller re-resolves a fresh download link within its own session.
 """
 from __future__ import annotations
 
@@ -192,7 +198,6 @@ class CZAdapter(CountryAdapter):
                 link = _DOWNLOAD_RE.search(detail.text)
                 if not link:
                     continue
-                document_url = _JUSTICE_ORIGIN + link.group(1)
                 filename = link.group(2).strip()
                 filings.append(
                     FinancialFiling(
@@ -201,7 +206,6 @@ class CZAdapter(CountryAdapter):
                         type=cand["type"],
                         period_end=_period_end(filename, cand["year"]),
                         currency="CZK",
-                        document_url=document_url,
                         document_format=_doc_format(filename),
                         source_url=detail_url,
                     )

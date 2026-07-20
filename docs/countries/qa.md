@@ -1,4 +1,4 @@
-# 🇶🇦 Qatar — MoCI + QSE
+# 🇶🇦 Qatar — GLEIF + QSE
 
 ## Identifiers
 
@@ -16,62 +16,73 @@
 
 ## Sources
 
-- **Ministry of Commerce and Industry (MoCI)** —
-  https://www.moci.gov.qa/
-  - Public CR / Trade Name lookup pages exist but structured fields are
-    gated behind Tawtheeq (Qatari national e-ID) login.
-  - **Auth**: Tawtheeq. Free in principle but not accessible from
-    outside Qatar without a QID.
-  - **Rate limit**: Not published. Adapter throttles to 30 req/min.
-  - **robots.txt / ToS**: Disallows automated harvesting of session
-    pages.
-- **General Tax Authority (GTA) TIN validator** —
-  https://www.gta.gov.qa/
-  - Form-based TIN check, protected by Google reCAPTCHA. No structured
-    JSON returned.
+- **GLEIF (Global LEI Foundation)** — https://api.gleif.org/api/v1
+  - Free, no key, JSON:API. Indexes every LEI-holding Qatari entity
+    (listed issuers, banks, funds, regulated + W.L.L. firms) with the
+    registered legal name, address, legal form, and the MoCI Commercial
+    Registration number in `entity.registeredAs`.
+  - Drives QA-scoped `search_by_name` (full-text) and CR
+    `lookup_by_identifier` (`filter[entity.registeredAs]=<CR>`).
+  - **Coverage caveat**: LEI holders only — non-LEI companies are not
+    indexed and return `None` on CR lookup.
 - **Qatar Stock Exchange (QSE)** — https://www.qe.com.qa/
-  - Annual reports for listed issuers are published as free PDFs on the
-    per-issuer page. The catalogue itself is a client-rendered SPA so
-    without a headless browser we can only deep-link to the canonical
-    issuer page per ticker.
+  - `/wp/mw/data/MarketWatch.txt` — free, no-key JSON snapshot of every
+    listed security (`Symbol`, `CompanyEN`, sector). Powers the listed
+    company slice of `search_by_name`.
+  - `/qdisclosure/api/XBRL/GetFSAttachmentAPI?attachmentType={1|3}&symCode={ticker}&reportEndDate={YYYY-MM-DD}&lang=1`
+    — returns the actual filed financial-statement **PDF** for a listed
+    issuer and a given quarter-end (`attachmentType=1` detailed audited
+    accounts, `3` XBRL-derived). Real filings, not a landing page; a
+    missing report returns HTTP 404 JSON. Powers `fetch_financials`.
+- **Ministry of Commerce and Industry (MoCI)** —
+  https://www.moci.gov.qa/ — public CR / Trade Name lookup is gated
+  behind Tawtheeq (national e-ID); no free public JSON. Superseded for
+  our purposes by GLEIF's `registeredAs` mapping.
+- **General Tax Authority (GTA) TIN validator** —
+  https://www.gta.gov.qa/ — reCAPTCHA-gated form; no structured JSON.
+  `VAT` (TIN) lookup therefore raises `AdapterNotImplementedError`.
 
 ## Test companies (REAL)
 
-| Company | QSE Ticker | Notes |
-|---------|------------|-------|
-| Qatar National Bank | `QNBK` | Largest bank in MENA |
-| Industries Qatar | `IQCD` | Petrochemicals / steel holding |
-| Ooredoo | `ORDS` | Telecoms |
-| Qatar Insurance Company | `QATI` | General insurance |
+| Company | QSE Ticker | CR (GLEIF) | Notes |
+|---------|------------|------------|-------|
+| Qatar National Bank | `QNBK` | `21` | Largest bank in MENA; FS PDFs 2023-2025 verified |
+| Industries Qatar | `IQCD` | — | Petrochemicals / steel holding |
+| Ooredoo | `ORDS` | — | Telecoms |
+| Qatar Insurance Company | `QATI` | — | General insurance |
+| Apex Healthcare W.L.L | — | `151033` | Non-listed, LEI holder — CR lookup test |
 
 ## Status
 
-🟡 **Best-effort financials only.** No free public data source exposes
-structured Qatar registry details without Tawtheeq authentication or a
-reCAPTCHA bypass.
+🟢 **Working.** Search, CR lookup, and financials all return real live
+data with no API key.
 
 **Capabilities**
 
-- `search_by_name` — raises `AdapterNotImplementedError`. MoCI name
-  search is Tawtheeq-gated; there is no free public JSON.
+- `search_by_name` — merges QSE listed-company matches (from
+  `MarketWatch.txt`, carrying the ticker used by `fetch_financials`) with
+  GLEIF full-text QA-scoped results (carrying the CR/LEI). Raises
+  `AdapterNotImplementedError` only when nothing matches.
 - `lookup_by_identifier`:
-  - `COMPANY_NUMBER` (CR) — validates format then raises
-    `AdapterNotImplementedError` (MoCI detail page is Tawtheeq-gated).
+  - `COMPANY_NUMBER` (CR) — resolves the CR via GLEIF
+    `entity.registeredAs` to a full `CompanyDetails` (name, legal form,
+    address, LEI). Returns `None` for CRs with no LEI record.
   - `VAT` (TIN) — validates format (strips `QA` prefix) then raises
-    `AdapterNotImplementedError` (GTA validator is reCAPTCHA-gated).
-- `fetch_financials` — for QSE-listed tickers returns one
-  `FinancialFiling` per year linking to the public QSE issuer page; for
+    `AdapterNotImplementedError` (GTA validator is reCAPTCHA-gated; no
+    free source indexes TINs).
+- `fetch_financials` — for a QSE ticker, probes the q-disclosure FS API
+  for each year-end in range and returns a `FinancialFiling` per year
+  whose `document_url` is the real audited financial-statement PDF that
+  actually downloads (`application/pdf`, verified before emission). For
   CR-shaped identifiers returns `[]` (no free unlisted financial
   source); for junk input raises `InvalidIdentifierError`.
 
 **Known gaps / next steps**
 
-1. Headless-browser scrape of QSE issuer pages once
-   `packages/adapters/_base/browser.py` lands — annual reports are
-   public PDFs but the catalogue is rendered client-side.
-2. Cross-reference Qatari entities against the global GLEIF (LEI) feed
-   for LEI-bearing issuers (banks, listed companies) as a free
-   enrichment layer.
-3. Investigate Qatar Financial Centre (QFC) — https://www.qfc.qa/ —
-   which operates a separate registry for QFC-licensed firms; the
-   public register page is searchable but again client-rendered.
+1. CR lookup covers LEI holders only; full MoCI CR coverage still needs
+   Tawtheeq and is out of scope for a free MVP.
+2. `fetch_financials` currently emits annual (year-end) filings; the same
+   endpoint also serves quarterly reports (`reportEndDate` = `-03-31`,
+   `-06-30`, `-09-30`) if interim data is later required.
+3. Wire the PDF text-extraction pipeline so the audited-accounts PDFs
+   feed structured figures into the risk engine (`pdf_text_excerpts`).

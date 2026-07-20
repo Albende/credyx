@@ -1,8 +1,8 @@
-"""Integration tests for the Philippines adapter (SEC iView + PSE Edge).
+"""Integration tests for the Philippines adapter (PSE Edge).
 
-The integration tests hit real SEC iView / PSE endpoints — no fixtures, no
-mocks. SEC iView's JSON shape is undocumented and occasionally rotates;
-network-side tests guard structural invariants rather than exact strings.
+The integration tests hit the real PSE Edge disclosure portal — no fixtures,
+no mocks. PSE Edge markup is stable but the disclosure set grows over time,
+so network-side tests guard structural invariants rather than exact strings.
 """
 from __future__ import annotations
 
@@ -13,42 +13,41 @@ import pytest
 from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.ph import PHAdapter
 from packages.adapters.ph.adapter import (
-    _normalize_sec_number,
-    _normalize_tin,
+    _fiscal_year,
+    _normalize_symbol,
     _parse_ph_date,
 )
 from packages.shared.models import FilingType, IdentifierType
 
 
-SM_SEC = "CS200417653"
-AYALA_SEC = "CS197600007"
-BDO_SEC = "CS196700106"
-JFC_SEC = "CS197802327"
+SM = "SM"
+AYALA = "AC"
+BDO = "BDO"
+JFC = "JFC"
 
 
-def test_normalize_sec_number_strips_and_uppercases():
-    assert _normalize_sec_number("cs200417653") == SM_SEC
-    assert _normalize_sec_number("  CS-2004-17653 ") == SM_SEC
-    assert _normalize_sec_number("PHCS200417653") == SM_SEC
+def test_normalize_symbol_strips_and_uppercases():
+    assert _normalize_symbol("sm") == "SM"
+    assert _normalize_symbol("  JFC ") == "JFC"
+    assert _normalize_symbol("PSE:AC") == "AC"
     with pytest.raises(InvalidIdentifierError):
-        _normalize_sec_number("AB")
+        _normalize_symbol("")
     with pytest.raises(InvalidIdentifierError):
-        _normalize_sec_number("!!!not-valid!!!")
+        _normalize_symbol("!!!not-valid!!!")
 
 
-def test_normalize_tin_validates_digits():
-    assert _normalize_tin("123456789") == "123456789"
-    assert _normalize_tin("123-456-789-000") == "123456789000"
-    with pytest.raises(InvalidIdentifierError):
-        _normalize_tin("12")
-    with pytest.raises(InvalidIdentifierError):
-        _normalize_tin("ABCDEFGHI")
+def test_fiscal_year_from_label_and_announce():
+    assert _fiscal_year("01 SM - SEC 17-A as of 31 December 2025", "") == 2025
+    assert _fiscal_year("2024 Ayala Corporation_SEC Form 17-A", "") == 2024
+    assert _fiscal_year("", "Apr 16, 2026 11:50 AM") == 2025
+    assert _fiscal_year("", "") is None
 
 
 def test_parse_ph_date_handles_common_formats():
     assert _parse_ph_date("1976-01-23") == date(1976, 1, 23)
     assert _parse_ph_date("01/23/1976") == date(1976, 1, 23)
     assert _parse_ph_date("January 23, 1976") == date(1976, 1, 23)
+    assert _parse_ph_date("May 15, 1960") == date(1960, 5, 15)
     assert _parse_ph_date(None) is None
     assert _parse_ph_date("not a date") is None
 
@@ -57,37 +56,38 @@ def test_parse_ph_date_handles_common_formats():
 async def test_lookup_rejects_wrong_identifier_type():
     adapter = PHAdapter()
     with pytest.raises(InvalidIdentifierError):
-        await adapter.lookup_by_identifier(IdentifierType.LEI, SM_SEC)
+        await adapter.lookup_by_identifier(IdentifierType.LEI, SM)
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_search_finds_sm_or_returns_list():
+async def test_search_finds_sm():
     adapter = PHAdapter()
     matches = await adapter.search_by_name("SM Investments", limit=10)
     assert isinstance(matches, list)
-    if matches:
-        assert any(m.country == "PH" for m in matches)
-        assert all(m.id and m.name for m in matches)
+    assert matches
+    assert any(m.country == "PH" for m in matches)
+    assert all(m.id and m.name for m in matches)
+    assert any(m.id == SM for m in matches)
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_sm_by_company_number():
+async def test_lookup_sm_by_symbol():
     adapter = PHAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.COMPANY_NUMBER, SM_SEC
+        IdentifierType.COMPANY_NUMBER, SM
     )
-    if details is None:
-        pytest.skip("SEC iView did not return a record for SM — registry transient")
-    assert details.id == SM_SEC
+    assert details is not None
+    assert details.id == SM
     assert details.country == "PH"
     assert details.name
+    assert details.incorporation_date is not None
+    assert details.registered_address
     assert any(
-        i.type == IdentifierType.COMPANY_NUMBER and i.value == SM_SEC
+        i.type == IdentifierType.COMPANY_NUMBER and i.value == SM
         for i in details.identifiers
     )
-    assert details.capital_currency == "PHP"
 
 
 @pytest.mark.asyncio
@@ -95,22 +95,26 @@ async def test_lookup_sm_by_company_number():
 async def test_lookup_unknown_returns_none():
     adapter = PHAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.COMPANY_NUMBER, "CS999999999"
+        IdentifierType.COMPANY_NUMBER, "ZZZZZ"
     )
-    assert details is None or details.id == "CS999999999"
+    assert details is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_fetch_financials_structure_for_known_secs():
+async def test_fetch_financials_for_listed_companies():
     adapter = PHAdapter()
-    for sec_no in (SM_SEC, AYALA_SEC, BDO_SEC, JFC_SEC):
-        filings = await adapter.fetch_financials(sec_no, years=3)
+    for symbol in (SM, AYALA, JFC):
+        filings = await adapter.fetch_financials(symbol, years=3)
         assert isinstance(filings, list)
+        assert filings
+        years = [f.year for f in filings]
+        assert len(years) == len(set(years))
         for f in filings:
-            assert f.company_id == sec_no
+            assert f.company_id == symbol
             assert f.type == FilingType.ANNUAL_REPORT
             assert f.currency == "PHP"
+            assert f.period_end == date(f.year, 12, 31)
             assert f.document_url and f.document_url.startswith("https://")
 
 

@@ -33,8 +33,9 @@ sys.path.insert(0, str(ROOT))
 from packages.adapters._base.errors import AdapterNotImplementedError  # noqa: E402
 from packages.adapters.registry import get_adapter_registry  # noqa: E402
 
-STEP_TIMEOUT = 45.0
-CONCURRENCY = 10
+import os
+STEP_TIMEOUT = float(os.getenv("VALIDATE_STEP_TIMEOUT", "45"))
+CONCURRENCY = int(os.getenv("VALIDATE_CONCURRENCY", "6"))
 
 ID_TOKEN = re.compile(r"[0-9][0-9A-Za-z.\-/]{2,}|\b[A-Z]{1,4}[0-9][0-9A-Za-z.\-/]*")
 
@@ -52,7 +53,28 @@ OVERRIDES: dict[str, tuple[str, str]] = {
     "US": ("Apple", "0000320193"),
     "CZ": ("ČEZ", "45274649"),
     "NO": ("Equinor", "923609016"),
-    "FI": ("Nokia", "0112038-9"),
+    # Large listed FI/ES firms file consolidated IFRS elsewhere, not to the
+    # register — use companies that actually have filed statements.
+    "FI": ("Asuntotekniikka", "0100379-9"),
+    "ES": ("Telefonica", "A28015865"),
+    "BG": ("Sopharma", "831902088"),
+    "TW": ("TSMC", "22099131"),
+    # Wave-2 verified local test companies (agents' identifiers):
+    "BO": ("Banco Mercantil", "1020557029"),
+    "BW": ("Sefalana", "BW00001731678"),
+    "CO": ("Alpina", "860025900"),
+    "GE": ("Silknet", "204566978"),
+    "IL": ("Teva", "520013954"),
+    "JO": ("Jordan Phosphate", "141018"),
+    "LT": ("Telia Lietuva", "121215434"),
+    "LV": ("Latvenergo", "40003032949"),
+    "MD": ("Moldovagaz", "1003600005148"),
+    "MT": ("Bank of Valletta", "C2833"),
+    "MX": ("America Movil", "AMO000925Q31"),
+    "QA": ("Qatar National Bank", "151033"),
+    "RU": ("Сбербанк", "7707083893"),
+    "TZ": ("CRDB Bank", "30227"),
+    "UY": ("PAMER", "210000530018"),
     "LT": ("Ignitis", "301844044"),
     "SI": ("Krka", "5043611000"),
     "RS": ("NIS", "20084693"),

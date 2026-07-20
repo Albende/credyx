@@ -44,10 +44,9 @@ def test_identifier_types() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_by_name_raises_not_implemented() -> None:
+async def test_search_by_name_empty_returns_empty() -> None:
     a = INAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await a.search_by_name("Reliance")
+    assert await a.search_by_name("   ") == []
 
 
 @pytest.mark.asyncio
@@ -95,9 +94,30 @@ async def test_lookup_tcs_real() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_search_reliance_real() -> None:
+    a = INAdapter()
+    matches = await a.search_by_name("Reliance Industries", limit=5)
+    assert matches
+    hit = next(m for m in matches if m.id == RELIANCE_CIN)
+    assert "reliance" in hit.name.lower()
+    assert hit.country == "IN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_reliance_real() -> None:
+    a = INAdapter()
+    filings = await a.fetch_financials(RELIANCE_CIN, years=3)
+    assert filings
+    assert all(f.company_id == RELIANCE_CIN for f in filings)
+    assert all(f.document_url and f.document_url.startswith("http") for f in filings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_health_check_live() -> None:
     a = INAdapter()
     h = await a.health_check()
     assert h.country_code == "IN"
     assert h.capabilities.get("lookup") is True
-    assert h.capabilities.get("search") is False
+    assert h.capabilities.get("search") is True

@@ -13,7 +13,9 @@ Source coverage:
     (title, VKN/taxNo, trade registry number, paid capital, city, ticker).
   - ``POST /en/api/disclosure/members/byCriteria`` — disclosure query
     (max 1-year date window per request); ``disclosureClass="FR"`` with
-    ``ruleType="Annual"`` marks annual financial reports.
+    ``ruleType="Annual"`` marks annual financial reports. Each disclosure
+    carries a ``disclosureIndex``; ``GET /en/api/BildirimPdf/{index}``
+    returns that specific filing as a downloadable ``application/pdf``.
 
 * Because the rebuilt platform publishes tax numbers only on per-company
   pages, VKN/MERSIS → company resolution is no longer possible without
@@ -314,9 +316,9 @@ class TRAdapter(CountryAdapter):
                         period_end=date(fiscal_year, 12, 31),
                         currency="TRY",
                         structured_data=None,
-                        document_url=f"{self.KAP_BASE}/en/Bildirim/{index}",
-                        document_format="xbrl",
-                        source_url=f"{self.KAP_BASE}/en/sirket-bilgileri/ozet/{member_oid}",
+                        document_url=f"{self.KAP_BASE}/en/api/BildirimPdf/{index}",
+                        document_format="pdf",
+                        source_url=f"{self.KAP_BASE}/en/Bildirim/{index}",
                     )
                 )
             window_end = window_start - timedelta(days=1)

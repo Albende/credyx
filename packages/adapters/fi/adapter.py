@@ -68,17 +68,16 @@ class FIAdapter(CountryAdapter):
             bid = bid_field.get("value") if isinstance(bid_field, dict) else bid_field
             if not bid:
                 continue
-            name_val = _pick_name(c.get("names") or [])
             out.append(
                 CompanyMatch(
                     id=bid,
-                    name=name_val,
+                    name=_pick_name(c.get("names") or []),
                     country=self.country_code,
                     identifiers=[
                         RegistryIdentifier(type=IdentifierType.BUSINESS_ID, value=bid, label="Y-tunnus"),
                     ],
                     address=_address(c.get("addresses") or []),
-                    status=(c.get("status") or "active"),
+                    status=_status(c),
                     source_url=f"https://tietopalvelu.ytj.fi/yritystiedot.aspx?ytunnus={bid}",
                 )
             )
@@ -102,14 +101,17 @@ class FIAdapter(CountryAdapter):
         if not companies:
             return None
         data = companies[0]
+        line = data.get("mainBusinessLine") or {}
         return CompanyDetails(
             id=v,
             name=_pick_name(data.get("names") or []),
             country="FI",
-            legal_form=(data.get("companyForms") or [{}])[0].get("type"),
-            status=data.get("status"),
+            legal_form=_legal_form(data.get("companyForms") or []),
+            status=_status(data),
             incorporation_date=_parse_date(data.get("registrationDate")),
             registered_address=_address(data.get("addresses") or []),
+            nace_codes=[str(line["type"])] if line.get("type") else [],
+            website=(data.get("website") or {}).get("url") if isinstance(data.get("website"), dict) else data.get("website"),
             identifiers=[
                 RegistryIdentifier(type=IdentifierType.BUSINESS_ID, value=v, label="Y-tunnus"),
             ],
@@ -154,10 +156,20 @@ class FIAdapter(CountryAdapter):
         return out
 
 
+def _desc(descriptions: list[dict[str, Any]], preferred: str = "3") -> str | None:
+    by_lang = {d.get("languageCode"): d.get("description") for d in descriptions}
+    return by_lang.get(preferred) or by_lang.get("1") or (
+        descriptions[0].get("description") if descriptions else None
+    )
+
+
 def _pick_name(names: list[dict[str, Any]]) -> str:
-    for n in names:
-        if n.get("type") == "1" or n.get("language", "").lower() in {"fi", "en", "se"}:
-            return n.get("name", "")
+    current = [n for n in names if n.get("type") == "1" and not n.get("endDate")]
+    if current:
+        return current[0].get("name", "")
+    primary = [n for n in names if n.get("type") == "1"]
+    if primary:
+        return primary[0].get("name", "")
     return names[0].get("name", "") if names else ""
 
 
@@ -165,14 +177,41 @@ def _address(addresses: list[dict[str, Any]]) -> str | None:
     if not addresses:
         return None
     a = addresses[0]
+    offices = a.get("postOffices") or []
+    city = None
+    for o in offices:
+        if o.get("languageCode") == "1":
+            city = o.get("city")
+            break
+    if city is None and offices:
+        city = offices[0].get("city")
     parts = [
         a.get("street"),
         a.get("buildingNumber"),
         a.get("postCode"),
-        a.get("city"),
+        city,
     ]
     parts = [str(p) for p in parts if p]
     return " ".join(parts) or None
+
+
+def _legal_form(forms: list[dict[str, Any]]) -> str | None:
+    current = [f for f in forms if not f.get("endDate")] or forms
+    if not current:
+        return None
+    return _desc(current[0].get("descriptions") or [])
+
+
+def _status(company: dict[str, Any]) -> str | None:
+    situations = company.get("companySituations") or []
+    flags = [_desc(s.get("descriptions") or []) for s in situations]
+    flags = [f for f in flags if f]
+    if flags:
+        return "; ".join(flags)
+    for entry in company.get("registeredEntries") or []:
+        if entry.get("register") == "4" and not entry.get("endDate"):
+            return _desc(entry.get("descriptions") or [])
+    return "Registered" if company.get("tradeRegisterStatus") == "1" else None
 
 
 def _parse_date(s: str | None) -> date | None:

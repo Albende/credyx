@@ -1,103 +1,110 @@
-# Malaysia — Bursa Malaysia (listed) + SSM e-Info (paid, excluded)
+# Malaysia — GLEIF registry lookup + Bursa Malaysia filings
 
 ## Identifier
 
 - Type: `COMPANY_NUMBER`
-- Formats accepted (both map to the same identifier type):
-  - **New** — 12 digits, e.g. `197001000465` (mandatory since Jan 2019).
-  - **Old** — up to 7 digits + check letter, e.g. `20076-K`, `6463-H`,
+- Formats accepted (all map to the same identifier type):
+  - **New** — 12 digits, e.g. `196501000672` (mandatory since 2019).
+  - **Old** — up to 7 digits + check letter, e.g. `6463-H`, `20076-K`,
     `901914-V`. Stripped to `DIGITS-LETTER`, uppercase.
-- Normalisation: strip whitespace, uppercase, accept `MY` country prefix
+- Normalisation: strip whitespace, uppercase, accept `MY` / `CR:` prefix
   and a bare hyphenless `20076K` form. Anything else raises
   `InvalidIdentifierError` — no check-letter is ever invented.
 
 A caller may pre-resolve a Bursa-listed issuer with the packed form
-`BURSA:<stockCode>` (e.g. `BURSA:5347`) to skip the SSM-side resolution
-this adapter cannot perform.
+`BURSA:<stockCode>` (e.g. `BURSA:1295`) to skip the registration-number →
+stock-code resolution `fetch_financials` otherwise performs.
 
 ## Sources
+
+### Registry search + lookup — GLEIF (free, no key)
+
+- Base: `https://api.gleif.org/api/v1`
+- The Global LEI index. Every Malaysian legal entity with an LEI carries
+  its SSM registration number in `entity.registeredAs` (e.g.
+  `196501000672 (6463-H)`), validated by the local LOU against SSM.
+- `search_by_name` → `GET /lei-records?filter[entity.legalName]={name}`
+  `&filter[entity.legalAddress.country]=MY`. Returns `CompanyMatch` with the
+  SSM new + old numbers and the LEI.
+- `lookup_by_identifier` → `GET /lei-records?filter[fulltext]={reg_no}`,
+  then confirms the returned record's `registeredAs` actually contains the
+  requested number before returning `CompanyDetails` (name, status,
+  incorporation date, registered address, identifiers).
+- **Coverage caveat**: only entities that hold an LEI are found (the large,
+  listed, and internationally-trading universe). Companies with no LEI
+  return no match — never a fabricated one. `search_by_name` also covers
+  only LEI-holding entities; there is no free full SSM name index.
+- **Auth**: none. **Rate limit**: adapter throttles to 30 req/min.
+
+### Financials — Bursa Malaysia (free, listed issuers)
+
+- Base: `https://www.bursamalaysia.com` (Cloudflare-challenged — all calls
+  route through `fetch_with_bot_bypass` / FlareSolverr).
+- Stock-code resolution: `GET /api/v1/announcements/search?ann_type=company`
+  `&keyword={name}` returns announcement rows whose company link carries
+  `stock_code=NNNN`; the adapter matches the GLEIF legal name to pick the
+  code.
+- Annual reports: `GET /api/v1/announcements/search?ann_type=company`
+  `&company={stock_code}&keyword=annual%20report`. Each row yields the
+  announcement id, title (with financial year) and announcement date.
+- PDF + period-end enrichment: the disclosure page
+  `https://disclosure.bursamalaysia.com/FileAccess/viewHtml?e={ann_id}`
+  carries the "Financial Year Ended" date and the real PDF attachment URL
+  (`/FileAccess/apbursaweb/download?id=…`). `document_url` is set only when
+  that attachment link is present.
+- **Coverage**: ~1,000 issuers (Main / ACE / LEAP markets). Annual reports
+  are free PDFs. Unlisted companies (no stock code) return `[]`.
 
 ### Registry — SSM e-Info (excluded, paid)
 
 - URL: https://www.ssm-einfo.my/
-- Operator: Companies Commission of Malaysia (SSM / Suruhanjaya Syarikat
-  Malaysia).
-- Status: **Paid, login + reCAPTCHA gated.** Every extract (Company
-  Information / Profile / Financial Statement) is billed per document
-  (from RM10). There is **no free public name-search or per-company
-  lookup endpoint** — even the public landing page only previews the
-  company name once you already know the registration number, and the
-  rest of the record sits behind the paywall.
-- Consequence: `search_by_name` and `lookup_by_identifier` raise
-  `AdapterNotImplementedError` per the project's non-negotiable
-  "no mock data, no paid APIs" rules.
-
-### Financials — Bursa Malaysia (free, listed issuers only)
-
-- Base: `https://www.bursamalaysia.com`
-- API root: `https://www.bursamalaysia.com/api/v1`
-- Endpoint (best-effort): `GET /announcements?stock_code={code}&type=annual-report`
-- **Auth**: none.
-- **Rate limit**: not strictly documented; this adapter throttles to
-  30 req/min.
-- **Coverage**: ~970 issuers listed on Bursa Malaysia (Main Market,
-  ACE Market, LEAP Market). Annual reports are free PDFs; quarterly
-  reports are also free but not pulled by this adapter.
-- The Bursa JSON endpoint contract is not officially documented for
-  third-party use. The adapter parses defensively: missing fields are
-  skipped, never invented. If the endpoint changes shape `fetch_financials`
-  returns `[]` rather than guessing.
+- Operator: Companies Commission of Malaysia (SSM). Every full-record
+  extract is billed per document and gated by login + reCAPTCHA. There is
+  no free public per-company financial extract, so the paid registry is
+  excluded per the project's "no paid APIs" rule.
 
 ### data.gov.my (open data, partial)
 
 - URL: https://data.gov.my/
-- Some SSM bulk datasets are republished here but they are sparse,
-  often anonymised, and not a substitute for a live registry lookup.
-  Not currently wired in; left as a Phase-2 ingestion candidate
-  (nightly bulk dump → Postgres, queried as a local index).
-
-### What is explicitly excluded (and why)
-
-- **SSM e-Info paid extracts** — violates the "no paid commercial APIs"
-  rule in the MVP.
-- **Third-party aggregators** (e.g. SearchMyCompany, ringgitplus
-  scrapers) — re-publish SSM data without licence and break under any
-  reasonable ToS reading.
-- **MyEG / LHDN tax-ID lookups** — restricted to authenticated taxpayer
-  flows, no public API.
+- Some SSM bulk datasets are republished here but they are sparse and not a
+  substitute for a live lookup. Left as a Phase-2 ingestion candidate.
 
 ## Test companies
 
 | Company | Reg # (new) | Reg # (old) | Bursa code |
 |---------|-------------|-------------|------------|
-| Petroliam Nasional Berhad (PETRONAS, parent — unlisted) | `197001000465` | `20076-K` | — |
-| Petronas Gas Berhad (Bursa-listed subsidiary) | — | — | `5347` |
-| Public Bank Berhad | `196601000142` | `6463-H` | `1295` |
+| Public Bank Berhad | `196501000672` | `6463-H` | `1295` |
 | Malayan Banking Berhad (Maybank) | `196001000142` | `3813-K` | `1155` |
 | IHH Healthcare Berhad | `200101025419` | `901914-V` | `5225` |
+| Petronas Gas Berhad | `198301006841` | — | `6033` |
+| Tenaga Nasional Berhad | `199001007331` | — | `5347` |
+| Petroliam Nasional Berhad (PETRONAS, parent — unlisted) | `197401002911` | `20076-K` | — |
 
-PETRONAS itself is wholly owned by the Malaysian government and is
-unlisted; tests use **Petronas Gas Berhad** as the listed-issuer probe.
+New-format numbers above are as recorded in GLEIF (`registeredAs`). Note the
+old MVP doc listed `197001000465` / `196601000142` for PETRONAS / Public
+Bank and mapped stock code `5347` to Petronas Gas — those were incorrect;
+`5347` is Tenaga Nasional and Petronas Gas is `6033`.
 
 ## Status
 
-- `search_by_name` → **501 not_implemented** (SSM e-Info paywall).
-- `lookup_by_identifier` → **501 not_implemented** for syntactically
-  valid IDs; `400 invalid_identifier` for malformed input.
+- `search_by_name` → live via GLEIF (LEI-holding MY entities).
+- `lookup_by_identifier` → live via GLEIF for syntactically valid IDs whose
+  entity holds an LEI; `None` when no LEI record matches; `400
+  invalid_identifier` for malformed input.
 - `fetch_financials` →
-  - Bursa-listed packed id (`BURSA:<code>`) → list of annual-report
-    filings (PDF URLs where surfaced).
-  - Plain registration number → `[]` (no free unlisted-issuer source).
+  - Registration number of a listed issuer → resolves to the Bursa stock
+    code and returns annual-report filings (year, period-end, MYR, PDF
+    `document_url`, per-filing `source_url`).
+  - `BURSA:<code>` packed id → same, skipping the resolution step.
+  - Unlisted or non-LEI companies → `[]`.
 
 ## Recommended next steps
 
-1. Phase-2: paid integration with SSM e-Info (per-doc billing flow)
-   gated by a feature flag — keeps the MVP rule intact.
-2. Ingest the bulk data.gov.my SSM datasets nightly into Postgres so
-   `search_by_name` returns at least the public attributes (UEN, name,
-   status) without hitting the paid registry.
-3. Maintain a registration-number → Bursa-stock-code lookup table so
-   listed-issuer financials can be fetched from a plain registration
-   number without the `BURSA:` prefix.
-4. Pipe Bursa annual-report PDFs through the planned PDF extraction
-   worker so `structured_data` is populated alongside the document URL.
+1. Cache the SSM-number → Bursa stock-code mapping in Postgres so repeat
+   `fetch_financials` calls skip the FlareSolverr resolution round-trip.
+2. Pipe Bursa annual-report PDFs through the PDF extraction worker so
+   `structured_data` is populated alongside the document URL.
+3. Phase-2: paid SSM e-Info integration behind a feature flag to cover
+   unlisted companies and full director/shareholder records.
+4. Ingest bulk data.gov.my SSM datasets nightly so `search_by_name` can
+   also return non-LEI entities.

@@ -1,76 +1,83 @@
-# 🇸🇦 Saudi Arabia — MCI + ZATCA + Tadawul
+# 🇸🇦 Saudi Arabia — GLEIF registry + Saudi Exchange (Tadawul)
 
 ## Identifiers
 
 - **CR Number** (Commercial Registration) — 10 digits, mapped to
   `IdentifierType.COMPANY_NUMBER`. Common prefixes:
-  - `10xxxxxxxx` — Riyadh-issued main CR (e.g. 1010150269 STC).
-  - `20xxxxxxxx` — Eastern Province (e.g. 2052101140 Saudi Aramco).
-  - `40xxxxxxxx` — Makkah, etc.
+  - `1010xxxxxx` — Riyadh-issued main CR (e.g. 1010150269 STC).
+  - `2052xxxxxx` — Eastern Province (e.g. 2052101150 Saudi Aramco).
+  - `4030xxxxxx` — Jeddah / Makkah (e.g. 4030001588 Saudi National Bank).
+  - GLEIF stores the CR verbatim in `entity.registeredAs` under
+    registration authority `RA000513` (Saudi Ministry of Commerce), which
+    is what the adapter keys lookups on.
 - **VAT** — 15 digits beginning with `3`. May be presented with an
   EU-style `SA` prefix; adapter strips it.
 - **700 ID** — Establishment number used by GOSI / Ministry of Labour,
-  10 digits beginning with `7`. Shares the `COMPANY_NUMBER` slot; the
-  adapter labels it `700 Establishment Number` when detected.
+  10 digits beginning with `7`. Shares the `COMPANY_NUMBER` slot.
 
 ## Sources
 
-- **Ministry of Commerce (MCI)** — https://mci.gov.sa/en/eServices
-  - Public name search and CR detail page exist but the structured
-    fields are gated behind Nafath (Saudi national e-ID) login.
-  - **Auth**: Nafath. Free in principle but not accessible from outside
-    Saudi Arabia without a National ID / Iqama.
-  - **Rate limit**: Not published. Adapter throttles to 30 req/min.
-  - **robots.txt / ToS**: Disallows automated harvesting of session
-    pages — we deep-link only.
-- **CR Validator** — https://mc.gov.sa/ar/eservices/Pages/CRValidation.aspx
-  - Validates a CR exists; gives status flag. Form is reCAPTCHA-gated.
-- **ZATCA VAT Validator** — https://zatca.gov.sa/en/eServices
-  - Form-based VAT TIN check, protected by Google reCAPTCHA. No
-    structured JSON returned.
-- **Tadawul / Saudi Exchange** — https://www.saudiexchange.sa/
-  - Annual reports for TASI-listed issuers are published as PDFs on the
-    per-issuer page. The catalogue is rendered client-side by Angular;
-    there is no documented public JSON API.
+- **GLEIF** — https://api.gleif.org/api/v1 (free, no key, JSON:API).
+  - `search_by_name`: `filter[fulltext]` scoped to
+    `filter[entity.legalAddress.country]=SA`. Fulltext matches Arabic
+    legal names through their transliterated forms, so an English query
+    (e.g. "SABIC", "Saudi Basic Industries") resolves the entity whose
+    `legalName` is Arabic.
+  - `lookup_by_identifier` (CR): `filter[entity.registeredAs]=<CR>` →
+    LEI → full record (legal name, LEI, address, status).
+- **Saudi Exchange (Tadawul) main-market company profile** —
+  https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/
+  - TASI-listed issuers publish server-rendered annual **Balance Sheet /
+    Statement of Income / Cash Flows** tables (figures in SAR '000).
+  - Behind Akamai + a rotating WebSphere portal token, so we go through
+    `fetch_with_bot_bypass` (FlareSolverr). The token is never hard-coded:
+    every profile page embeds the full issuer directory with a
+    currently-valid profile link per issuer, which we harvest and follow.
+  - **CR → Tadawul symbol** bridge: rank the 399-issuer directory by name
+    overlap with the entity's GLEIF name variants; an exact match to an
+    issuer's unique display name is trusted, weaker matches are confirmed
+    only if the CR appears in the profile page text.
+- **ZATCA VAT validator** — https://zatca.gov.sa/en/eServices — reCAPTCHA
+  gated, no structured JSON. VAT lookup raises `AdapterNotImplementedError`.
+- **Wathq** (https://api.wathq.sa/) — official MCI B2B data API but paid;
+  out of scope per non-negotiable rule #2.
 
 ## Test companies (REAL)
 
-| Company | CR | Notes |
-|---------|----|----|
-| Saudi Arabian Oil Company (Aramco) | `2052101140` | TASI ticker 2222 |
-| Saudi Telecom Company (STC) | `1010150269` | TASI ticker 7010 |
-| Saudi National Bank (SNB) | `1010008668` | TASI ticker 1180 |
-| Saudi Basic Industries Corp. (SABIC) | `1010010813` | TASI ticker 2010 |
+| Company | CR (GLEIF registeredAs) | TASI | Verified |
+|---------|-------------------------|------|----------|
+| Saudi Telecom Company (STC) | `1010150269` | 7010 | search + lookup + financials |
+| Saudi Basic Industries Corp. (SABIC) | `1010010813` | 2010 | search + lookup + financials |
+| Saudi Arabian Oil Company (Aramco) | `2052101150` | 2222 | lookup (name too generic in GLEIF for the symbol bridge) |
+| Saudi National Bank (SNB) | `4030001588` | 1180 | lookup |
+
+> Note: earlier drafts of this doc listed Aramco as `2052101140` and SNB
+> as `1010008668`; GLEIF holds `2052101150` and `4030001588` respectively.
 
 ## Status
 
-🟡 **Best-effort lookup only.** No free public data source exposes
-structured Saudi registry details without Nafath authentication or a
-reCAPTCHA bypass.
+🟢 **Live — registry + listed-company financials, all free / key-less.**
 
 **Capabilities**
 
-- `search_by_name` — raises `AdapterNotImplementedError`. MCI name
-  search is Nafath-gated; there is no free public JSON.
+- `search_by_name` — GLEIF fulltext (SA-scoped). Returns `CompanyMatch`
+  with LEI + CR identifiers.
 - `lookup_by_identifier`:
-  - `COMPANY_NUMBER` (CR or 700) — validates format and returns a
-    `CompanyDetails` whose `source_url` deep-links to the MCI public CR
-    page. No fabricated fields.
-  - `VAT` — validates format (15 digits, starts with 3; `SA` prefix
-    stripped) and returns a `CompanyDetails` pointing at the ZATCA
-    validator page.
-- `fetch_financials` — returns `[]`. Tadawul annual reports require a
-  browser pool (Angular SPA); not yet wired.
+  - `COMPANY_NUMBER` (CR / 700) — GLEIF record for the entity; `None` if
+    the CR is not in GLEIF. No fabricated fields.
+  - `VAT` — raises `AdapterNotImplementedError` (no free structured
+    source; ZATCA is reCAPTCHA-gated).
+- `fetch_financials` — for TASI-listed issuers, real annual
+  Balance Sheet / Income / Cash Flow figures scraped from the Saudi
+  Exchange profile, one `FinancialFiling` per fiscal year with the
+  reported figures in `structured_data` (currency SAR, unit '000).
+  Returns `[]` when the CR is not in GLEIF or the entity is not listed.
 
 **Known gaps / next steps**
 
-1. Headless-browser scrape of Tadawul issuer pages once
-   `packages/adapters/_base/browser.py` lands — annual reports are
-   public PDFs.
-2. Investigate the Wathq commercial data API (https://api.wathq.sa/) —
-   official Saudi B2B data service operated by MCI. It exposes CR,
-   national address, GOSI and ZATCA endpoints under one umbrella but
-   currently requires a paid subscription, so out of scope for the free
-   MVP per the project's non-negotiable rule #2.
-3. Cross-reference Saudi entities against the global GLEIF (LEI) feed
-   for LEI-bearing issuers as a free enrichment layer.
+1. Unlisted-company financials — no free source (Wathq is paid).
+2. Aramco-style symbol resolution: GLEIF's legal name ("Saudi Arabian Oil
+   Company") shares no distinctive token with the Tadawul display ("SAUDI
+   ARAMCO"), so the name bridge can't confirm it without a CR echo on the
+   page. A CR-indexed issuer directory would close this.
+3. VAT enrichment if a key-less ZATCA path appears.

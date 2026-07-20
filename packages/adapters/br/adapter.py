@@ -52,6 +52,7 @@ _CNPJ_WEIGHTS_1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
 _CNPJ_WEIGHTS_2 = [6] + _CNPJ_WEIGHTS_1
 
 _DB_UNAVAILABLE = "database temporarily unavailable"
+_DADOSBRASIL_ATTEMPTS = 10
 
 # CVM DFP standardized account codes → unified financial-statement keys the
 # risk engine reads (packages/risk/ratios.py).
@@ -170,28 +171,31 @@ class BRAdapter(CountryAdapter):
     async def _dadosbrasil_get(self, path: str) -> dict[str, Any] | None:
         # The DadosBrasil server intermittently reports its backend as
         # unavailable — sometimes as a JSON error, sometimes by stalling the
-        # connection until it read-times-out. Retry both across fresh clients.
-        for attempt in range(8):
+        # connection until it read-times-out. The down-windows are transient at
+        # the per-request level (interleaved requests succeed), so retry across
+        # fresh clients with a progressive backoff to ride them out.
+        for attempt in range(_DADOSBRASIL_ATTEMPTS):
+            backoff = min(0.6 + attempt * 0.3, 2.0)
             try:
                 async with build_http_client(
                     base_url=self.DADOSBRASIL_BASE, timeout=12.0
                 ) as client:
                     resp = await client.get(path)
             except httpx.HTTPError:
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(backoff)
                 continue
             if resp.status_code == 404:
                 return None
             if resp.status_code >= 500:
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(backoff)
                 continue
             try:
                 data = resp.json()
             except ValueError:
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(backoff)
                 continue
             if isinstance(data, dict) and data.get("error") == _DB_UNAVAILABLE:
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(backoff)
                 continue
             return data if isinstance(data, dict) else None
         return None

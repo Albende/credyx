@@ -7,24 +7,31 @@ from packages.adapters.al import ALAdapter
 from packages.adapters.al.adapter import (
     _classify_status,
     _extract_company_record,
-    _extract_search_rows,
+    _extract_document_links,
+    _extract_search_cards,
+    _extract_year_series,
     _normalize_nipt,
     _parse_al_date,
-    _parse_capital_amount,
+    _parse_amount,
 )
 from packages.shared.models import IdentifierType
 
+# Real, currently-resolving NIPTs on opencorporates.al (AIS open-data mirror).
+_ONE_ALBANIA = "J61814094W"  # ex Telekom Albania
+_BKT = "J62001011Q"  # Banka Kombëtare Tregtare
+_VODAFONE = "K11715005L"  # Vodafone Albania
+
 
 def test_normalize_nipt_accepts_canonical_form():
-    assert _normalize_nipt("J91904005U") == "J91904005U"
-    assert _normalize_nipt(" j91904005u ") == "J91904005U"
-    assert _normalize_nipt("J 91904005 U") == "J91904005U"
-    assert _normalize_nipt("J-91904005-U") == "J91904005U"
+    assert _normalize_nipt("J61814094W") == "J61814094W"
+    assert _normalize_nipt(" j61814094w ") == "J61814094W"
+    assert _normalize_nipt("J 61814094 W") == "J61814094W"
+    assert _normalize_nipt("J-61814094-W") == "J61814094W"
 
 
 def test_normalize_nipt_strips_eu_vat_prefix():
-    assert _normalize_nipt("ALJ91904005U") == "J91904005U"
-    assert _normalize_nipt("al j91904005u") == "J91904005U"
+    assert _normalize_nipt("ALJ61814094W") == "J61814094W"
+    assert _normalize_nipt("al j61814094w") == "J61814094W"
 
 
 def test_normalize_nipt_rejects_invalid():
@@ -33,11 +40,11 @@ def test_normalize_nipt_rejects_invalid():
     with pytest.raises(InvalidIdentifierError):
         _normalize_nipt("123456789")
     with pytest.raises(InvalidIdentifierError):
-        _normalize_nipt("J9190400U")  # too short
+        _normalize_nipt("J6181409W")  # too short
     with pytest.raises(InvalidIdentifierError):
-        _normalize_nipt("J919040050")  # ends with digit not letter
+        _normalize_nipt("J618140940")  # ends with digit not letter
     with pytest.raises(InvalidIdentifierError):
-        _normalize_nipt("991904005U")  # starts with digit not letter
+        _normalize_nipt("961814094W")  # starts with digit not letter
 
 
 def test_parse_al_date_handles_common_formats():
@@ -60,40 +67,42 @@ def test_classify_status_maps_localized_values():
     assert _classify_status(None) is None
 
 
-def test_parse_capital_amount_strips_currency_and_separators():
-    assert _parse_capital_amount("100.000 ALL") == 100000.0
-    assert _parse_capital_amount("ALL 1.500.000,50") == 1500000.5
-    assert _parse_capital_amount("100,000") == 100.0  # comma-as-decimal default
-    assert _parse_capital_amount("") is None
-    assert _parse_capital_amount(None) is None
-    assert _parse_capital_amount("no numbers here") is None
+def test_parse_amount_handles_albanian_number_format():
+    assert _parse_amount("863 826 822,00") == 863826822.0
+    assert _parse_amount("-539 854 000,00") == -539854000.0
+    assert _parse_amount("100 000,00") == 100000.0
+    assert _parse_amount("1.500.000,50") == 1500000.5
+    assert _parse_amount("") is None
+    assert _parse_amount(None) is None
+    assert _parse_amount("no numbers here") is None
 
 
-def test_extract_company_record_parses_two_column_table():
+def test_extract_company_record_parses_detail_page():
     html = """
     <html><body>
-      <h1>Telekom Albania</h1>
+      <h2 class="title-divider"><span>TELEKOM ALBANIA Sh.A.</span></h2>
       <table>
-        <tr><td>Emri i subjektit:</td><td>TELEKOM ALBANIA Sh.A.</td></tr>
-        <tr><td>NIPT:</td><td>J91904005U</td></tr>
-        <tr><td>Statusi:</td><td>Aktiv</td></tr>
-        <tr><td>Adresa:</td><td>Tiranë, Rruga Sami Frashëri</td></tr>
-        <tr><td>Data e regjistrimit:</td><td>15/04/2000</td></tr>
-        <tr><td>Forma ligjore:</td><td>Shoqëri Aksionere</td></tr>
-        <tr><td>Kapitali:</td><td>1.500.000.000 ALL</td></tr>
-        <tr><td>Administrator:</td><td>John Doe</td></tr>
+        <tr><th>Tax Registration Number:</th><td>J61814094W</td></tr>
+        <tr><th>Status:</th><td>Aktiv</td></tr>
+        <tr><th>Address:</th><td>Tiranë, Rruga Sami Frashëri</td></tr>
+        <tr><th>Foundation Year:</th><td>15/04/2000</td></tr>
+        <tr><th>Legal Form:</th><td>Shoqëri Aksionare SH.A</td></tr>
+        <tr><th>Initial Capital:</th><td>1 500 000 000,00</td></tr>
+        <tr><th>Administrators:</th><td>John Doe</td></tr>
+        <tr><th>District:</th><td>Tiranë</td></tr>
       </table>
     </body></html>
     """
     record = _extract_company_record(html)
     assert "TELEKOM" in record["name"].upper()
-    assert record["nipt"] == "J91904005U"
+    assert record["nipt"] == "J61814094W"
     assert record["status_raw"] == "Aktiv"
     assert "Tiranë" in record["address"]
     assert record["registration_date"] == "15/04/2000"
-    assert "Aksionere" in record["legal_form"]
-    assert "1.500.000.000" in record["capital"]
+    assert "Aksionare" in record["legal_form"]
+    assert "1 500 000 000" in record["capital"]
     assert record["director"] == "John Doe"
+    assert record["district"] == "Tiranë"
 
 
 def test_extract_company_record_empty_when_no_table():
@@ -101,34 +110,55 @@ def test_extract_company_record_empty_when_no_table():
     assert _extract_company_record("<html><body>No data</body></html>") == {}
 
 
-def test_extract_company_record_falls_back_to_heading():
-    html = "<html><body><h1>Banka Kombëtare Tregtare</h1><p>no table</p></body></html>"
-    record = _extract_company_record(html)
-    assert record.get("name") == "Banka Kombëtare Tregtare"
-
-
-def test_extract_search_rows_picks_name_and_nipt():
+def test_extract_search_cards_picks_name_nipt_address():
     html = """
-    <html><body><table>
-      <tr><th>Emri</th><th>NIPT</th><th>Statusi</th></tr>
-      <tr><td>TELEKOM ALBANIA Sh.A.</td><td>J91904005U</td><td>Aktiv</td></tr>
-      <tr><td>BANKA KOMBËTARE TREGTARE Sh.A.</td><td>J61824032O</td><td>Aktiv</td></tr>
-    </table></body></html>
+    <html><body>
+      <div class="card">
+        <h4 class="mb-0">VODAFONE ALBANIA</h4>
+        <a href="/sq/nipt/k11715005l">K11715005L</a>
+        <span><i class="fa fa-map-marker"></i> Tirane</span>
+        Aktiv
+      </div>
+      <h4 class="mb-0">VODAFONE M-PESA</h4>
+      <a href="/sq/nipt/l31527001n">L31527001N</a>
+    </body></html>
     """
-    rows = _extract_search_rows(html)
-    names = {r["name"] for r in rows}
-    nipts = {r["nipt"] for r in rows}
-    assert "TELEKOM ALBANIA Sh.A." in names
-    assert "BANKA KOMBËTARE TREGTARE Sh.A." in names
-    assert "J91904005U" in nipts
-    assert "J61824032O" in nipts
+    cards = _extract_search_cards(html)
+    names = {c["name"] for c in cards}
+    nipts = {c["nipt"] for c in cards}
+    assert "VODAFONE ALBANIA" in names
+    assert "VODAFONE M-PESA" in names
+    assert "K11715005L" in nipts
+    assert "L31527001N" in nipts
+    vodafone = next(c for c in cards if c["nipt"] == "K11715005L")
+    assert vodafone["address"] == "Tirane"
+
+
+def test_extract_year_series_reads_annual_figures():
+    html = (
+        "Annual Turnover (ALL Lekë) 2023:80 511 702,00<br>"
+        "Annual Turnover (ALL Lekë) 2022:61 028 762,00<br>"
+    )
+    series = _extract_year_series(html, r"Annual Turnover \(ALL")
+    assert series[2023] == 80511702.0
+    assert series[2022] == 61028762.0
+
+
+def test_extract_document_links_maps_year_to_href():
+    html = (
+        '<a href="/documents/bilanci/abc2010.pdf.pdf"> Pasqyrat Financiare 2010</a>'
+        '<a href="/documents/bilanci/xyz2011.xls.xls"> Pasqyra financiare 2011</a>'
+    )
+    docs = _extract_document_links(html)
+    assert docs[2010].endswith("abc2010.pdf.pdf")
+    assert docs[2011].endswith("xyz2011.xls.xls")
 
 
 @pytest.mark.asyncio
 async def test_lookup_rejects_unsupported_identifier():
     adapter = ALAdapter()
     with pytest.raises(InvalidIdentifierError):
-        await adapter.lookup_by_identifier(IdentifierType.LEI, "J91904005U")
+        await adapter.lookup_by_identifier(IdentifierType.LEI, _ONE_ALBANIA)
 
 
 @pytest.mark.asyncio
@@ -136,15 +166,6 @@ async def test_lookup_rejects_malformed_nipt():
     adapter = ALAdapter()
     with pytest.raises(InvalidIdentifierError):
         await adapter.lookup_by_identifier(IdentifierType.VAT, "BADVALUE")
-
-
-@pytest.mark.asyncio
-async def test_fetch_financials_returns_empty():
-    adapter = ALAdapter()
-    # AL has no centrally-published filings, but per the project rules we
-    # return [] (no mock, no 501) so the API contract stays stable.
-    result = await adapter.fetch_financials("J91904005U")
-    assert result == []
 
 
 def test_adapter_static_attributes():
@@ -160,17 +181,13 @@ def test_adapter_static_attributes():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_telekom_albania_returns_company_details():
+async def test_lookup_one_albania_returns_company_details():
     adapter = ALAdapter()
-    details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "J91904005U"
-    )
-    # Live registry markup can change without notice; we only assert that
-    # when a record is returned, its country and identifier line up.
+    details = await adapter.lookup_by_identifier(IdentifierType.VAT, _ONE_ALBANIA)
     if details is None:
-        pytest.skip("QKB returned no record for probe NIPT — site may have changed")
+        pytest.skip("opencorporates.al returned no record — site may have changed")
     assert details.country == "AL"
-    assert details.id == "J91904005U"
+    assert details.id == _ONE_ALBANIA
     assert details.name
 
 
@@ -178,24 +195,36 @@ async def test_lookup_telekom_albania_returns_company_details():
 @pytest.mark.integration
 async def test_lookup_bkt_returns_company_details():
     adapter = ALAdapter()
-    details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "J61824032O"
-    )
+    details = await adapter.lookup_by_identifier(IdentifierType.VAT, _BKT)
     if details is None:
-        pytest.skip("QKB returned no record for BKT — site may have changed")
-    assert details.id == "J61824032O"
+        pytest.skip("opencorporates.al returned no record for BKT — site may have changed")
+    assert details.id == _BKT
     upper = details.name.upper()
     assert "BANK" in upper or "BKT" in upper or "TREGT" in upper
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_fetch_financials_returns_real_filings():
+    adapter = ALAdapter()
+    filings = await adapter.fetch_financials(_BKT, years=3)
+    if not filings:
+        pytest.skip("opencorporates.al returned no filings — site may have changed")
+    assert len(filings) <= 3
+    for f in filings:
+        assert f.company_id == _BKT
+        assert f.currency == "ALL"
+        assert 1990 <= f.year <= 2100
+        # A filing must carry real data: structured figures and/or a document.
+        assert f.structured_data or f.document_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_search_by_name_returns_shape():
     adapter = ALAdapter()
-    matches = await adapter.search_by_name("Telekom", limit=5)
+    matches = await adapter.search_by_name("Vodafone", limit=5)
     assert isinstance(matches, list)
-    # Don't assert non-empty: the public search may require a JS-rendered
-    # form post; we only require the call succeeds and shape is correct.
     for m in matches:
         assert m.country == "AL"
         assert m.name

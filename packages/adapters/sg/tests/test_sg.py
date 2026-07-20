@@ -84,5 +84,7 @@ async def test_financials_dbs_best_effort():
     assert isinstance(filings, list)
     for f in filings:
         assert f.company_id == DBS_UEN
-        assert f.currency in {"SGD", "USD"}
+        # SGX's financial-reports feed carries no currency field; we leave it
+        # unset rather than assume SGD (some issuers, e.g. Wilmar, report USD).
+        assert f.currency is None or f.currency in {"SGD", "USD"}
         assert f.year >= 2000

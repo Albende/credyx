@@ -428,8 +428,10 @@ def _parse_filings(cegjegyzekszam: str, list_html: str) -> list[FinancialFiling]
             "attachments": attachments,
             "source": "e-beszamolo.im.gov.hu",
             "note": (
-                "Download URLs require an active e-beszamolo search session "
-                "(terms accepted + ALTCHA solved) issued during fetch."
+                "Per-document viewer URLs on e-beszamolo, valid only inside the "
+                "originating search session (terms accepted + ALTCHA solved). "
+                "They open the document in the portal viewer and are not "
+                "plain-GET downloadable, so no standalone document_url is set."
             ),
         }
         filings.append(

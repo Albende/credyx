@@ -26,10 +26,11 @@
   5. `POST /oldal/kereses_merleglista` (`f=<company-code>`) — list filings
 - Drives **name search**, **Cégjegyzékszám lookup**, and **filed annual
   reports** (period, publication date, per-document download filenames + URLs).
-- Per-document download URLs (`/oldal/kereses_megjelenites?b=..&o=..`) require
-  the *same* search session that produced them (terms + ALTCHA), so they are
-  surfaced in `FinancialFiling.structured_data.attachments` rather than as a
-  standalone `document_url`.
+- Per-document viewer URLs (`/oldal/kereses_megjelenites?b=..&o=..`) are valid
+  only inside the *same* search session that produced them (terms + ALTCHA);
+  they open the file in the portal's viewer and are not plain-GET downloadable,
+  so they are surfaced in `FinancialFiling.structured_data.attachments` (with
+  real filenames/sizes) rather than as a standalone `document_url`.
 
 ### VIES (used — VAT lookup)
 - URL: `https://ec.europa.eu/taxation_customs/vies/rest-api/ms/HU/vat/{vat}`

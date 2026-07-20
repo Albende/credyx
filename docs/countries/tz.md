@@ -1,78 +1,93 @@
-# 🇹🇿 Tanzania — BRELA + TRA + DSE
+# 🇹🇿 Tanzania — BRELA + DSE
 
 ## Identifiers
 
-- `COMPANY_NUMBER` — BRELA Registration Number (primary).
+- `COMPANY_NUMBER` — BRELA registration / incorporation number (primary).
 - `VAT` — TRA TIN (10-digit Taxpayer Identification Number).
 
 ## Sources
 
-- **BRELA** — Business Registrations and Licensing Agency.
-  - Portal: https://orsbrela.brela.go.tz/
-  - **Auth**: Interactive session with CAPTCHA on every search. No
-    documented JSON / REST API.
-  - **Status**: 🔴 Gated. Adapter raises `AdapterNotImplementedError`.
+- **BRELA** — Business Registrations and Licensing Agency (ORS).
+  - Portal: https://ors.brela.go.tz/orsreg/searchbusinesspublic
+  - **API**: The public search is backed by an undocumented JSON endpoint,
+    `POST https://ors.brela.go.tz/orsreg/list/search/businesspublic.json`.
+    Body is JSON:
+    `{"object_type":"ET-COMPANY"|"ET-BUSINESS","cm_name"|"bn_name":<name>,
+    "cm_number"|"bn_number":<number>,"PageSize":n,"PageNumber":n}`.
+    Response is `{"Map":[...columns],"Records":[[...]],"Result":"OK",
+    "TotalRecordCount":n}`.
+  - **Auth**: None (no key, no login). A WAF fronts the host: it rejects the
+    default crawler user-agent and any `x-www-form-urlencoded` POST. A browser
+    user-agent + `Content-Type: application/json` passes cleanly.
+  - **Rate limit**: Not published; adapter throttles to 30 req/min.
+  - **Status**: 🟢 Live. Powers `search_by_name` and `lookup_by_identifier`.
 - **TRA** — Tanzania Revenue Authority.
   - Portal: https://www.tra.go.tz/
-  - **Auth**: TIN validator is interactive only.
-  - **Status**: 🔴 Gated. Adapter raises `AdapterNotImplementedError`.
+  - **Auth**: TIN validator is interactive only, no public API.
+  - **Status**: 🔴 Gated. `lookup_by_identifier(VAT, …)` raises
+    `AdapterNotImplementedError`.
 - **DSE** — Dar es Salaam Stock Exchange.
-  - Portal: https://www.dse.co.tz/
-  - **Auth**: None — public investor-relations pages with PDF annual
-    reports.
-  - **Rate limit**: Not published; adapter throttles to 30 req/min.
-  - **Status**: 🟢 Used to surface annual-report landing pages for a
-    small, manually verified roster of listed issuers.
+  - Portal: https://dse.co.tz/listed/company/financial/statement
+  - **API**: The per-issuer statement list is served by a Livewire v2
+    component, `financial-statement-front-component`. The adapter GETs the
+    page, extracts the `wire:initial-data` snapshot + `csrf-token`, then
+    `POST`s `/livewire/message/financial-statement-front-component` with a
+    `syncInput` update for `comp_id` (numeric issuer id from the page's
+    company `<select>`) and `report_type` (`Annual`/`Interim`/`Quarterly`).
+    The rendered HTML lists each statement with its period-end date, title,
+    and a downloadable PDF under
+    `/storage/securities/{TICKER}/financial_statement/{type}/{hash}.pdf`.
+  - **Auth**: None — PDFs download directly (`application/pdf`).
+  - **Status**: 🟢 Live. Powers `fetch_financials` for DSE-listed issuers.
 
 ## Test companies
 
-All four are DSE-listed and used by the integration tests:
-
-- **CRDB Bank PLC** — DSE ticker `CRDB`.
-- **NMB Bank PLC** — DSE ticker `NMB`.
-- **Tanzania Breweries Limited (TBL)** — DSE ticker `TBL`.
-- **Vodacom Tanzania PLC** — DSE ticker `VODA`.
+- **CRDB Bank Plc** — BRELA company number `30227`; DSE ticker `CRDB`.
+- **NMB Bank Plc** — BRELA company number `32699`; DSE ticker `NMB`.
+- **Tanzania Breweries Plc** — DSE ticker `TBL`.
+- **Vodacom Tanzania Plc** — DSE ticker `VODA`.
 
 ## Status
 
-🟡 **Partial** — registry search/lookup unavailable; financials limited
-to verified DSE listings.
+🟢 **Live** — registry search + lookup via BRELA ORS JSON; audited financial
+statements (downloadable PDFs) via DSE for listed issuers.
 
 **Capabilities**
 
-- `search_by_name` — raises `AdapterNotImplementedError` (BRELA gated).
-- `lookup_by_identifier` — raises `AdapterNotImplementedError` for both
-  `COMPANY_NUMBER` and `VAT`.
-- `fetch_financials` — for `company_id` in `{CRDB, NMB, TBL, VODA}`
-  returns a single `FinancialFiling` pointing at the DSE issuer page
-  (`source_url`). No fabricated numbers, period ends, or PDF URLs. For
-  any other `company_id` returns `[]`.
-- `health_check` — probes https://www.dse.co.tz/ and reports
-  `DEGRADED` (search/lookup off, financials limited) when reachable.
+- `search_by_name` — queries BRELA for both companies (`cm_name`) and business
+  names (`bn_name`), returns `CompanyMatch` records (registration number, legal
+  name, status, address).
+- `lookup_by_identifier` — `COMPANY_NUMBER` resolves the full BRELA record
+  (`CompanyDetails`: legal form, status, incorporation date, address, raw
+  payload). `VAT` raises `AdapterNotImplementedError` (TRA gated).
+- `fetch_financials` — for a DSE ticker (or numeric DSE issuer id) returns one
+  `FinancialFiling` per filed report, most-recent first, each with a real
+  downloadable `document_url` PDF, `period_end`, and `currency = "TZS"`. For a
+  non-listed key returns `[]`. No fabricated numbers.
+- `health_check` — probes the BRELA JSON endpoint; reports `OK` when the
+  registry search responds.
 
 ## Currency
 
 DSE issuers report in TZS (Tanzanian Shilling). Financial filings carry
 `currency = "TZS"`; FX normalization to EUR is the responsibility of
-`packages/risk` (see cross-cutting work item #5 in `CLAUDE.md`).
+`packages/risk` (cross-cutting work item #5 in `CLAUDE.md`).
 
 ## Known gaps / next steps
 
-1. **BRELA scraper.** OrSBrela can be navigated with Playwright +
-   CAPTCHA solving; only worth doing if Tanzania becomes a Phase-2
-   priority. Add to `packages/adapters/_base/browser.py` when built.
-2. **TIN validation.** TRA exposes a session-based validator; a
-   browser-pool implementation could verify TIN format + active status
-   without scraping detail pages.
-3. **DSE annual-report PDF index.** Each issuer page has a
-   `Financials / Annual Reports` section. A second pass should extract
-   the per-year PDF URLs and populate `document_url` + `period_end` so
-   the existing PDF text-extraction pipeline (CLAUDE.md infra item #1)
-   can feed the risk engine.
-4. **OpenSanctions overlay.** Tanzanian PEPs are well-covered by
-   OpenSanctions; once `risk.engine` wires sanctions screening (infra
-   item #8), TZ benefits with zero per-country work.
-5. **Non-listed coverage.** ~99% of Tanzanian registered companies are
-   not on DSE and are reachable only via BRELA. Realistically this
-   needs either (a) a paid aggregator or (b) the BRELA Playwright
-   scraper.
+1. **BRELA ↔ DSE linkage.** `fetch_financials` is keyed by DSE ticker /
+   issuer id. There is no automated map from a BRELA registration number to a
+   DSE ticker; the search/lookup and financials paths are independent. A small
+   resolver (name match against the live DSE roster) could bridge them.
+2. **Non-listed financials.** ~99% of Tanzanian registered companies are not
+   on DSE. BRELA does not publish filed accounts via the public search, so
+   deep financials for private companies remain unavailable without a paid
+   aggregator.
+3. **DSE PDF text extraction.** `document_url` points at the audited PDF;
+   feeding it to the PDF text-extraction pipeline (CLAUDE.md infra item #1)
+   would populate `structured_data` for the risk engine.
+4. **TRA TIN validation.** TRA exposes a session-based validator only; a
+   browser-pool implementation could verify TIN format + active status.
+5. **OpenSanctions overlay.** Tanzanian PEPs are well-covered by
+   OpenSanctions; wiring `risk.engine` sanctions screening (infra item #8)
+   benefits TZ with zero per-country work.

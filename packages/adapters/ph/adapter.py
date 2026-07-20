@@ -1,29 +1,32 @@
-"""Philippines adapter — SEC iView + PSE Edge.
+"""Philippines adapter — PSE Edge (Philippine Stock Exchange disclosure portal).
 
-Two free, no-auth public sources are stitched together here:
+The SEC's former public viewer (`iview.sec.gov.ph`) was retired and no longer
+resolves, and the SEC's replacement search portals (eSPARC / eSEARCH) sit
+behind a bot wall and forbid automated scraping in their terms. The only
+free, no-auth, machine-readable Philippine source that returns real
+company data — including downloadable audited financial statements — is
+**PSE Edge**, the Philippine Stock Exchange's disclosure portal.
 
-* SEC iView (Securities and Exchange Commission of the Philippines). Public
-  company viewer at https://iview.sec.gov.ph — used for name search and
-  per-company registry lookup. No API key. The endpoints are not formally
-  documented, so we probe a small set of well-known JSON paths and fall back
-  to HTML parsing when only the SPA shell answers.
-* PSE Edge (Philippine Stock Exchange) for listed-company annual reports.
-  Each listed firm has a stable company-page URL keyed by ticker symbol.
-  We only emit a `FinancialFiling` when the PSE page actually returns 200
-  with a recognisable annual-report marker — we never invent.
+Coverage is therefore **PSE-listed companies** (the large-cap universe:
+SM, AC, BDO, JFC, URC, …). For unlisted Philippine companies there is no
+free official machine-readable source, so `search_by_name` returns only
+listed matches and never fabricates a record.
 
-Identifiers:
-- COMPANY_NUMBER → SEC Registration Number. Alphanumeric, often prefixed
-  with `CS`, `A`, `AS`, `AN`, or `PP`. Case-insensitive on input; preserved
-  uppercased on output. Length is not fixed — anywhere from 6 to ~14 chars
-  in practice.
-- VAT            → 12-digit Tax Identification Number (TIN). The TIN is
-  issued by the Bureau of Internal Revenue (BIR) and is independent of the
-  SEC number; the SEC site does not link the two, so VAT lookup falls back
-  to a name search by TIN string and returns None when no match surfaces.
+Sources (all on `https://edge.pse.com.ph`, no API key):
 
-Unlisted companies have no free filed-financials source — `fetch_financials`
-returns `[]` rather than fabricate data, per the project's non-negotiables.
+* `/autoComplete/searchCompanyNameSymbol.ax?term=` — JSON company search,
+  returns `{cmpyId, cmpyNm, symbol}` rows. Backs `search_by_name`.
+* `/companyInformation/form.do?cmpy_id=` — the company profile page
+  (sector, incorporation date, registered office, auditor, website).
+  Backs `lookup_by_identifier`.
+* `/companyDisclosures/search.ax` (POST, `keyword={cmpy_id}`,
+  `tmplNm=Annual Report`) — the company's filed annual reports (SEC Form
+  17-A). Each row links to a disclosure viewer whose attachments are the
+  real 17-A PDF + audited financial statements. Backs `fetch_financials`.
+
+Identifier: `COMPANY_NUMBER` carries the **PSE ticker symbol** (e.g. `SM`,
+`AC`, `JFC`) — the key PSE Edge uses to address a company. It is the only
+stable public handle exposed by this source.
 """
 from __future__ import annotations
 
@@ -47,105 +50,67 @@ from packages.shared.models import (
     RegistryIdentifier,
 )
 
-# SEC registration numbers are alphanumeric with an optional letter prefix
-# (CS / A / AS / AN / PP). The body is 6-14 chars total — we keep the bound
-# loose so historical numbers still validate.
-_SEC_REG_RE = re.compile(r"^[A-Z0-9]{6,14}$")
-_TIN_RE = re.compile(r"^\d{9,12}$")
-_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}$")
+_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,9}$")
+_FY_RE = re.compile(
+    r"(?:(?:31\s*)?dec(?:ember)?\s*[,]?\s*(\d{4})"
+    r"|december\s*31\s*[,]?\s*(\d{4})"
+    r"|as\s*of\s*[^0-9]{0,20}(\d{4}))",
+    re.IGNORECASE,
+)
+_LEADING_YEAR_RE = re.compile(r"^\s*(\d{4})\b")
+_ANNOUNCE_YEAR_RE = re.compile(r"\b(\d{4})\b")
 
 
-def _normalize_sec_number(value: str) -> str:
-    cleaned = re.sub(r"[\s\-]", "", value.strip()).upper()
-    if cleaned.startswith("PH"):
-        cleaned = cleaned[2:]
-    if not _SEC_REG_RE.match(cleaned):
+def _normalize_symbol(value: str) -> str:
+    cleaned = value.strip().upper()
+    if cleaned.startswith("PSE:"):
+        cleaned = cleaned[4:].strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if not _SYMBOL_RE.match(cleaned):
         raise InvalidIdentifierError(
-            f"Philippines SEC Registration Number invalid: {value}"
+            f"Philippines PSE ticker symbol invalid: {value}"
         )
     return cleaned
 
 
-def _normalize_tin(value: str) -> str:
-    cleaned = re.sub(r"[\s\-]", "", value.strip())
-    if not _TIN_RE.match(cleaned):
-        raise InvalidIdentifierError(
-            f"Philippines TIN must be 9-12 digits, got: {value}"
-        )
-    return cleaned
-
-
-def _parse_ph_date(s: Any) -> date | None:
-    if not s:
-        return None
-    raw = str(s).strip()
-    if not raw:
-        return None
-    try:
-        return date.fromisoformat(raw[:10])
-    except ValueError:
-        pass
-    # SEC reports occasionally render dates as "MM/DD/YYYY" or "Month D, YYYY".
-    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
-    if m:
-        month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return date(year, month, day)
-        except ValueError:
-            return None
-    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
-        try:
-            return datetime.strptime(raw, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _coerce_float(v: Any) -> float | None:
-    if v is None or v == "":
-        return None
-    try:
-        return float(str(v).replace(",", "").replace("PHP", "").strip())
-    except (TypeError, ValueError):
-        return None
+def _strip_tags(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
 
 
 class PHAdapter(CountryAdapter):
     country_code = "PH"
     country_name = "Philippines"
-    identifier_types = [IdentifierType.COMPANY_NUMBER, IdentifierType.VAT]
+    identifier_types = [IdentifierType.COMPANY_NUMBER]
     primary_identifier = IdentifierType.COMPANY_NUMBER
     requires_api_key = False
     rate_limit_per_minute = 30
 
-    SEC_BASE = "https://iview.sec.gov.ph"
     PSE_BASE = "https://edge.pse.com.ph"
-    PSE_PUBLIC_BASE = "https://www.pse.com.ph"
 
-    def _sec_headers(self) -> dict[str, str]:
-        # iView is an SPA — its JSON endpoints reject requests that don't
-        # carry a browser-style Accept and a matching Referer.
-        return {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en;q=0.9",
-            "Referer": f"{self.SEC_BASE}/",
-            "Origin": self.SEC_BASE,
-        }
-
-    def _pse_headers(self) -> dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         return {
             "Accept": "application/json, text/html;q=0.9, */*;q=0.5",
             "Accept-Language": "en;q=0.9",
-            "Referer": f"{self.PSE_PUBLIC_BASE}/",
+            "Referer": f"{self.PSE_BASE}/",
+            "X-Requested-With": "XMLHttpRequest",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            ),
         }
 
     async def health_check(self) -> AdapterHealth:
         try:
             async with build_http_client(
-                base_url=self.SEC_BASE, headers=self._sec_headers()
+                base_url=self.PSE_BASE, headers=self._headers()
             ) as client:
-                resp = await get_with_retry(client, "/")
-                if resp.status_code >= 500:
+                resp = await get_with_retry(
+                    client,
+                    "/autoComplete/searchCompanyNameSymbol.ax",
+                    params={"term": "SM"},
+                )
+                if resp.status_code != 200:
                     return AdapterHealth(
                         country_code=self.country_code,
                         name=self.country_name,
@@ -155,7 +120,7 @@ class PHAdapter(CountryAdapter):
                             "lookup": False,
                             "financials": False,
                         },
-                        notes=f"SEC iView HTTP {resp.status_code}",
+                        notes=f"PSE Edge HTTP {resp.status_code}",
                     )
         except Exception as exc:
             return AdapterHealth(
@@ -176,8 +141,8 @@ class PHAdapter(CountryAdapter):
             capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Registry via SEC iView (no auth). Financials best-effort: "
-                "PSE Edge URLs for listed firms only; unlisted firms return []."
+                "PSE Edge (no auth). Covers PSE-listed companies: search + "
+                "profile + filed 17-A annual reports with downloadable PDFs."
             ),
         )
 
@@ -185,29 +150,29 @@ class PHAdapter(CountryAdapter):
         query = name.strip()
         if not query:
             return []
-        rows = await self._sec_search(query, limit=limit)
+        rows = await self._autocomplete(query)
         matches: list[CompanyMatch] = []
         for r in rows[:limit]:
-            sec_no = _pick(r, "sec_registration_no", "secRegNo", "regNo", "id")
-            display = _pick(r, "company_name", "companyName", "name", "title")
-            if not sec_no or not display:
+            symbol = str(r.get("symbol") or "").strip().upper()
+            display = str(r.get("cmpyNm") or "").strip()
+            if not symbol or not display:
                 continue
-            sec_no_str = str(sec_no).strip().upper()
             matches.append(
                 CompanyMatch(
-                    id=sec_no_str,
-                    name=str(display).strip(),
+                    id=symbol,
+                    name=display,
                     country=self.country_code,
                     identifiers=[
                         RegistryIdentifier(
                             type=IdentifierType.COMPANY_NUMBER,
-                            value=sec_no_str,
-                            label="SEC Registration Number",
+                            value=symbol,
+                            label="PSE Company Symbol",
                         ),
                     ],
-                    address=_pick(r, "address", "registeredAddress"),
-                    status=_normalize_status(_pick(r, "status", "companyStatus")),
-                    source_url=f"{self.SEC_BASE}/#/company/{sec_no_str}",
+                    source_url=(
+                        f"{self.PSE_BASE}/companyPage/stockData.do"
+                        f"?cmpy_id={str(r.get('cmpyId') or '').strip()}"
+                    ),
                 )
             )
         return matches
@@ -215,271 +180,278 @@ class PHAdapter(CountryAdapter):
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
-        if id_type == IdentifierType.COMPANY_NUMBER:
-            sec_no = _normalize_sec_number(value)
-            record = await self._sec_detail(sec_no)
-            if record is None:
-                # iView's search index is sometimes ahead of the detail shard.
-                rows = await self._sec_search(sec_no, limit=1)
-                if not rows:
-                    return None
-                record = rows[0]
-            return _record_to_details(record, sec_no, self.SEC_BASE)
-        if id_type == IdentifierType.VAT:
-            tin = _normalize_tin(value)
-            rows = await self._sec_search(tin, limit=1)
-            if not rows:
-                return None
-            sec_no = str(
-                _pick(rows[0], "sec_registration_no", "secRegNo", "regNo", "id") or ""
-            ).strip().upper()
-            if not sec_no:
-                return None
-            return _record_to_details(rows[0], sec_no, self.SEC_BASE)
-        raise InvalidIdentifierError(
-            f"Philippines supports COMPANY_NUMBER (SEC) or VAT (TIN), got {id_type}"
-        )
+        if id_type != IdentifierType.COMPANY_NUMBER:
+            raise InvalidIdentifierError(
+                f"Philippines supports COMPANY_NUMBER (PSE symbol), got {id_type}"
+            )
+        symbol = _normalize_symbol(value)
+        resolved = await self._resolve_symbol(symbol)
+        if resolved is None:
+            return None
+        cmpy_id = str(resolved.get("cmpyId") or "").strip()
+        display = str(resolved.get("cmpyNm") or "").strip()
+        fields = await self._company_information(cmpy_id)
+        return self._to_details(symbol, cmpy_id, display, fields)
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        sec_no = _normalize_sec_number(company_id)
-        record = await self._sec_detail(sec_no)
-        if record is None:
-            rows = await self._sec_search(sec_no, limit=1)
-            record = rows[0] if rows else None
-        symbol = _detect_pse_symbol(record) if record else None
-        if not symbol:
+        symbol = _normalize_symbol(company_id)
+        resolved = await self._resolve_symbol(symbol)
+        if resolved is None:
+            return []
+        cmpy_id = str(resolved.get("cmpyId") or "").strip()
+        reports = await self._annual_reports(cmpy_id)
+        if not reports:
             return []
 
         filings: list[FinancialFiling] = []
-        current_year = datetime.utcnow().year
+        seen_years: set[int] = set()
         async with build_http_client(
-            timeout=15.0, headers=self._pse_headers()
+            base_url=self.PSE_BASE, headers=self._headers()
         ) as client:
-            for year in range(current_year - years, current_year):
-                url = (
-                    f"{self.PSE_PUBLIC_BASE}/stockMarket/companyInfoSecurityProfile.html"
-                    f"?cmpy_id={symbol}&security_id={symbol}&year={year}"
+            for edge_no, announce in reports:
+                if len(filings) >= years:
+                    break
+                company_name, attachments = await self._disclosure_files(
+                    client, edge_no
                 )
-                try:
-                    resp = await client.get(url)
-                except (httpx.TransportError, httpx.TimeoutException):
-                    continue
-                if resp.status_code != 200:
-                    continue
-                body = resp.text or ""
-                # Same SPA shell answers for every URL — require a real
-                # annual-report marker before we keep the link.
-                if not any(
-                    tok in body
-                    for tok in (
-                        "Annual Report",
-                        "annual-report",
-                        "Audited Financial Statement",
-                        "17-A",
-                    )
+                if company_name and symbol not in company_name.upper() and (
+                    resolved.get("cmpyNm", "").upper() not in company_name.upper()
                 ):
                     continue
+                file_id, label = _pick_annual_pdf(attachments)
+                fiscal_year = _fiscal_year(label, announce)
+                if fiscal_year is None or fiscal_year in seen_years:
+                    continue
+                seen_years.add(fiscal_year)
                 filings.append(
                     FinancialFiling(
-                        company_id=sec_no,
-                        year=year,
+                        company_id=symbol,
+                        year=fiscal_year,
                         type=FilingType.ANNUAL_REPORT,
-                        period_end=date(year, 12, 31),
+                        period_end=date(fiscal_year, 12, 31),
                         currency="PHP",
-                        document_url=url,
-                        document_format="html",
+                        document_url=(
+                            f"{self.PSE_BASE}/downloadFile.do?file_id={file_id}"
+                            if file_id
+                            else None
+                        ),
+                        document_format="pdf" if file_id else None,
                         source_url=(
-                            f"{self.PSE_PUBLIC_BASE}/stockMarket/"
-                            f"companyInfo.html?cmpy_id={symbol}"
+                            f"{self.PSE_BASE}/openDiscViewer.do?edge_no={edge_no}"
                         ),
                     )
                 )
         return filings
 
-    async def _sec_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:
+    async def _autocomplete(self, term: str) -> list[dict[str, Any]]:
         async with build_http_client(
-            base_url=self.SEC_BASE, headers=self._sec_headers()
+            base_url=self.PSE_BASE, headers=self._headers()
         ) as client:
-            for path, params in (
-                ("/api/company/search", {"q": query, "limit": limit}),
-                ("/api/search", {"q": query, "limit": limit}),
-                ("/api/companies", {"name": query, "limit": limit}),
-            ):
-                try:
-                    resp = await get_with_retry(client, path, params=params)
-                except (httpx.TransportError, httpx.TimeoutException):
-                    continue
-                if resp.status_code != 200:
-                    continue
-                try:
-                    payload = resp.json()
-                except ValueError:
-                    continue
-                rows = _extract_rows(payload)
-                if rows:
-                    return rows
-        return []
+            try:
+                resp = await get_with_retry(
+                    client,
+                    "/autoComplete/searchCompanyNameSymbol.ax",
+                    params={"term": term},
+                )
+            except (httpx.TransportError, httpx.TimeoutException):
+                return []
+            if resp.status_code != 200:
+                return []
+            try:
+                payload = resp.json()
+            except ValueError:
+                return []
+            if isinstance(payload, list):
+                return [r for r in payload if isinstance(r, dict)]
+            return []
 
-    async def _sec_detail(self, sec_no: str) -> dict[str, Any] | None:
-        async with build_http_client(
-            base_url=self.SEC_BASE, headers=self._sec_headers()
-        ) as client:
-            for path in (
-                f"/api/company/{sec_no}",
-                f"/api/companies/{sec_no}",
-            ):
-                try:
-                    resp = await get_with_retry(client, path)
-                except (httpx.TransportError, httpx.TimeoutException):
-                    continue
-                if resp.status_code == 404:
-                    continue
-                if resp.status_code != 200:
-                    continue
-                try:
-                    payload = resp.json()
-                except ValueError:
-                    continue
-                if isinstance(payload, dict):
-                    inner = payload.get("data") or payload.get("company") or payload
-                    if isinstance(inner, dict) and inner:
-                        return inner
+    async def _resolve_symbol(self, symbol: str) -> dict[str, Any] | None:
+        rows = await self._autocomplete(symbol)
+        for r in rows:
+            if str(r.get("symbol") or "").strip().upper() == symbol:
+                return r
         return None
 
+    async def _company_information(self, cmpy_id: str) -> dict[str, str]:
+        if not cmpy_id:
+            return {}
+        async with build_http_client(
+            base_url=self.PSE_BASE, headers=self._headers()
+        ) as client:
+            try:
+                resp = await get_with_retry(
+                    client,
+                    "/companyInformation/form.do",
+                    params={"cmpy_id": cmpy_id, "security_id": cmpy_id},
+                )
+            except (httpx.TransportError, httpx.TimeoutException):
+                return {}
+            if resp.status_code != 200:
+                return {}
+            return _parse_info_table(resp.text or "")
 
-def _extract_rows(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [r for r in payload if isinstance(r, dict)]
-    if isinstance(payload, dict):
-        for key in ("data", "results", "items", "rows", "companies"):
-            v = payload.get(key)
-            if isinstance(v, list):
-                return [r for r in v if isinstance(r, dict)]
-            if isinstance(v, dict):
-                for inner_key in ("data", "items", "rows", "results"):
-                    inner = v.get(inner_key)
-                    if isinstance(inner, list):
-                        return [r for r in inner if isinstance(r, dict)]
-    return []
+    async def _annual_reports(self, cmpy_id: str) -> list[tuple[str, str]]:
+        if not cmpy_id:
+            return []
+        async with build_http_client(
+            base_url=self.PSE_BASE, headers=self._headers()
+        ) as client:
+            try:
+                resp = await client.post(
+                    "/companyDisclosures/search.ax",
+                    data={
+                        "keyword": cmpy_id,
+                        "tmplNm": "Annual Report",
+                        "sortType": "date",
+                        "dateSortType": "DESC",
+                        "cmpySortType": "ASC",
+                        "pageNo": "",
+                    },
+                )
+            except (httpx.TransportError, httpx.TimeoutException):
+                return []
+            if resp.status_code != 200:
+                return []
+            return _parse_disclosure_rows(resp.text or "")
+
+    async def _disclosure_files(
+        self, client: httpx.AsyncClient, edge_no: str
+    ) -> tuple[str | None, list[tuple[str, str]]]:
+        try:
+            resp = await client.get(
+                "/openDiscViewer.do", params={"edge_no": edge_no}
+            )
+        except (httpx.TransportError, httpx.TimeoutException):
+            return None, []
+        if resp.status_code != 200:
+            return None, []
+        html = resp.text or ""
+        company = re.search(r"<h2>(.*?)</h2>", html, re.S)
+        company_name = _strip_tags(company.group(1)) if company else None
+        attachments = [
+            (fid, _strip_tags(label))
+            for fid, label in re.findall(
+                r'<option value="(\d+)">(.*?)</option>', html, re.S
+            )
+        ]
+        return company_name, attachments
+
+    def _to_details(
+        self,
+        symbol: str,
+        cmpy_id: str,
+        display_name: str,
+        fields: dict[str, str],
+    ) -> CompanyDetails:
+        inc_date = _parse_ph_date(fields.get("Incorporation Date"))
+        sector = fields.get("Sector")
+        subsector = fields.get("Subsector")
+        sic_codes = [s for s in dict.fromkeys([sector, subsector]) if s]
+        return CompanyDetails(
+            id=symbol,
+            name=display_name or fields.get("Company Name") or symbol,
+            country="PH",
+            legal_form=sector,
+            status="active",
+            incorporation_date=inc_date,
+            registered_address=fields.get("Business Address"),
+            capital_amount=None,
+            capital_currency="PHP",
+            sic_codes=sic_codes,
+            identifiers=[
+                RegistryIdentifier(
+                    type=IdentifierType.COMPANY_NUMBER,
+                    value=symbol,
+                    label="PSE Company Symbol",
+                ),
+            ],
+            raw={"cmpy_id": cmpy_id, **fields},
+            source_url=(
+                f"{self.PSE_BASE}/companyPage/stockData.do?cmpy_id={cmpy_id}"
+            ),
+        )
 
 
-def _pick(r: dict[str, Any], *keys: str) -> Any:
-    for k in keys:
-        v = r.get(k)
-        if v not in (None, ""):
-            return v
+def _parse_info_table(html: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for row in re.findall(r"<tr>.*?</tr>", html, re.S):
+        cells = [
+            _strip_tags(c)
+            for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.S)
+        ]
+        cells = [c for c in cells if c]
+        if len(cells) == 2 and len(cells[0]) < 60:
+            fields[cells[0]] = cells[1]
+    return fields
+
+
+def _parse_disclosure_rows(html: str) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for tr in re.findall(r"<tr>.*?</tr>", html, re.S):
+        if "openPopup" not in tr:
+            continue
+        edge = re.search(r"openPopup\('([^']+)'\)", tr)
+        if not edge:
+            continue
+        cells = [
+            _strip_tags(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
+        ]
+        announce = cells[1] if len(cells) > 1 else ""
+        rows.append((edge.group(1), announce))
+    return rows
+
+
+def _pick_annual_pdf(
+    attachments: list[tuple[str, str]],
+) -> tuple[str | None, str]:
+    if not attachments:
+        return None, ""
+    for fid, label in attachments:
+        lo = label.lower()
+        if "17-a" in lo or "17a" in lo or "annual report" in lo:
+            return fid, label
+    fid, label = attachments[0]
+    return fid, label
+
+
+def _fiscal_year(label: str, announce: str) -> int | None:
+    if label:
+        m = _FY_RE.search(label)
+        if m:
+            year = next((g for g in m.groups() if g), None)
+            if year:
+                return int(year)
+        lead = _LEADING_YEAR_RE.match(label)
+        if lead:
+            return int(lead.group(1))
+    years = _ANNOUNCE_YEAR_RE.findall(announce or "")
+    if years:
+        return int(years[-1]) - 1
     return None
 
 
-def _normalize_status(s: Any) -> str | None:
+def _parse_ph_date(s: Any) -> date | None:
     if not s:
         return None
-    raw = str(s)
-    lo = raw.lower()
-    if any(tok in lo for tok in ("active", "existing", "registered", "operating")):
-        return "active"
-    if any(
-        tok in lo
-        for tok in ("revoked", "suspended", "dissolved", "delisted", "expired")
-    ):
-        return "ceased"
-    return raw
-
-
-def _detect_pse_symbol(record: dict[str, Any] | None) -> str | None:
-    """Return a PSE ticker symbol if the SEC record marks the company as listed.
-
-    SEC iView exposes the symbol under a handful of keys depending on the
-    record shape; we only return a value that looks like a real ticker
-    (1-6 chars, A-Z then A-Z0-9). Otherwise we'd be guessing.
-    """
-    if not record:
+    raw = str(s).strip()
+    if not raw:
         return None
-    candidate = _pick(
-        record, "pseSymbol", "PSESymbol", "stockSymbol", "tickerSymbol", "symbol", "ticker"
-    )
-    if not candidate:
-        return None
-    raw = str(candidate).strip().upper()
-    if _TICKER_RE.match(raw):
-        return raw
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        pass
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
+    if m:
+        month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
     return None
-
-
-def _record_to_details(
-    r: dict[str, Any], sec_no: str, sec_base: str
-) -> CompanyDetails:
-    display_name = str(
-        _pick(r, "company_name", "companyName", "name", "title") or ""
-    ).strip()
-
-    address = _pick(
-        r,
-        "principalOffice",
-        "registeredAddress",
-        "officeAddress",
-        "address",
-    )
-    capital = _coerce_float(
-        _pick(
-            r,
-            "authorizedCapital",
-            "authorized_capital",
-            "paidUpCapital",
-            "capitalStock",
-            "capital",
-        )
-    )
-    legal_form = _pick(
-        r, "companyType", "company_type", "corporationType", "legalForm"
-    )
-    status = _normalize_status(
-        _pick(r, "companyStatus", "company_status", "status")
-    )
-    inc_date = _parse_ph_date(
-        _pick(
-            r,
-            "registrationDate",
-            "registration_date",
-            "dateRegistered",
-            "incorporationDate",
-        )
-    )
-    industry = _pick(
-        r, "industryCode", "industry_code", "psicCode", "psic", "industry"
-    )
-    tin = _pick(r, "tin", "TIN", "taxIdentificationNumber")
-
-    identifiers: list[RegistryIdentifier] = [
-        RegistryIdentifier(
-            type=IdentifierType.COMPANY_NUMBER,
-            value=sec_no,
-            label="SEC Registration Number",
-        ),
-    ]
-    if tin:
-        identifiers.append(
-            RegistryIdentifier(
-                type=IdentifierType.VAT,
-                value=str(tin).strip(),
-                label="TIN",
-            )
-        )
-
-    return CompanyDetails(
-        id=sec_no,
-        name=display_name,
-        country="PH",
-        legal_form=str(legal_form) if legal_form else None,
-        status=status,
-        incorporation_date=inc_date,
-        registered_address=str(address) if address else None,
-        capital_amount=capital,
-        capital_currency="PHP",
-        sic_codes=[str(industry)] if industry else [],
-        identifiers=identifiers,
-        raw=r,
-        source_url=f"{sec_base}/#/company/{sec_no}",
-    )

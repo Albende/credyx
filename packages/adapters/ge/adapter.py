@@ -1,33 +1,37 @@
-"""Georgia adapter — NAPR (National Agency of Public Registry) public portal.
+"""Georgia adapter — NAPR business register + SARAS reporting portal.
 
-Source coverage:
+Two free, key-free public sources are stitched together:
 
-* https://enreg.reestri.gov.ge/main.php — the bilingual (ქართული /
-  English) public business register operated by NAPR. The site renders
-  a search form whose results page lists matching legal persons; each
-  result links to a per-company detail page keyed by the 9-digit
-  Identification Number (`s_legal_person_idnumber`). The page returns
-  the registered name (Georgian + Latin transliteration where filed),
-  legal form, status, registered address, declared capital, and
-  directors / managers. No authentication, no JSON contract — pure
-  HTML scrape.
+* ``https://enreg.reestri.gov.ge/main.php`` — the NAPR (National Agency of
+  Public Registry) business register. Its search form POSTs
+  ``c=search&m=find_legal_persons`` and server-renders a result table with
+  the 9-digit Identification Number, registered name, legal form, and
+  status. This is the authoritative existence + status check and covers
+  every registered legal person. The per-company detail page
+  (``show_legal_person``) is CAPTCHA-gated and is deliberately not used.
 
-  Name search is JS-rendered: a plain GET to the result endpoint
-  returns the page shell with an empty `<div id="search_result">` and
-  populates it via XHR fired from the bundled jQuery. We drive the
-  search through the shared `BrowserPool` (Playwright/Chromium) so the
-  XHR runs and we can read the post-render DOM. Direct-ID lookup is
-  still done with plain httpx because that endpoint server-renders.
-* https://rs.ge/ — Revenue Service VAT validator. Public but partial
-  (no per-company details exposed; not used here).
-* https://gse.ge/ — Georgian Stock Exchange. Limited free coverage of
-  listed-issuer disclosures; out of scope for the free MVP.
+* ``https://reportal.ge`` — the public Reporting Portal operated by the
+  Service for Accounting, Reporting and Auditing Supervision (SARAS),
+  where category I–IV entities file annual financial statements. Three
+  key-free endpoints are used:
+    - ``/en/Reports/GetProfileData?q=<id>`` → JSON profile (registration
+      date, address, phone, web, activity, directors) used to enrich the
+      registry record without hitting the NAPR captcha.
+    - ``/en/Reports/OrgReports?q=<id>`` → the company-specific list of
+      reporting years that actually have filings.
+    - ``/en/Reports/OrgReportsByYear?q=<id>&year=<yyyy>`` → per-year filing
+      page whose audit tab exposes the auditor + reporting year.
+
+  The financial-statement PDFs themselves are released only after an SMS
+  one-time-code flow, so ``fetch_financials`` returns real per-company
+  filing metadata (year, type, currency, source_url, auditor) but never a
+  ``document_url`` — the document does not download key-free.
 
 Identifier:
 - VAT / COMPANY_NUMBER → "Identification Number" (საიდენტიფიკაციო
-  ნომერი), always 9 digits. The same number serves as the corporate
-  tax ID, the VAT registration ID, and the commercial registry primary
-  key. NAPR does not issue a separate company number.
+  ნომერი), always 9 digits. The same number serves as the corporate tax
+  ID, the VAT registration ID, and the commercial registry primary key.
+  NAPR does not issue a separate company number.
 """
 from __future__ import annotations
 
@@ -35,17 +39,12 @@ import logging
 import re
 from datetime import date, datetime
 from html import unescape
-from html.parser import HTMLParser
 from typing import Any
 
 import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.browser import get_browser_pool
-from packages.adapters._base.errors import (
-    BlockedByRegistryError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -53,6 +52,7 @@ from packages.shared.models import (
     CompanyDetails,
     CompanyMatch,
     Director,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -65,79 +65,30 @@ _ID_RE = re.compile(r"^\d{9}$")
 # Bank of Georgia — a well-known active legal person used as a liveness probe.
 _HEALTH_PROBE_ID = "204378869"
 
-# Field labels NAPR may render in Georgian, Latin transliteration, or English.
-# Matching is case-insensitive and stripped of trailing colons.
-_LABEL_NAME = (
-    "დასახელება",
-    "სუბიექტის დასახელება",
-    "სახელწოდება",
-    "name",
-    "company name",
-    "legal person",
-)
-_LABEL_LEGAL_FORM = (
-    "სამართლებრივი ფორმა",
-    "ორგანიზაციულ-სამართლებრივი ფორმა",
-    "legal form",
-    "form",
-)
-_LABEL_STATUS = (
-    "სტატუსი",
-    "მდგომარეობა",
-    "status",
-    "state",
-)
-_LABEL_ADDRESS = (
-    "მისამართი",
-    "იურიდიული მისამართი",
-    "address",
-    "legal address",
-)
-_LABEL_CAPITAL = (
-    "კაპიტალი",
-    "საწესდებო კაპიტალი",
-    "capital",
-    "share capital",
-)
-_LABEL_REG_DATE = (
-    "რეგისტრაციის თარიღი",
-    "დაფუძნების თარიღი",
-    "registration date",
-    "incorporation date",
-)
-_LABEL_ID = (
-    "საიდენტიფიკაციო ნომერი",
-    "ს/ნ",
-    "identification number",
-    "id number",
-)
-_LABEL_DIRECTOR = (
-    "ხელმძღვანელი",
-    "დირექტორი",
-    "მენეჯერი",
-    "მმართველი",
-    "director",
-    "manager",
-    "head",
-)
-
 _STATUS_ACTIVE_TOKENS = (
-    "მოქმედი",  # "acting"
-    "აქტიური",  # "active"
+    "მოქმედი",
+    "აქტიური",
     "active",
     "registered",
 )
 _STATUS_INACTIVE_TOKENS = (
-    "გაუქმებული",  # "cancelled"
-    "ლიკვიდირებული",  # "liquidated"
-    "შეჩერებული",  # "suspended"
-    "გადახდისუუნარო",  # "insolvent"
+    "გაუქმებული",
+    "ლიკვიდირებული",
+    "შეჩერებული",
+    "გადახდისუუნარო",
     "liquidated",
     "cancelled",
     "suspended",
     "inactive",
     "dissolved",
 )
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_TD_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.DOTALL | re.IGNORECASE)
+_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
+_RECORD_RE = re.compile(r"show_legal_person\((\d+)\)")
+_YEAR_RE = re.compile(r'data-year="(\d{4})"')
+_SARAS_REG_RE = re.compile(r"SARAS-A-\d+")
 
 
 def _normalize_id(value: str) -> str:
@@ -152,7 +103,7 @@ def _normalize_id(value: str) -> str:
 
 
 def _parse_ge_date(value: str | None) -> date | None:
-    """NAPR renders dates as DD.MM.YYYY or DD/MM/YYYY; tolerate ISO too."""
+    """Reportal renders ISO dates; NAPR uses DD.MM.YYYY — tolerate both."""
     if not value:
         return None
     s = value.strip()
@@ -181,36 +132,69 @@ def _classify_status(raw: str | None) -> str | None:
     return raw.strip() or None
 
 
-def _parse_capital(raw: str | None) -> tuple[float | None, str | None]:
-    """Pull an amount + currency out of a free-form capital string.
+def _cell_text(fragment: str) -> str:
+    return re.sub(r"\s+", " ", unescape(_TAG_RE.sub(" ", fragment))).strip()
 
-    NAPR records capital like "100 000,00 GEL" or "5000 ლარი" — we keep
-    the parser permissive about thousand separators and decimal commas.
+
+def _parse_search_rows(html: str) -> list[dict[str, Any]]:
+    """Pull legal-person rows out of the NAPR find_legal_persons table.
+
+    Columns render as ``[info icon, id code, personal no, name, legal
+    form, status]``. Rows without a 9-digit id code (individual persons
+    keyed only on a personal number) are skipped — the adapter targets
+    legal persons.
     """
-    if not raw:
-        return None, None
-    currency: str | None = None
-    if re.search(r"\b(GEL|gel|₾|ლარ)", raw):
-        currency = "GEL"
-    elif re.search(r"\bUSD\b", raw, re.IGNORECASE):
-        currency = "USD"
-    elif re.search(r"\bEUR\b", raw, re.IGNORECASE):
-        currency = "EUR"
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row_match in _ROW_RE.finditer(html or ""):
+        row_html = row_match.group(1)
+        record = _RECORD_RE.search(row_html)
+        if not record:
+            continue
+        cells = [_cell_text(c) for c in _TD_RE.findall(row_html)]
+        id_index = next(
+            (i for i, c in enumerate(cells) if _ID_RE.match(c.replace(" ", ""))),
+            None,
+        )
+        if id_index is None:
+            continue
+        id_code = cells[id_index].replace(" ", "")
+        if id_code in seen:
+            continue
+        seen.add(id_code)
 
-    digits = re.sub(r"[^\d,.\s]", "", raw).strip()
-    if not digits:
-        return None, currency
-    # Treat the last separator as decimal; flatten thousands.
-    last_comma = digits.rfind(",")
-    last_dot = digits.rfind(".")
-    if last_comma > last_dot:
-        normalized = digits.replace(".", "").replace(" ", "").replace(",", ".")
-    else:
-        normalized = digits.replace(",", "").replace(" ", "")
-    try:
-        return float(normalized), currency
-    except ValueError:
-        return None, currency
+        def _at(offset: int) -> str | None:
+            idx = id_index + offset
+            return cells[idx] if 0 <= idx < len(cells) else None
+
+        out.append(
+            {
+                "id": id_code,
+                "record_id": record.group(1),
+                "name": _at(2) or "",
+                "legal_form": _at(3),
+                "status_raw": _at(4),
+            }
+        )
+    return out
+
+
+def _reportal_directors(payload: dict[str, Any]) -> list[Director]:
+    raw = payload.get("directors")
+    if not raw:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    out: list[Director] = []
+    seen: set[str] = set()
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        name = f"{entry.get('FirstName', '') or ''} {entry.get('LastName', '') or ''}".strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(Director(name=name, role=entry.get("PersonType") or None))
+    return out
 
 
 class GEAdapter(CountryAdapter):
@@ -222,12 +206,13 @@ class GEAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    BASE_URL = "https://enreg.reestri.gov.ge"
-    SEARCH_PATH = "/main.php"
+    NAPR_BASE = "https://enreg.reestri.gov.ge"
+    NAPR_PATH = "/main.php"
+    REPORTAL_BASE = "https://reportal.ge"
 
-    def _client(self) -> httpx.AsyncClient:
+    def _napr_client(self) -> httpx.AsyncClient:
         return build_http_client(
-            base_url=self.BASE_URL,
+            base_url=self.NAPR_BASE,
             headers={
                 "Accept": "text/html,application/xhtml+xml",
                 "Accept-Language": "ka,en;q=0.7,ru;q=0.5",
@@ -235,127 +220,85 @@ class GEAdapter(CountryAdapter):
             timeout=25.0,
         )
 
-    async def _render_search_page(self, query: str) -> str:
-        """Drive NAPR's JS-rendered search form via the shared browser pool.
-
-        enreg.reestri.gov.ge fires an XHR on submit and re-paints the
-        `#search_result` block; a plain httpx GET only sees the empty
-        shell. We navigate, fill the legal-person name field, submit,
-        and wait for the result container to populate.
-        """
-        url = (
-            f"{self.BASE_URL}{self.SEARCH_PATH}"
-            "?c=app&m=show_legal_person_form"
+    def _reportal_client(self) -> httpx.AsyncClient:
+        return build_http_client(
+            base_url=self.REPORTAL_BASE,
+            headers={"Accept": "application/json, text/html"},
+            timeout=25.0,
         )
-        pool = get_browser_pool()
-        async with pool.acquire(locale="ka-GE") as ctx:
-            page = await ctx.new_page()
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                # Fill whichever input the registry exposes for the legal
-                # person name. The portal has shipped slightly different
-                # field names across revisions; try the common ones in
-                # order and stop at the first that exists.
-                filled = False
-                for selector in (
-                    "input[name='s_legal_person_name']",
-                    "input#s_legal_person_name",
-                    "input[name='legal_person_name']",
-                ):
-                    if await page.locator(selector).count():
-                        await page.fill(selector, query)
-                        filled = True
-                        break
-                if not filled:
-                    raise BlockedByRegistryError(
-                        "enreg.reestri.gov.ge search form not found — page "
-                        "markup may have changed."
-                    )
-                # Submit. NAPR's form is keyed on its own submit button;
-                # falling back to Enter covers minor UI variants.
-                submit = page.locator("input[type=submit], button[type=submit]")
-                if await submit.count():
-                    await submit.first.click()
-                else:
-                    await page.keyboard.press("Enter")
-                # Wait for either the result table or an explicit "no
-                # results" indicator.
-                try:
-                    await page.wait_for_selector(
-                        "table tr a[href*='show_legal_person'], #search_result",
-                        timeout=20_000,
-                    )
-                except Exception:
-                    # Falling back to whatever the DOM is now — extraction
-                    # tolerates an empty page.
-                    pass
-                return await page.content()
-            finally:
-                await page.close()
+
+    async def _napr_search(
+        self, *, idnumber: str = "", name: str = ""
+    ) -> list[dict[str, Any]]:
+        data = {
+            "c": "search",
+            "m": "find_legal_persons",
+            "s_legal_person_idnumber": idnumber,
+            "s_legal_person_name": name,
+            "s_legal_person_form": "0",
+            "s_legal_person_email": "",
+        }
+        async with self._napr_client() as client:
+            resp = await client.post(self.NAPR_PATH, data=data)
+            resp.raise_for_status()
+            return _parse_search_rows(resp.text)
+
+    async def _reportal_profile(self, legal_code: str) -> dict[str, Any]:
+        try:
+            async with self._reportal_client() as client:
+                resp = await get_with_retry(
+                    client,
+                    "/en/Reports/GetProfileData",
+                    params={"q": legal_code},
+                )
+            if resp.status_code != 200:
+                return {}
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("GE reportal profile fetch failed for %s: %s", legal_code, exc)
+            return {}
+        return payload if isinstance(payload, dict) and payload.get("id_code") else {}
 
     async def health_check(self) -> AdapterHealth:
         try:
-            async with self._client() as client:
-                resp = await get_with_retry(
-                    client,
-                    self.SEARCH_PATH,
-                    params={
-                        "c": "app",
-                        "m": "show_legal_person",
-                        "legal_code": _HEALTH_PROBE_ID,
-                    },
-                )
-                resp.raise_for_status()
-                page_text = _decode_response(resp)
+            rows = await self._napr_search(idnumber=_HEALTH_PROBE_ID)
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={
-                    "search": False,
-                    "lookup": False,
-                    "financials": False,
-                },
+                capabilities={"search": False, "lookup": False, "financials": False},
                 requires_api_key=False,
                 api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
-        record = _extract_company_record(page_text)
-        if not record.get("name"):
+        if not any(r["id"] == _HEALTH_PROBE_ID for r in rows):
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={
-                    "search": True,
-                    "lookup": True,
-                    "financials": False,
-                },
+                capabilities={"search": True, "lookup": True, "financials": False},
                 requires_api_key=False,
                 api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=(
-                    "enreg.reestri.gov.ge responded but probe ID returned no "
-                    "structured fields; page markup may have changed."
+                    "enreg.reestri.gov.ge responded but the probe ID returned no "
+                    "row; result markup may have changed."
                 ),
             )
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={
-                "search": True,
-                "lookup": True,
-                "financials": False,
-            },
+            capabilities={"search": True, "lookup": True, "financials": True},
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Name search + ID lookup via NAPR HTML. No centralized free "
-                "financial dataset."
+                "NAPR register (search + lookup) enriched by the SARAS reportal.ge "
+                "portal; financials return filing metadata, statement PDFs are "
+                "SMS-gated."
             ),
         )
 
@@ -366,17 +309,14 @@ class GEAdapter(CountryAdapter):
         if not query:
             return []
 
-        page_text = await self._render_search_page(query)
-        results = _extract_search_results(page_text)
+        rows = await self._napr_search(name=query)
         out: list[CompanyMatch] = []
-        for item in results[:limit]:
-            legal_code = item.get("id")
-            if not legal_code:
-                continue
+        for row in rows[:limit]:
+            legal_code = row["id"]
             out.append(
                 CompanyMatch(
                     id=legal_code,
-                    name=item.get("name", ""),
+                    name=row.get("name", ""),
                     country=self.country_code,
                     identifiers=[
                         RegistryIdentifier(
@@ -385,10 +325,9 @@ class GEAdapter(CountryAdapter):
                             label="Identification Number",
                         ),
                     ],
-                    address=item.get("address"),
-                    status=_classify_status(item.get("status_raw")),
+                    status=_classify_status(row.get("status_raw")),
                     source_url=(
-                        f"{self.BASE_URL}{self.SEARCH_PATH}?c=app&"
+                        f"{self.NAPR_BASE}{self.NAPR_PATH}?c=app&"
                         f"m=show_legal_person&legal_code={legal_code}"
                     ),
                 )
@@ -404,45 +343,31 @@ class GEAdapter(CountryAdapter):
                 f"(9-digit Identification Number), got {id_type}"
             )
         legal_code = _normalize_id(value)
-        params = {
-            "c": "app",
-            "m": "show_legal_person",
-            "legal_code": legal_code,
-        }
-        async with self._client() as client:
-            resp = await get_with_retry(client, self.SEARCH_PATH, params=params)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
 
-        record = _extract_company_record(page_text)
-        if not record.get("name"):
-            low = page_text.lower()
-            if any(token in low for token in ("not found", "ვერ მოიძებნა", "არ არსებობს")):
-                return None
+        rows = await self._napr_search(idnumber=legal_code)
+        row = next((r for r in rows if r["id"] == legal_code), None)
+        if row is None:
             return None
 
-        capital_amount, capital_currency = _parse_capital(record.get("capital"))
-        directors = [
-            Director(name=d) for d in record.get("directors", []) if d
-        ]
+        profile = await self._reportal_profile(legal_code)
 
-        source_url = (
-            f"{self.BASE_URL}{self.SEARCH_PATH}?c=app&"
-            f"m=show_legal_person&legal_code={legal_code}"
-        )
+        directors = _reportal_directors(profile)
+        website = (profile.get("web") or "").strip() or None
+        phone = (profile.get("phone") or "").strip() or None
+        address = (profile.get("address") or "").strip() or None
+        incorporation = _parse_ge_date(profile.get("registration_date"))
+        legal_form = row.get("legal_form") or profile.get("form") or None
 
         return CompanyDetails(
             id=legal_code,
-            name=record["name"],
+            name=row.get("name") or profile.get("name") or "",
             country=self.country_code,
-            legal_form=record.get("legal_form"),
-            status=_classify_status(record.get("status_raw")),
-            incorporation_date=_parse_ge_date(record.get("registration_date")),
-            registered_address=record.get("address"),
-            capital_amount=capital_amount,
-            capital_currency=capital_currency or "GEL",
+            legal_form=legal_form,
+            status=_classify_status(row.get("status_raw")),
+            incorporation_date=incorporation,
+            registered_address=address,
+            website=website,
+            phone=phone,
             identifiers=[
                 RegistryIdentifier(
                     type=IdentifierType.VAT,
@@ -452,159 +377,87 @@ class GEAdapter(CountryAdapter):
             ],
             directors=directors,
             raw={
-                "source": "enreg.reestri.gov.ge/show_legal_person",
-                "fields": record,
+                "napr": row,
+                "reportal_profile": profile or None,
             },
-            source_url=source_url,
+            source_url=(
+                f"{self.NAPR_BASE}{self.NAPR_PATH}?c=app&"
+                f"m=show_legal_person&legal_code={legal_code}"
+            ),
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # NAPR does not publish balance sheets; the Service for Accounting,
-        # Reporting and Auditing Supervision (saras.gov.ge) operates a
-        # reporting portal whose public search is captcha-gated and whose
-        # documents are PDFs. Out of scope for the free MVP — surface the
-        # absence honestly rather than fabricate filings.
-        return []
+        legal_code = _normalize_id(company_id)
 
+        async with self._reportal_client() as client:
+            resp = await get_with_retry(
+                client, "/en/Reports/OrgReports", params={"q": legal_code}
+            )
+            if resp.status_code != 200:
+                return []
+            reporting_years = sorted(
+                {int(y) for y in _YEAR_RE.findall(resp.text)}, reverse=True
+            )
+            if not reporting_years:
+                return []
 
-def _decode_response(resp: httpx.Response) -> str:
-    """Decode the response body as text, preferring UTF-8 then cp1251.
+            report_url = f"{self.REPORTAL_BASE}/en/Reports/Report?q={legal_code}"
+            filings: list[FinancialFiling] = []
+            for year in reporting_years[: max(years, 1)]:
+                audit = await self._year_audit(client, legal_code, year)
+                filings.append(
+                    FinancialFiling(
+                        company_id=legal_code,
+                        year=year,
+                        type=FilingType.ANNUAL_REPORT,
+                        currency="GEL",
+                        structured_data=audit or None,
+                        document_url=None,
+                        source_url=report_url,
+                    )
+                )
+        return filings
 
-    enreg.reestri.gov.ge declares UTF-8 in modern responses but a few
-    legacy endpoints have surfaced as cp1251; we try both before falling
-    back to httpx's guess.
-    """
-    body = resp.content
-    if not body:
-        return ""
-    for encoding in ("utf-8", "cp1251", "windows-1251"):
+    async def _year_audit(
+        self, client: httpx.AsyncClient, legal_code: str, year: int
+    ) -> dict[str, Any]:
+        """Parse the public audit tab of a per-year filing page.
+
+        Category III/IV filers may not be audited, in which case the tab is
+        empty and we return ``{}`` — the filing metadata is still valid.
+        """
         try:
-            return body.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return resp.text
+            resp = await get_with_retry(
+                client,
+                "/en/Reports/OrgReportsByYear",
+                params={"q": legal_code, "year": year},
+            )
+        except httpx.HTTPError:
+            return {}
+        if resp.status_code != 200:
+            return {}
 
+        html = resp.text
+        audit_start = html.find('id="reports-audit"')
+        if audit_start == -1:
+            return {}
+        audit_end = html.find('id="reports-group"', audit_start)
+        block = html[audit_start : audit_end if audit_end != -1 else len(html)]
 
-class _CellParser(HTMLParser):
-    """Flatten every <td>/<th> cell into a list of stripped text strings."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.cells: list[str] = []
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag in ("td", "th"):
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self.cells.append(text)
-            self._in_cell -= 1
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-def _match_label(cell: str, candidates: tuple[str, ...]) -> bool:
-    low = cell.strip().rstrip(":").strip().lower()
-    return any(label.lower() in low for label in candidates)
-
-
-def _extract_company_record(html: str) -> dict[str, Any]:
-    """Pull the legal-person fields out of the show_legal_person page."""
-    if not html:
-        return {}
-
-    parser = _CellParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("GE enreg HTML parse failed: %s", exc)
-        return {}
-
-    cells = [c for c in parser.cells if c]
-    record: dict[str, Any] = {}
-    directors: list[str] = []
-    for label_cell, value_cell in zip(cells, cells[1:]):
-        if not value_cell or value_cell == label_cell:
-            continue
-        if "name" not in record and _match_label(label_cell, _LABEL_NAME):
-            record["name"] = value_cell
-        elif "legal_form" not in record and _match_label(label_cell, _LABEL_LEGAL_FORM):
-            record["legal_form"] = value_cell
-        elif "status_raw" not in record and _match_label(label_cell, _LABEL_STATUS):
-            record["status_raw"] = value_cell
-        elif "address" not in record and _match_label(label_cell, _LABEL_ADDRESS):
-            record["address"] = value_cell
-        elif "capital" not in record and _match_label(label_cell, _LABEL_CAPITAL):
-            record["capital"] = value_cell
-        elif "registration_date" not in record and _match_label(label_cell, _LABEL_REG_DATE):
-            record["registration_date"] = value_cell
-        elif _match_label(label_cell, _LABEL_DIRECTOR):
-            if value_cell not in directors:
-                directors.append(value_cell)
-
-    if directors:
-        record["directors"] = directors
-    return record
-
-
-_RESULT_LINK_RE = re.compile(
-    r"legal_code=(\d{9})[^>]*>\s*([^<]+?)\s*<", re.IGNORECASE
-)
-
-
-def _extract_search_results(html: str) -> list[dict[str, Any]]:
-    """Pull (id, name) tuples out of the result-list HTML.
-
-    The NAPR result page renders each match as a row whose first cell is
-    an anchor pointing back to `show_legal_person&legal_code=<id>`. We
-    extract those plus the surrounding row text for status/address. The
-    parser is forgiving: if the layout changes, callers fall back to
-    looking up known IDs directly.
-    """
-    if not html:
-        return []
-
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for match in _RESULT_LINK_RE.finditer(html):
-        legal_code = match.group(1)
-        if legal_code in seen:
-            continue
-        seen.add(legal_code)
-        name = unescape(match.group(2)).strip()
-        out.append({"id": legal_code, "name": name})
-
-    if out:
-        return out
-
-    # Fallback: walk the table cells and pair 9-digit IDs with the
-    # adjacent name cell. Useful when the registry renders IDs as plain
-    # text instead of anchors.
-    parser = _CellParser()
-    try:
-        parser.feed(html)
-    except Exception:
-        return out
-    cells = [c for c in parser.cells if c]
-    for idx, cell in enumerate(cells):
-        if _ID_RE.match(cell.replace(" ", "")) and cell not in seen:
-            legal_code = cell.replace(" ", "")
-            name = cells[idx - 1] if idx > 0 else ""
-            seen.add(legal_code)
-            out.append({"id": legal_code, "name": name})
-    return out
+        reg = _SARAS_REG_RE.search(block)
+        firm_id = next(
+            (m for m in re.findall(r"\b\d{9}\b", block) if m != legal_code), None
+        )
+        auditor = re.search(
+            r"AuditorDetail/\d+[^>]*>\s*([^<]+?)\s*<", block
+        )
+        result: dict[str, Any] = {}
+        if reg:
+            result["auditor_registration"] = reg.group(0)
+        if firm_id:
+            result["auditor_firm_id"] = firm_id
+        if auditor:
+            result["auditor_partner"] = auditor.group(1).strip()
+        return result

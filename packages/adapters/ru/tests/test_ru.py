@@ -191,9 +191,9 @@ async def test_search_by_name_finds_rosneft():
 async def test_fetch_financials_returns_filings_for_sberbank():
     adapter = RUAdapter()
     filings = await adapter.fetch_financials("7707083893", years=5)
-    # bo.nalog.ru indexes annual filings since 2019; Sberbank files every
-    # year. We tolerate empty (geo-block / outage) but require well-typed
-    # results when present.
+    # Sberbank (a credit institution) discloses annual Форма 102 results
+    # via cbr.ru every year. We tolerate empty (outage) but require
+    # well-typed results when present.
     for f in filings:
         assert f.currency == "RUB"
         assert f.company_id == "7707083893"

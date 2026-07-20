@@ -5,10 +5,18 @@
 - `VAT` (Partita IVA) — 11 digits, optional `IT` prefix. Last digit is a
   Luhn-style mod-10 check (odd positions summed as-is; even positions
   doubled with the digits of the product summed individually).
-- `COMPANY_NUMBER` (Codice Fiscale) — for legal entities this is the same
-  11-digit string as the Partita IVA. The 16-character individual Codice
-  Fiscale is out of scope.
-- `LEI` — Legal Entity Identifier; used to pivot into ESEF filings.
+- `COMPANY_NUMBER` (Codice Fiscale) — the 11-digit Registro Imprese number.
+  For small firms it equals the Partita IVA, but large companies and VAT
+  groups have a *different* active P.IVA (e.g. Eni: CF `00484960588`, active
+  P.IVA `00905811006`). GLEIF and filings.xbrl.org are keyed on the **CF /
+  Registro Imprese number**, so use the CF as the canonical identifier — it
+  resolves the LEI and drives both lookup and financials. The 16-character
+  individual Codice Fiscale (sole proprietors) is out of scope.
+- `LEI` — Legal Entity Identifier. A supported `lookup_by_identifier` type
+  (resolved directly against the GLEIF single-record endpoint) and also
+  accepted as the `company_id` for `fetch_financials`, which is what
+  `search_by_name` returns for entities whose `registeredAs` is not an
+  11-digit number.
 - `REA` (Repertorio Economico Amministrativo) — per-chamber, only via paid
   InfoCamere — not supported.
 
@@ -53,7 +61,10 @@ and filings.xbrl.org are generous but respect the same ceiling.
   Partita IVA / Codice Fiscale surfaced from `registeredAs`. Firms with no
   LEI are only in the paid Registro Imprese.
 - ✅ **VAT lookup** via VIES (authoritative name + address), enriched with
-  the GLEIF LEI and legal form.
+  the GLEIF LEI and legal form. Also supports **LEI lookup** directly via
+  GLEIF. When VIES reports a Codice Fiscale as an invalid VAT (common for
+  large firms whose active P.IVA differs, or VAT-group members), GLEIF
+  supplies the authoritative name, address, status, and legal form.
 - ✅ **Financials** — real filed ESEF iXBRL annual reports via
   filings.xbrl.org for listed issuers, keyed by LEI (downloadable
   `document_url`). Unlisted entities have no free filed accounts and

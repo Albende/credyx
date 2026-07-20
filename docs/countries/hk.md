@@ -1,82 +1,87 @@
-# 🇭🇰 Hong Kong — Companies Registry (ICRIS) + HKEX
+# 🇭🇰 Hong Kong — HKEXnews (listed issuers) + optional OpenCorporates
 
 ## Identifiers
 
-- `COMPANY_NUMBER` — **CR Number**, 7 digits, zero-padded
-  (e.g. `0654177` = Tencent Holdings, `1299985` = AIA Group).
-- `OTHER` — **BR Number** (Business Registration, IRD), 8 digits.
-  Accepted for normalization but lookup is not free — IRD's BR Number
-  Enquiry is paid. `lookup_by_identifier(OTHER, …)` raises
-  `AdapterNotImplementedError` rather than fabricating a CR↔BR mapping.
+- `COMPANY_NUMBER` —
+  - **HKEX Stock Code** (key-free path), 5-digit zero-padded, e.g.
+    `00700` = Tencent, `00005` = HSBC Holdings, `01299` = AIA Group,
+    `00001` = CK Hutchison. This is the free unique identifier for HK
+    **listed** issuers.
+  - **CR Number** (ICRIS Companies Registry, 7-digit) is also accepted by
+    `lookup_by_identifier` / `fetch_financials` **only** when
+    `OPENCORPORATES_API_KEY` is set — ICRIS itself is not free-scrapeable.
+- `OTHER` — **BR Number** (Business Registration, IRD), 8 digits. IRD's
+  BR Number Enquiry is paid; accepted for normalization but
+  `lookup_by_identifier(OTHER, …)` raises `AdapterNotImplementedError`
+  rather than fabricating a CR↔BR mapping.
 
 ## Sources
 
-### Registry — Companies Registry "Cyber Search Centre" (ICRIS)
-- Public landing: `https://www.icris.cr.gov.hk/csci/`
-- Free tier: company name + CR number + status (active/dissolved/struck off).
-- Paid tier: full extracts and certified documents, HK$8/doc.
-- **Why we don't scrape it directly:** ICRIS is a JSF/SPA front-end that
-  ships a per-session CSRF token, a `disable-devtool` script, and an
-  Akamai bot-management interstitial. Plain `httpx` can fetch the landing
-  page (we use it for the health probe), but the search and detail
-  endpoints require browser-rendered JavaScript and the corresponding
-  paid-API products. Per project rule #2 we don't use the paid API.
+### Primary (key-free) — HKEXnews
+The Companies Registry (ICRIS / e-Services Portal) has **no free public
+API** — full extracts are HK$8/doc behind a CSRF/SPA front-end (see the
+"blocked" note below). HKEXnews, the Stock Exchange's public disclosure
+portal, exposes two stable JSON endpoints that need **no key**:
 
-### Registry — OpenCorporates HK mirror (free tier)
-- `https://api.opencorporates.com/v0.4/companies/search?jurisdiction_code=hk&q=…`
-- `https://api.opencorporates.com/v0.4/companies/hk/{cr}`
-- Free tier: 500 req/month, key required (`OPENCORPORATES_API_KEY`).
-- HK records are sourced from ICRIS and refreshed periodically.
-- Without the key, search/lookup raise `AdapterNotImplementedError` —
-  we never fabricate data.
+- **Autocomplete** — resolves a company name or stock code to the
+  issuer's internal `stockId`, 5-digit `code` and short `name`:
+  `https://www1.hkexnews.hk/search/prefix.do?callback=c&lang=EN&type=A&name={q}&market=SEHK`
+  Returns JSONP `c({"stockInfo":[{"stockId":7609,"code":"00700","name":"TENCENT"}]})`.
+  Powers `search_by_name` and `lookup_by_identifier`.
+- **Title search servlet** — the per-issuer filing list with real PDF
+  links:
+  `https://www1.hkexnews.hk/search/titleSearchServlet.do?...&market=SEHK&stockId={id}&title=Annual%20Report&fromDate=YYYYMMDD&toDate=YYYYMMDD&searchType=1&lang=EN`
+  Returns `{"result":"[{…,\"TITLE\":\"ANNUAL REPORT 2023\",\"FILE_LINK\":\"/listedco/.../…pdf\"}]"}`.
+  Filtered to `Annual Report`, this is the source for `fetch_financials`.
+  The `FILE_LINK` resolves to a real `application/pdf` (verified: Tencent
+  FY2023 ≈ 5.8 MB, HSBC FY2024 ≈ 12 MB).
 
-### Financials — HKEX (Hong Kong Exchanges and Clearing)
-- `https://www.hkexnews.hk/` / `https://www1.hkexnews.hk/`
-- Covers **listed issuers only**. Annual reports are filed by stock code
-  via the Title Search backend:
-  `https://www1.hkexnews.hk/search/titlesearch.xhtml?lang=EN&category=0&market=SEHK&stockId={hkex}&from=YYYYMMDD&to=YYYYMMDD`
-- The Title Search endpoint is a JSF page; we surface the canonical URL
-  per year so a downstream PDF / browser-pool worker can resolve the
-  actual filing list — never invent it. Unlisted HK companies return `[]`.
-- **Resolving the HKEX stock code from a CR number:** if the caller
-  passes a packed id (`CR:0654177/HKEX:0700`), we use it directly.
-  Otherwise we ask OpenCorporates for the company's identifiers and look
-  for a `Stock Exchange of Hong Kong` ticker. No ticker → `[]`.
+Coverage: HK **listed issuers** (SEHK main board). Human-facing per-issuer
+page: `https://www1.hkexnews.hk/search/titlesearch.xhtml?...&stockCode={code}`.
+
+### Optional (key-gated) — OpenCorporates HK mirror
+- `https://api.opencorporates.com/v0.4/companies/hk/{cr}` (free tier: 500
+  req/month, `OPENCORPORATES_API_KEY`).
+- Used only to (a) look up an ICRIS **CR number** and (b) resolve a CR
+  number to a HKEX stock code for `fetch_financials`. Without the key the
+  adapter is fully functional for listed issuers via stock code; CR-number
+  requests return `None` / raise rather than fabricating data.
 
 ## Auth & limits
 
-- `OPENCORPORATES_API_KEY` — optional but required for real registry
-  search / lookup. Free tier: 500 req/month.
-- `requires_api_key = False` at the adapter level — without the OC key
-  the adapter still passes a health check (in `degraded` state) and
-  `fetch_financials` still works for callers who supply the HKEX code.
-- We throttle to **30 req/min** (`rate_limit_per_minute = 30`) to be
-  polite to both ICRIS and HKEX.
-- robots.txt / ToS: ICRIS ToS prohibits redistribution of paid data —
-  we only touch the free landing page. HKEX permits read-only access to
-  the public news site.
+- **No API key required** for the primary path — search, lookup and
+  financials all work key-free for HK listed issuers.
+- `OPENCORPORATES_API_KEY` — optional; only unlocks ICRIS CR-number
+  lookups.
+- Throttled to **30 req/min** (`rate_limit_per_minute = 30`) to be polite
+  to HKEXnews.
+- robots.txt / ToS: HKEXnews permits read-only access to the public
+  disclosure site; ICRIS paid extracts are never touched.
 
 ## Test companies (REAL)
 
-- HSBC Holdings plc (UK parent, CR `0013977`); Hong Kong subsidiary
-  The Hongkong and Shanghai Banking Corporation Ltd. (CR `0263876`).
-- Tencent Holdings Ltd. (CR `0654177`, HKEX `0700`).
-- AIA Group Ltd. (CR `1299985`, HKEX `1299`).
-- CK Hutchison Holdings / Cheung Kong Holdings (CR `0001392`).
+- Tencent Holdings Ltd. — HKEX `00700` (CR `0654177`).
+- HSBC Holdings plc — HKEX `00005` (CR `0013977`).
+- AIA Group Ltd. — HKEX `01299` (CR `1299985`).
+- CK Hutchison Holdings — HKEX `00001` (CR `0001392`).
+
+Verified live (July 2026): `search_by_name("Tencent")` → `00700 TENCENT`;
+`lookup_by_identifier(COMPANY_NUMBER, "00700")` → `TENCENT`, listed;
+`fetch_financials("00700", years=3)` → FY2023/2024/2025 annual-report PDFs.
 
 ## Status
 
-✅ **Live** — health probe (ICRIS landing) + financials URL synthesis
-   for listed issuers via HKEX Title Search.
-🟡 **Partial** — `search_by_name` + `lookup_by_identifier(COMPANY_NUMBER)`
-   are powered by the free OpenCorporates HK mirror; without
-   `OPENCORPORATES_API_KEY` both raise `AdapterNotImplementedError`.
+✅ **Live (key-free)** — `search_by_name`,
+   `lookup_by_identifier(COMPANY_NUMBER = stock code)` and
+   `fetch_financials` (real annual-report PDFs) for HK listed issuers via
+   HKEXnews, no API key needed.
+🟡 **Optional (key-gated)** — ICRIS **CR-number** lookup and CR→stock-code
+   resolution require `OPENCORPORATES_API_KEY` (free tier).
 🔒 **Blocked (paid)** — full ICRIS extracts, BR-number IRD lookup, and
-   listed-issuer XBRL/PDF parsing all sit behind paid HK Government
-   gateways and are out of scope for the MVP.
+   unlisted-company financials sit behind paid HK Government gateways and
+   are out of scope for the MVP.
 
-**Recommended next step:** add a Playwright pool entry for
-`www.icris.cr.gov.hk/csci/` so the free name+CR fields can be scraped
-without the OpenCorporates dependency, and a HKEX news-feed parser so
-the `document_url` we synthesize today resolves to actual filing PDFs
-for the LLM context.
+**Recommended next step:** wire a Celery PDF-text worker so the annual-
+report `document_url` (already a real PDF) is extracted and passed to the
+LLM via `pdf_text_excerpts`; and add a GEM-market (`market=GEM`) pass to
+`_prefix_search` so GEM-listed issuers are covered alongside SEHK.

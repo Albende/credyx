@@ -1,27 +1,28 @@
 """Latvia adapter — Uzņēmumu reģistrs (UR) open data + VIES.
 
-Free, public Latvian sources usable without a paid license:
+Free, public, key-free Latvian sources:
 
-- data.gov.lv publishes the full Enterprise Register (UR) of Latvia as
-  open data under https://data.gov.lv/dati/lv/dataset/uz. The most useful
-  resource is ``register.csv`` listing every legal entity with its
-  ``regcode`` (11-digit registration number), name, legal form, address,
-  registration date and status. We stream the CSV on demand and filter
-  in-memory — there is no per-company JSON endpoint on the open-data
-  portal.
-- VIES is the cheapest way to resolve an LV VAT (LV + 11 digits) to a
-  name + registered address.
-- Annual reports are filed to UR but the full PDF extracts are paid via
-  Lursoft and are out of scope per project rules. ``fetch_financials``
-  therefore returns no documents — never mock data.
+- The Enterprise Register (UR) publishes its full open data at
+  ``https://dati.ur.gov.lv/``. ``register/register.csv`` lists every legal
+  entity (regcode, name, legal form, address, registration / termination
+  dates); we stream it and filter in memory — there is no per-company JSON
+  endpoint. (The older data.gov.lv CKAN download URL 404s as of 2026; the
+  register lives on dati.ur.gov.lv now.)
+- Latvia is unusual in publishing the *financial content* of filed annual
+  reports as open data too. ``financial_data/financial_statements.csv``
+  indexes every filed statement (regcode, year, period, currency, filing
+  type); ``balance_sheets.csv`` and ``income_statements.csv`` carry the
+  actual line items, joined by ``file_id``. ``fetch_financials`` streams
+  these and returns real ``FinancialFiling`` records with structured data
+  for the specific company — never mock numbers.
+- VIES resolves an LV VAT (``LV`` + 11 digits) to a name + address.
 
 Identifier scope:
 - COMPANY_NUMBER → ``reģistrācijas numurs``, 11 digits.
 - VAT             → ``LV`` + 11 digits.
 
-If the open-data CSV becomes unreachable or its schema changes, callers
-see the underlying httpx error or an empty result — we never fabricate
-registry data.
+If a source becomes unreachable or its schema changes, callers see the
+underlying httpx error or an empty result — we never fabricate data.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ import csv
 import io
 import re
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -41,6 +42,7 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -65,6 +67,8 @@ _VIES_NS = {
     "soap": "http://schemas.xmlsoap.org/soap/envelope/",
     "vies": "urn:ec.europa.eu:taxud:vies:services:checkVat:types",
 }
+
+_ROUNDING_FACTORS: dict[str, int] = {"ONES": 1, "THOUSANDS": 1_000, "MILLIONS": 1_000_000}
 
 
 def _normalize_regcode(value: str) -> str:
@@ -100,19 +104,17 @@ class LVAdapter(CountryAdapter):
     rate_limit_per_minute = 30
 
     VIES_URL = "https://ec.europa.eu/taxation_customs/vies/services/checkVatService"
-    # The UR "register" dataset on data.gov.lv. The CKAN-resolved CSV
-    # download URL has been stable since 2014; if the portal changes it,
-    # set LV_UR_REGISTER_CSV_URL to override at deploy time.
-    REGISTER_CSV_URL = (
-        "https://data.gov.lv/dati/dataset/0c5e1a3b-0097-45a9-afa9-7f7aaded71a0/"
-        "resource/25e80bf3-f107-4ab4-89ef-251b5b9374e9/download/register.csv"
+    REGISTER_CSV_URL = "https://dati.ur.gov.lv/register/register.csv"
+    FINANCIAL_STATEMENTS_CSV_URL = (
+        "https://dati.ur.gov.lv/financial_data/financial_statements.csv"
+    )
+    BALANCE_SHEETS_CSV_URL = "https://dati.ur.gov.lv/financial_data/balance_sheets.csv"
+    INCOME_STATEMENTS_CSV_URL = (
+        "https://dati.ur.gov.lv/financial_data/income_statements.csv"
     )
     UR_PUBLIC_PAGE = "https://www.ur.gov.lv/lv/uznemumu-meklesana/"
 
     async def health_check(self) -> AdapterHealth:
-        # VIES is the only live probe we can run without downloading a large
-        # CSV. A successful (or even cleanly invalid) VIES round-trip means
-        # the network path is good; we don't require a valid hit here.
         try:
             async with self._vies_client() as client:
                 resp = await client.post(
@@ -124,7 +126,7 @@ class LVAdapter(CountryAdapter):
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={"search": True, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": True, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=f"VIES probe failed: {str(exc)[:160]}",
             )
@@ -133,7 +135,7 @@ class LVAdapter(CountryAdapter):
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={"search": True, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": True, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=f"VIES returned HTTP {resp.status_code}.",
             )
@@ -141,11 +143,11 @@ class LVAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Search/lookup via data.gov.lv UR open-data CSV; VAT via VIES. "
-                "Annual report PDFs are paid via Lursoft and not exposed here."
+                "Search/lookup via dati.ur.gov.lv UR open-data CSV; VAT via VIES; "
+                "financials from the UR financial_data open dataset."
             ),
         )
 
@@ -184,11 +186,27 @@ class LVAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # Validate the identifier so callers get a clear error for garbage
-        # input, then return an empty list — UR annual reports are paid
-        # Lursoft extracts and we never invent filings.
-        _normalize_regcode(company_id)
-        return []
+        regcode = _normalize_regcode(company_id)
+        statements = await self._fetch_statement_index(regcode)
+        if not statements:
+            return []
+        statements.sort(key=lambda s: (s["year"], s["id"]), reverse=True)
+        selected = statements[: max(years, 1)]
+        file_ids = {s["file_id"] for s in selected}
+        balances = await self._fetch_line_items(self.BALANCE_SHEETS_CSV_URL, file_ids)
+        incomes = await self._fetch_line_items(self.INCOME_STATEMENTS_CSV_URL, file_ids)
+        filings: list[FinancialFiling] = []
+        for stmt in selected:
+            filings.append(
+                _filing_from_statement(
+                    regcode,
+                    stmt,
+                    balances.get(stmt["file_id"]),
+                    incomes.get(stmt["file_id"]),
+                    self.FINANCIAL_STATEMENTS_CSV_URL,
+                )
+            )
+        return filings
 
     async def _lookup_by_vat(self, value: str) -> CompanyDetails | None:
         vat = _normalize_lv_vat(value)
@@ -227,18 +245,68 @@ class LVAdapter(CountryAdapter):
         return None
 
     async def _fetch_register_csv(self) -> list[dict[str, str]]:
-        """Stream the UR open-data CSV and return its rows as dicts.
+        """Stream the UR open-data register CSV and return its rows as dicts.
 
-        The dataset is small enough (a few tens of MB) to hold in memory
-        for the request lifetime; the API caches structured lookup
-        results in Postgres so this isn't fetched on every call.
+        Names and addresses are quoted and may contain embedded newlines, so
+        the whole document is parsed by ``csv`` rather than split by line.
         """
-        async with build_http_client(timeout=120.0) as client:
+        async with build_http_client(timeout=180.0) as client:
             resp = await get_with_retry(client, self.REGISTER_CSV_URL)
             resp.raise_for_status()
             text = resp.text
         reader = csv.DictReader(io.StringIO(text), delimiter=";")
         return [_normalize_row(r) for r in reader]
+
+    async def _fetch_statement_index(self, regcode: str) -> list[dict[str, Any]]:
+        """Return this company's filed-statement index rows.
+
+        ``legal_entity_registration_number`` is the join key back to the
+        register; each row carries the ``file_id`` used to pull line items.
+        """
+        needle = f";{regcode};"
+        out: list[dict[str, Any]] = []
+        async for row in _stream_semicolon_csv(
+            self.FINANCIAL_STATEMENTS_CSV_URL, lambda line: needle in line
+        ):
+            if row.get("legal_entity_registration_number") != regcode:
+                continue
+            year = _to_int(row.get("year"))
+            file_id = (row.get("file_id") or "").strip()
+            if year is None or not file_id:
+                continue
+            out.append(
+                {
+                    "id": (row.get("id") or "").strip(),
+                    "file_id": file_id,
+                    "year": year,
+                    "period_start": (row.get("year_started_on") or "").strip() or None,
+                    "period_end": (row.get("year_ended_on") or "").strip() or None,
+                    "currency": (row.get("currency") or "").strip() or None,
+                    "rounding": (row.get("rounded_to_nearest") or "").strip().upper(),
+                    "employees": _to_int(row.get("employees")),
+                    "source_type": (row.get("source_type") or "").strip() or None,
+                    "source_schema": (row.get("source_schema") or "").strip() or None,
+                }
+            )
+        return out
+
+    async def _fetch_line_items(
+        self, url: str, file_ids: set[str]
+    ) -> dict[str, dict[str, str]]:
+        """Stream a line-item CSV, keyed by ``file_id`` for the wanted rows."""
+        if not file_ids:
+            return {}
+        wanted = {f";{fid};" for fid in file_ids}
+        out: dict[str, dict[str, str]] = {}
+
+        def keep(line: str) -> bool:
+            return any(token in line for token in wanted)
+
+        async for row in _stream_semicolon_csv(url, keep):
+            fid = (row.get("file_id") or "").strip()
+            if fid in file_ids:
+                out[fid] = row
+        return out
 
     async def _vies_check(self, vat: str) -> dict[str, Any] | None:
         envelope = _VIES_ENVELOPE.format(cc="LV", vat=vat)
@@ -256,6 +324,31 @@ class LVAdapter(CountryAdapter):
         )
 
 
+async def _stream_semicolon_csv(
+    url: str, keep: Callable[[str], bool]
+) -> Any:
+    """Yield ``dict`` rows from a large ``;``-delimited numeric CSV.
+
+    The financial datasets are purely numeric with no quoting or embedded
+    newlines, so a line-oriented stream with a cheap substring pre-filter
+    lets us scan a 200 MB file without holding it in memory.
+    """
+    header: list[str] | None = None
+    async with build_http_client(timeout=300.0) as client:
+        async with client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                if header is None:
+                    header = line.split(";")
+                    continue
+                if not keep(line):
+                    continue
+                values = line.split(";")
+                yield dict(zip(header, values))
+
+
 # data.gov.lv occasionally varies column casing across snapshots; normalize
 # the keys we care about to a stable lower-case set.
 _COLUMN_ALIASES: dict[str, str] = {
@@ -264,11 +357,10 @@ _COLUMN_ALIASES: dict[str, str] = {
     "regnumber": "regcode",
     "regnr": "regcode",
     "name": "name",
-    "name_before_quotes": "name_short",
-    "sepa": "name_short",
+    "name_before_quotes": "legal_form",
     "name_in_quotes": "name_short",
-    "type": "legal_form",
-    "type_text": "legal_form",
+    "type": "type_code",
+    "type_text": "legal_form_text",
     "registered": "registered",
     "registration_date": "registered",
     "terminated": "terminated",
@@ -288,10 +380,13 @@ def _normalize_row(row: dict[str, str]) -> dict[str, str]:
         norm_key = _COLUMN_ALIASES.get(key.strip().lower(), key.strip().lower())
         if value is None:
             continue
-        # First non-empty value wins so aliases don't overwrite real columns.
         if norm_key not in out or not out[norm_key]:
             out[norm_key] = value.strip()
     return out
+
+
+def _legal_form(row: dict[str, str]) -> str | None:
+    return (row.get("legal_form_text") or row.get("type_code") or "").strip() or None
 
 
 def _match_from_row(regcode: str, row_name: str, row: dict[str, str]) -> CompanyMatch:
@@ -308,7 +403,7 @@ def _match_from_row(regcode: str, row_name: str, row: dict[str, str]) -> Company
         ],
         address=_address_from_row(row),
         status=_status_from_row(row),
-        source_url=f"https://www.lursoft.lv/lapas/{regcode}/",
+        source_url=LVAdapter.UR_PUBLIC_PAGE,
     )
 
 
@@ -318,7 +413,7 @@ def _details_from_row(regcode: str, row: dict[str, str]) -> CompanyDetails:
         id=regcode,
         name=name or regcode,
         country="LV",
-        legal_form=(row.get("legal_form") or "").strip() or None,
+        legal_form=_legal_form(row),
         status=_status_from_row(row),
         registered_address=_address_from_row(row),
         capital_currency="EUR",
@@ -330,7 +425,7 @@ def _details_from_row(regcode: str, row: dict[str, str]) -> CompanyDetails:
             ),
         ],
         raw={"ur_row": row},
-        source_url=f"https://www.lursoft.lv/lapas/{regcode}/",
+        source_url=LVAdapter.UR_PUBLIC_PAGE,
     )
 
 
@@ -347,6 +442,134 @@ def _status_from_row(row: dict[str, str]) -> str | None:
     if (row.get("registered") or "").strip():
         return "active"
     return None
+
+
+def _to_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+def _scaled(value: str | None, factor: int) -> float | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned) * factor
+    except ValueError:
+        return None
+
+
+_BALANCE_MAP: dict[str, str] = {
+    "cash_and_equivalents": "cash",
+    "trade_receivables": "accounts_receivable",
+    "inventories": "inventories",
+    "current_assets": "total_current_assets",
+    "non_current_assets": "total_non_current_assets",
+    "total_assets": "total_assets",
+    "current_liabilities": "current_liabilities",
+    "non_current_liabilities": "non_current_liabilities",
+    "total_equity": "equity",
+}
+
+_INCOME_MAP: dict[str, str] = {
+    "revenue": "net_turnover",
+    "gross_profit": "by_function_gross_profit",
+    "depreciation_amortization": "by_nature_depreciation_expenses",
+    "interest_expense": "interest_expenses",
+    "net_income": "net_income",
+}
+
+
+def _build_balance_sheet(
+    row: dict[str, str] | None, factor: int
+) -> dict[str, float]:
+    if not row:
+        return {}
+    out: dict[str, float] = {}
+    for target, source in _BALANCE_MAP.items():
+        scaled = _scaled(row.get(source), factor)
+        if scaled is not None:
+            out[target] = scaled
+    equity = _scaled(row.get("equity"), factor)
+    total_assets = _scaled(row.get("total_assets"), factor)
+    if equity is not None and total_assets is not None:
+        out["total_liabilities"] = total_assets - equity
+    return out
+
+
+def _build_income_statement(
+    row: dict[str, str] | None, factor: int
+) -> dict[str, float]:
+    if not row:
+        return {}
+    out: dict[str, float] = {}
+    for target, source in _INCOME_MAP.items():
+        scaled = _scaled(row.get(source), factor)
+        if scaled is not None:
+            out[target] = scaled
+    return out
+
+
+def _filing_from_statement(
+    regcode: str,
+    stmt: dict[str, Any],
+    balance_row: dict[str, str] | None,
+    income_row: dict[str, str] | None,
+    dataset_url: str,
+) -> FinancialFiling:
+    factor = _ROUNDING_FACTORS.get(stmt["rounding"], 1)
+    consolidated = (stmt.get("source_type") or "").upper() in {"UKGP", "KGP"}
+    balance_sheet = _build_balance_sheet(balance_row, factor)
+    income_statement = _build_income_statement(income_row, factor)
+    structured: dict[str, Any] = {
+        "currency": stmt.get("currency"),
+        "period_end": stmt.get("period_end"),
+        "consolidated": consolidated,
+        "raw_concepts": {
+            "file_id": stmt["file_id"],
+            "source_type": stmt.get("source_type"),
+            "source_schema": stmt.get("source_schema"),
+            "rounded_to_nearest": stmt.get("rounding"),
+            "employees": stmt.get("employees"),
+        },
+    }
+    if balance_sheet:
+        structured["balance_sheet"] = balance_sheet
+    if income_statement:
+        structured["income_statement"] = income_statement
+    period_end = _parse_date(stmt.get("period_end"))
+    return FinancialFiling(
+        company_id=regcode,
+        year=stmt["year"],
+        type=FilingType.ANNUAL_REPORT,
+        period_end=period_end,
+        currency=stmt.get("currency"),
+        structured_data=structured if (balance_sheet or income_statement) else None,
+        document_url=None,
+        document_format="json",
+        source_url=dataset_url,
+    )
+
+
+def _parse_date(value: str | None):
+    if not value:
+        return None
+    try:
+        from datetime import date
+
+        parts = value.split("-")
+        return date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, IndexError):
+        return None
 
 
 def _parse_vies_response(xml_text: str) -> dict[str, Any] | None:

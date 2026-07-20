@@ -51,6 +51,7 @@ from packages.shared.models import (
 )
 
 _PIVA_RE = re.compile(r"^\d{11}$")
+_LEI_RE = re.compile(r"^[A-Z0-9]{20}$")
 
 # Eni S.p.A. — stable, always-valid Partita IVA used as a liveness probe.
 _VIES_HEALTH_PROBE = "00484960588"
@@ -157,6 +158,61 @@ def _gleif_identifiers(entity: dict[str, Any], lei: str) -> list[RegistryIdentif
     return identifiers
 
 
+def _build_details(
+    piva: str | None,
+    gleif: dict[str, Any] | None,
+    lei: str,
+    vies: dict[str, Any] | None,
+) -> CompanyDetails:
+    entity = (gleif or {}).get("entity") or {}
+    vies_name = ((vies or {}).get("name") or "").strip()
+    gleif_name = ((entity.get("legalName") or {}).get("name") or "").strip()
+    vies_address = ((vies or {}).get("address") or "").strip()
+
+    identifiers: list[RegistryIdentifier] = []
+    if piva:
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.VAT, value=f"IT{piva}", label="Partita IVA"
+            )
+        )
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.COMPANY_NUMBER,
+                value=piva,
+                label="Codice Fiscale",
+            )
+        )
+    if lei:
+        identifiers.append(
+            RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI")
+        )
+
+    legal_form = None
+    legal_form_id = (entity.get("legalForm") or {}).get("id")
+    if legal_form_id:
+        legal_form = str(legal_form_id)
+
+    source_url = (
+        f"https://search.gleif.org/#/record/{lei}"
+        if lei
+        else "https://ec.europa.eu/taxation_customs/vies/"
+    )
+    return CompanyDetails(
+        id=piva or lei,
+        name=vies_name or gleif_name or piva or lei,
+        country="IT",
+        legal_form=legal_form,
+        status=(entity.get("status") or "").lower() or "active",
+        registered_address=vies_address
+        or _format_gleif_address(entity.get("legalAddress")),
+        capital_currency="EUR",
+        identifiers=identifiers,
+        raw={"vies": vies, "gleif_lei": lei or None},
+        source_url=source_url,
+    )
+
+
 class ITAdapter(CountryAdapter):
     country_code = "IT"
     country_name = "Italy"
@@ -256,66 +312,42 @@ class ITAdapter(CountryAdapter):
             raise InvalidIdentifierError(
                 f"IT supports VAT/COMPANY_NUMBER/LEI, got {id_type}"
             )
-        piva = _normalize_piva(value)
 
+        if id_type is IdentifierType.LEI:
+            lei = value.strip().upper()
+            if not _LEI_RE.match(lei):
+                raise InvalidIdentifierError(
+                    f"LEI must be 20 alphanumeric characters: {value}"
+                )
+            gleif = await self._gleif_by_lei(lei)
+            if gleif is None:
+                return None
+            piva = ((gleif.get("entity") or {}).get("registeredAs") or "").strip()
+            vies = await self._vies_check_safe(piva) if _PIVA_RE.match(piva) else None
+            return _build_details(piva or None, gleif, lei, vies)
+
+        piva = _normalize_piva(value)
         gleif = await self._gleif_by_registered_as(piva)
         vies = await self._vies_check_safe(piva)
 
         if (not vies or not vies.get("valid")) and gleif is None:
             return None
 
-        entity = (gleif or {}).get("entity") or {}
         lei = (gleif or {}).get("lei") or ""
-
-        vies_name = ((vies or {}).get("name") or "").strip()
-        gleif_name = ((entity.get("legalName") or {}).get("name") or "").strip()
-        vies_address = ((vies or {}).get("address") or "").strip()
-
-        identifiers = [
-            RegistryIdentifier(
-                type=IdentifierType.VAT, value=f"IT{piva}", label="Partita IVA"
-            ),
-            RegistryIdentifier(
-                type=IdentifierType.COMPANY_NUMBER,
-                value=piva,
-                label="Codice Fiscale",
-            ),
-        ]
-        if lei:
-            identifiers.append(
-                RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI")
-            )
-
-        legal_form = None
-        legal_form_id = (entity.get("legalForm") or {}).get("id")
-        if legal_form_id:
-            legal_form = str(legal_form_id)
-
-        source_url = (
-            f"https://search.gleif.org/#/record/{lei}"
-            if lei
-            else "https://ec.europa.eu/taxation_customs/vies/"
-        )
-        return CompanyDetails(
-            id=piva,
-            name=vies_name or gleif_name or piva,
-            country="IT",
-            legal_form=legal_form,
-            status=(entity.get("status") or "").lower() or "active",
-            registered_address=vies_address
-            or _format_gleif_address(entity.get("legalAddress")),
-            capital_currency="EUR",
-            identifiers=identifiers,
-            raw={"vies": vies, "gleif_lei": lei or None},
-            source_url=source_url,
-        )
+        return _build_details(piva, gleif, lei, vies)
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        piva = _normalize_piva(company_id)
-        gleif = await self._gleif_by_registered_as(piva)
-        lei = (gleif or {}).get("lei")
+        raw_id = company_id.strip().upper()
+        if _LEI_RE.match(raw_id) and not _PIVA_RE.match(raw_id):
+            lei = raw_id
+            anchor = raw_id
+        else:
+            piva = _normalize_piva(company_id)
+            gleif = await self._gleif_by_registered_as(piva)
+            lei = (gleif or {}).get("lei")
+            anchor = piva
         if not lei:
             return []
 
@@ -343,7 +375,7 @@ class ITAdapter(CountryAdapter):
             )
             filings.append(
                 FinancialFiling(
-                    company_id=piva,
+                    company_id=anchor,
                     year=pe.year,
                     type=FilingType.ANNUAL_REPORT,
                     period_end=pe,
@@ -391,6 +423,20 @@ class ITAdapter(CountryAdapter):
             if registered_at == _RA_REGISTRO_IMPRESE:
                 return attrs
         return best
+
+    async def _gleif_by_lei(self, lei: str) -> dict[str, Any] | None:
+        async with build_http_client(
+            timeout=30.0, headers=_GLEIF_HEADERS
+        ) as client:
+            resp = await get_with_retry(client, f"{_GLEIF_BASE}/{lei}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            payload = resp.json()
+        data = payload.get("data")
+        if not data:
+            return None
+        return data.get("attributes")
 
     async def _filings_by_lei(self, lei: str) -> list[dict[str, Any]]:
         filter_expr = json.dumps(

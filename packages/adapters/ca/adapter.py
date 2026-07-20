@@ -1,37 +1,41 @@
-"""Canada adapter — Corporations Canada (federal) + SEDAR+ (listed financials).
+"""Canada adapter — Corporations Canada (federal register JSON API) + SEC EDGAR.
 
 Two free public sources, no API key required:
 
 - **Corporations Canada** (Innovation, Science and Economic Development Canada)
-  hosts the federal corporations register. The public search lives at
-  `https://www.ic.gc.ca/app/scr/cc/CorporationsCanada/fdrlCrpSrch.html` and the
-  per-corp detail page is `fdrlCrpDetails.html?corpId={N}`. Both render HTML
-  only — no documented JSON endpoint — so we parse defensively with regex.
-- **SEDAR+** (Canadian Securities Administrators) publishes financial filings
-  for listed issuers at `https://www.sedarplus.ca/`. We use the public
-  party-search endpoint to discover an issuer's filing list and return PDF
-  document URLs as `FinancialFiling` entries (no structured data yet — the
-  per-filing XBRL would need a separate ingestion pass, out of MVP scope).
+  hosts the federal corporations register. Name search POSTs to the public
+  search form ``/cc/lgcy/fdrlCrpSrch.html`` (results are server-rendered HTML
+  rows linking to ``fdrlCrpDtls.html?corpId=N``). Full structured records come
+  from the register's own JSON API,
+  ``/cc/lgcy/api/corporations/{corporationId}.json?lang=eng`` — the *same*
+  endpoint also resolves a 9-digit Business Number. The public plan allows 60
+  hits/min. A not-found id returns HTTP 200 with a two-string array, not a 404.
+- **SEC EDGAR** for financial filings. Large Canadian issuers cross-list on US
+  exchanges and file their annual reports with the SEC (40-F / 20-F for foreign
+  private issuers, 10-K for domestic filers). EDGAR exposes these for free via
+  the submissions JSON API. Companies that file only on SEDAR+ (bot-walled,
+  undocumented, out of MVP scope) return no filings here.
 
-Coverage caveat: Corporations Canada covers ~1/3 of Canadian companies — the
-federally incorporated ones. Provincial registries (ON, QC, BC, AB, …) are
-paid per-jurisdiction services and are out of scope. OpenCorporates is used
-as a resilience fallback for name search; it sometimes has provincially-
-registered hits where the federal source has none.
+Coverage caveat: the federal register covers only federally incorporated
+entities (~1/3 of Canadian companies). Provincial registries (ON/QC/BC/AB) are
+paid per-jurisdiction services and out of scope. OpenCorporates is a resilience
+fallback for name search — it sometimes has provincially-registered hits.
 
 Identifier formats:
-- Corporation Number: numeric, typically 5–7 digits, often shown with a
-  trailing check digit separated by a dash (e.g. ``763869-7``). We strip the
-  separator and validate digits-only with length 5–8.
-- Business Number (BN): 9 digits + 2-letter program + 4-digit reference (e.g.
-  ``123456789RC0001``) — captured as a `VAT`-typed `RegistryIdentifier` when
-  surfaced by the source, but the federal register does not key on it.
+- Corporation Number: the register's ``corporationId`` — bare digits (5–8),
+  historically displayed with a cosmetic trailing check digit (``426160-7``).
+  We strip the separator and validate digits-only.
+- Business Number (BN): 9 digits, optionally + 2-letter program + 4-digit
+  reference (e.g. ``847871746RC0001``). Surfaced as a ``VAT`` identifier and
+  resolvable via the same register JSON endpoint on its 9-digit stem.
 """
 from __future__ import annotations
 
 import html
 import logging
+import os
 import re
+from asyncio import Lock
 from datetime import date, datetime
 from typing import Any
 
@@ -44,7 +48,6 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
-    Director,
     FilingType,
     FinancialFiling,
     IdentifierType,
@@ -53,18 +56,33 @@ from packages.shared.models import (
 
 logger = logging.getLogger(__name__)
 
-_CORP_NUM_RE = re.compile(r"^\d{4,8}$")
-_BN_RE = re.compile(r"^\d{9}[A-Z]{2}\d{4}$")
+_CORP_NUM_RE = re.compile(r"^\d{4,9}$")
+_BN_RE = re.compile(r"^\d{9}(?:[A-Z]{2}\d{4})?$")
+
+# SEC EDGAR two-letter location codes for Canadian provinces/territories, plus
+# the annual-report currency signal that a filer is a foreign private issuer.
+_CA_STATE_CODES = {"A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "B0"}
+_ANNUAL_FORMS = ("40-F", "20-F", "10-K")
+_FOREIGN_ISSUER_FORMS = ("40-F", "20-F")
+
+_LEGAL_SUFFIXES = re.compile(
+    r"\b("
+    r"incorporated|incorporee|incorporée|inc|"
+    r"corporation|corp|"
+    r"limited|limitee|limitée|ltd|ltee|ltée|"
+    r"company|compagnie|co|"
+    r"ulc|lp|llp|holdings?"
+    r")\b",
+    re.IGNORECASE,
+)
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
 def _normalize_corp_number(value: str) -> str:
-    """Strip dashes/spaces and validate a federal Corporation Number."""
     cleaned = value.strip().upper().replace(" ", "").replace("-", "")
-    # Federal corp numbers are bare digits in URLs; the displayed "-N" check
-    # digit is cosmetic. Validate 4–8 digits to absorb historical/short ids.
     if not _CORP_NUM_RE.match(cleaned):
         raise InvalidIdentifierError(
-            f"Canadian Corporation Number invalid (expected 4–8 digits): {value}"
+            f"Canadian Corporation Number invalid (expected 4–9 digits): {value}"
         )
     return cleaned
 
@@ -73,38 +91,51 @@ def _normalize_bn(value: str) -> str:
     cleaned = value.strip().upper().replace(" ", "").replace("-", "")
     if not _BN_RE.match(cleaned):
         raise InvalidIdentifierError(
-            f"Canadian Business Number invalid (expected 9 digits + 2 letters + 4 digits): {value}"
+            "Canadian Business Number invalid (expected 9 digits, optionally "
+            f"+ 2 letters + 4 digits): {value}"
         )
-    return cleaned
+    return cleaned[:9]
+
+
+def _name_key(name: str) -> str:
+    """Collapse a company name to a suffix-free comparison key."""
+    stripped = _LEGAL_SUFFIXES.sub(" ", name.lower())
+    return _NON_ALNUM.sub("", stripped)
 
 
 class CAAdapter(CountryAdapter):
     country_code = "CA"
     country_name = "Canada"
     identifier_types = [
-        IdentifierType.COMPANY_NUMBER,  # federal Corporation Number
-        IdentifierType.VAT,             # Business Number (BN15)
-        IdentifierType.OTHER,           # SEDAR+ profile id
+        IdentifierType.COMPANY_NUMBER,  # federal Corporation Number (corporationId)
+        IdentifierType.VAT,             # Business Number (BN9)
+        IdentifierType.OTHER,
     ]
     primary_identifier = IdentifierType.COMPANY_NUMBER
     requires_api_key = False
     rate_limit_per_minute = 60
 
-    CC_BASE = "https://www.ic.gc.ca"
-    CC_SEARCH_PATH = "/app/scr/cc/CorporationsCanada/fdrlCrpSrch.html"
-    CC_DETAILS_PATH = "/app/scr/cc/CorporationsCanada/fdrlCrpDetails.html"
-    SEDAR_BASE = "https://www.sedarplus.ca"
+    CC_BASE = "https://ised-isde.canada.ca"
+    CC_SEARCH_PATH = "/cc/lgcy/fdrlCrpSrch.html"
+    CC_DETAILS_PATH = "/cc/lgcy/fdrlCrpDtls.html"
+    CC_API_PATH = "/cc/lgcy/api/corporations/{}.json"
+
+    EDGAR_BASE = "https://www.sec.gov"
+    EDGAR_DATA_BASE = "https://data.sec.gov"
+
+    _tickers_cache: list[dict[str, Any]] | None = None
+    _tickers_lock = Lock()
 
     def __init__(self) -> None:
         self._oc = OpenCorporatesClient()
+        contact = os.getenv("SEC_EDGAR_USER_AGENT", "Credyx dev contact@credyx.ai")
+        self._sec_headers = {"User-Agent": contact, "Accept-Encoding": "gzip, deflate"}
 
     async def health_check(self) -> AdapterHealth:
         try:
             async with build_http_client(base_url=self.CC_BASE) as client:
                 resp = await get_with_retry(
-                    client,
-                    self.CC_SEARCH_PATH,
-                    params={"V_SEARCH.command": "navigate", "crpNm": "shopify"},
+                    client, self.CC_API_PATH.format("4261607"), params={"lang": "eng"}
                 )
                 resp.raise_for_status()
         except Exception as exc:
@@ -124,8 +155,9 @@ class CAAdapter(CountryAdapter):
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Federal corporations only. Provincial registries (ON/QC/BC/AB) "
-                "are paid and out of scope. SEDAR+ covers listed issuers."
+                "Federal corporations register JSON API for search + lookup. "
+                "Financials via SEC EDGAR for US-cross-listed Canadian issuers; "
+                "SEDAR+-only filers return no filings."
             ),
         )
 
@@ -133,22 +165,25 @@ class CAAdapter(CountryAdapter):
         matches = await self._search_corporations_canada(name, limit)
         if matches:
             return matches
-        # OpenCorporates as resilience fallback — frequently hits provincial
-        # entities the federal register won't return. Free-tier: 500/mo.
         return await self._search_opencorporates(name, limit)
 
     async def _search_corporations_canada(
         self, name: str, limit: int
     ) -> list[CompanyMatch]:
-        params = {
-            "V_SEARCH.command": "navigate",
-            "V_SEARCH.docsCount": str(max(limit, 10)),
-            "crpNm": name,
-            "crpNmStartWth": "0",
+        form = {
+            "corpName": name,
+            "corpNumber": "",
+            "busNumber": "",
+            "corpProvince": "",
+            "corpStatus": "",
+            "corpAct": "",
+            "buttonNext": "Next",
         }
         try:
             async with build_http_client(base_url=self.CC_BASE) as client:
-                resp = await get_with_retry(client, self.CC_SEARCH_PATH, params=params)
+                resp = await client.post(
+                    self.CC_SEARCH_PATH, params={"locale": "en_CA"}, data=form
+                )
                 if resp.status_code >= 400:
                     return []
                 html_text = resp.text
@@ -174,9 +209,7 @@ class CAAdapter(CountryAdapter):
                     ],
                     address=None,
                     status=status,
-                    source_url=(
-                        f"{self.CC_BASE}{self.CC_DETAILS_PATH}?corpId={corp_id}"
-                    ),
+                    source_url=f"{self.CC_BASE}{self.CC_DETAILS_PATH}?corpId={corp_id}",
                 )
             )
         return out
@@ -217,337 +250,290 @@ class CAAdapter(CountryAdapter):
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.COMPANY_NUMBER:
-            corp_id = _normalize_corp_number(value)
-            return await self._lookup_federal(corp_id)
+            return await self._lookup_federal(_normalize_corp_number(value))
         if id_type == IdentifierType.VAT:
-            bn = _normalize_bn(value)
-            # The federal register doesn't key on BN. We accept the identifier
-            # for completeness but cannot resolve it without a paid CRA lookup.
-            raise AdapterError(
-                f"Business Number lookup ({bn}) requires CRA — not free. "
-                "Search by name and pick the matching corporation."
-            )
+            return await self._lookup_federal(_normalize_bn(value))
         if id_type == IdentifierType.OTHER:
             raise AdapterError(
-                "SEDAR+ profile-id direct lookup not implemented; "
-                "use fetch_financials with the corporation name instead."
+                "CA OTHER identifier is reserved; look up by Corporation Number "
+                "or Business Number instead."
             )
         raise InvalidIdentifierError(
             f"CA adapter supports COMPANY_NUMBER, VAT, OTHER; got {id_type}"
         )
 
-    async def _lookup_federal(self, corp_id: str) -> CompanyDetails | None:
-        params = {"corpId": corp_id, "V_SEARCH.command": "navigate"}
+    async def _lookup_federal(self, resource_id: str) -> CompanyDetails | None:
         try:
             async with build_http_client(base_url=self.CC_BASE) as client:
-                resp = await get_with_retry(client, self.CC_DETAILS_PATH, params=params)
+                resp = await get_with_retry(
+                    client, self.CC_API_PATH.format(resource_id), params={"lang": "eng"}
+                )
                 if resp.status_code == 404:
                     return None
                 if resp.status_code >= 400:
                     raise AdapterError(
-                        f"Corporations Canada returned {resp.status_code}"
+                        f"Corporations Canada API returned {resp.status_code}"
                     )
-                html_text = resp.text
+                payload = resp.json()
         except AdapterError:
             raise
         except Exception as exc:
-            raise AdapterError(f"Corporations Canada detail fetch failed: {exc}") from exc
+            raise AdapterError(f"Corporations Canada API fetch failed: {exc}") from exc
 
-        parsed = _parse_cc_details(html_text)
-        if not parsed.get("name"):
+        record = _first_record(payload)
+        if record is None:
             return None
 
+        corp_id = str(record.get("corporationId") or resource_id)
+        identifiers = [
+            RegistryIdentifier(
+                type=IdentifierType.COMPANY_NUMBER,
+                value=corp_id,
+                label="Corporation Number",
+            )
+        ]
+        bn = (record.get("businessNumbers") or {}).get("businessNumber")
+        if bn:
+            identifiers.append(
+                RegistryIdentifier(
+                    type=IdentifierType.VAT, value=str(bn), label="Business Number"
+                )
+            )
+
+        status = record.get("status")
         return CompanyDetails(
             id=corp_id,
-            name=parsed["name"],
+            name=_primary_name(record),
             country="CA",
-            legal_form="Federal Corporation",
-            status=parsed.get("status"),
-            incorporation_date=parsed.get("incorporation_date"),
-            dissolution_date=parsed.get("dissolution_date"),
-            registered_address=parsed.get("registered_address"),
-            identifiers=[
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER,
-                    value=corp_id,
-                    label="Corporation Number",
-                )
-            ],
-            directors=parsed.get("directors") or [],
-            raw=parsed.get("raw") or {},
-            source_url=(
-                f"{self.CC_BASE}{self.CC_DETAILS_PATH}?corpId={corp_id}"
-            ),
+            legal_form=record.get("act") or "Federal corporation",
+            status=status.lower() if isinstance(status, str) else None,
+            incorporation_date=_activity_date(record, ("Incorporation", "Amalgamation")),
+            dissolution_date=_activity_date(record, ("Dissolution", "Revocation")),
+            registered_address=_registered_address(record),
+            identifiers=identifiers,
+            raw=record,
+            source_url=f"{self.CC_BASE}{self.CC_DETAILS_PATH}?corpId={corp_id}",
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # SEDAR+ keys filings by issuer profile, not federal corp #. The
-        # company-name pivot is the cheapest way without scraping the issuer
-        # ticker tape. If the corp # is unknown to SEDAR (private federal
-        # company), we return [] — non-listed entities don't file there.
         details = await self._lookup_federal(_normalize_corp_number(company_id))
-        if not details:
+        if not details or not details.name:
             return []
-        return await self._fetch_sedar_filings(details.name, company_id, years)
+        cik = await self._match_edgar_cik(details.name)
+        if cik is None:
+            return []
+        return await self._fetch_edgar_filings(cik, company_id, years)
 
-    async def _fetch_sedar_filings(
-        self, issuer_name: str, company_id: str, years: int
+    async def _load_tickers(self) -> list[dict[str, Any]]:
+        async with CAAdapter._tickers_lock:
+            if CAAdapter._tickers_cache is None:
+                async with build_http_client(headers=self._sec_headers) as client:
+                    resp = await get_with_retry(
+                        client, f"{self.EDGAR_BASE}/files/company_tickers.json"
+                    )
+                    resp.raise_for_status()
+                    CAAdapter._tickers_cache = list(resp.json().values())
+            return CAAdapter._tickers_cache
+
+    async def _match_edgar_cik(self, name: str) -> str | None:
+        rows = await self._load_tickers()
+        key = _name_key(name)
+        if not key:
+            return None
+        for r in rows:
+            if _name_key(str(r.get("title", ""))) == key:
+                return str(r.get("cik_str", "")).zfill(10)
+        return None
+
+    async def _fetch_edgar_filings(
+        self, cik: str, company_id: str, years: int
     ) -> list[FinancialFiling]:
-        # SEDAR+ public document search. The endpoint is public but its query
-        # surface is undocumented; we hit the GET facet that the website uses
-        # for the company-name pivot.
-        params = {
-            "keyword": issuer_name,
-            "documentTypes": ",".join([
-                "annual-financial-statements",
-                "interim-financial-statements",
-                "annual-information-form",
-            ]),
-        }
         try:
-            async with build_http_client(base_url=self.SEDAR_BASE) as client:
+            async with build_http_client(headers=self._sec_headers) as client:
                 resp = await get_with_retry(
-                    client,
-                    "/csa-party/service/searchDocuments",
-                    params=params,
+                    client, f"{self.EDGAR_DATA_BASE}/submissions/CIK{cik}.json"
                 )
                 if resp.status_code >= 400:
                     return []
-                payload: Any = None
-                ctype = resp.headers.get("content-type", "")
-                if "json" in ctype:
-                    payload = resp.json()
+                data = resp.json()
         except Exception as exc:
-            logger.warning("SEDAR+ search failed for %s: %s", issuer_name, exc)
+            logger.warning("EDGAR submissions fetch failed for CIK %s: %s", cik, exc)
             return []
 
-        items: list[dict[str, Any]] = []
-        if isinstance(payload, dict):
-            # SEDAR+ responses sometimes wrap rows under `data`, `documents`,
-            # or `results`. Pick whichever non-empty list appears.
-            for key in ("documents", "results", "data", "items"):
-                v = payload.get(key)
-                if isinstance(v, list) and v:
-                    items = v
-                    break
-        elif isinstance(payload, list):
-            items = payload
+        recent = (data.get("filings") or {}).get("recent") or {}
+        forms = recent.get("form") or []
+        if not _is_canadian_filer(data, forms):
+            return []
+
+        accessions = recent.get("accessionNumber") or []
+        primary_docs = recent.get("primaryDocument") or []
+        report_dates = recent.get("reportDate") or []
+        filing_dates = recent.get("filingDate") or []
+        cutoff = datetime.utcnow().year - years
+        cik_int = int(cik)
 
         filings: list[FinancialFiling] = []
-        cutoff = datetime.utcnow().year - years
-        for it in items:
-            if not isinstance(it, dict):
+        seen_years: set[int] = set()
+        for form, acc, doc, report, filed in zip(
+            forms, accessions, primary_docs, report_dates, filing_dates
+        ):
+            if form not in _ANNUAL_FORMS:
                 continue
-            filed_raw = (
-                it.get("filingDate")
-                or it.get("filedDate")
-                or it.get("submissionDate")
-                or it.get("date")
+            period_end = _parse_iso_date(report)
+            year = period_end.year if period_end else (_year_of(filed))
+            if year is None or year < cutoff or year in seen_years:
+                continue
+            seen_years.add(year)
+            acc_nodash = acc.replace("-", "")
+            document_url = (
+                f"{self.EDGAR_BASE}/Archives/edgar/data/{cik_int}/{acc_nodash}/{doc}"
+                if doc else None
             )
-            filed = _parse_iso_date(filed_raw)
-            if not filed:
-                continue
-            if filed.year < cutoff:
-                continue
-            doc_url = it.get("documentUrl") or it.get("url") or it.get("href")
-            if doc_url and not doc_url.startswith("http"):
-                doc_url = f"{self.SEDAR_BASE}{doc_url}"
             filings.append(
                 FinancialFiling(
                     company_id=company_id,
-                    year=filed.year,
+                    year=year,
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=filed,
-                    currency="CAD",
+                    period_end=period_end,
+                    currency=None,
                     structured_data=None,
-                    document_url=doc_url,
-                    document_format="pdf",
-                    source_url=f"{self.SEDAR_BASE}/landingpage/?keyword="
-                    f"{issuer_name.replace(' ', '+')}",
+                    document_url=document_url,
+                    document_format="html" if doc and doc.endswith((".htm", ".html")) else None,
+                    source_url=(
+                        f"{self.EDGAR_BASE}/cgi-bin/browse-edgar"
+                        f"?action=getcompany&CIK={cik}&type={form}"
+                    ),
                 )
             )
         filings.sort(key=lambda f: f.year, reverse=True)
         return filings
 
 
-_CC_ROW_RE = re.compile(
-    r'corpId=(?P<id>\d+)[^"\']*["\'][^>]*>(?P<name>[^<]+)</a>'
-    r'(?:.*?<td[^>]*>(?P<status>[^<]+)</td>)?',
-    re.IGNORECASE | re.DOTALL,
-)
+def _first_record(payload: Any) -> dict[str, Any] | None:
+    """Return the corporation object from the register's two-element response.
 
-
-def _parse_cc_results(html_text: str) -> list[tuple[str, str, str | None]]:
-    """Pull (corpId, name, status) tuples from a search result page.
-
-    The Corporations Canada search page renders a table; each result row links
-    to ``fdrlCrpDetails.html?corpId=N`` and shows the corp name + status cell.
-    Tables vary slightly across views — we extract only what's stable.
+    A not-found id yields ``["could not find ...", "..."]`` (both strings) with
+    HTTP 200; a hit yields ``[{...}, null]`` for ``lang=eng``.
     """
-    out: list[tuple[str, str, str | None]] = []
-    seen: set[str] = set()
-    for m in _CC_ROW_RE.finditer(html_text):
-        corp_id = m.group("id")
-        if corp_id in seen:
-            continue
-        seen.add(corp_id)
-        name = html.unescape((m.group("name") or "").strip())
-        status_raw = m.group("status")
-        status = html.unescape(status_raw.strip()) if status_raw else None
-        if not name:
-            continue
-        out.append((corp_id, name, status))
-    return out
+    if isinstance(payload, list):
+        for el in payload:
+            if isinstance(el, dict) and el.get("corporationId"):
+                return el
+        return None
+    if isinstance(payload, dict) and payload.get("corporationId"):
+        return payload
+    return None
 
 
-_FIELD_RE = re.compile(
-    r"<(?:dt|th)[^>]*>\s*(?P<label>[^<:]+?)\s*[:]?\s*</(?:dt|th)>\s*"
-    r"<(?:dd|td)[^>]*>(?P<value>.*?)</(?:dd|td)>",
+def _primary_name(record: dict[str, Any]) -> str:
+    names = record.get("corporationNames") or []
+    parsed = [n.get("CorporationName") or {} for n in names if isinstance(n, dict)]
+    for n in parsed:
+        if n.get("current") and str(n.get("nameType", "")).lower() == "primary":
+            return str(n.get("name", "")).strip()
+    for n in parsed:
+        if n.get("current"):
+            return str(n.get("name", "")).strip()
+    if parsed:
+        return str(parsed[0].get("name", "")).strip()
+    return ""
+
+
+def _activity_date(record: dict[str, Any], kinds: tuple[str, ...]) -> date | None:
+    wanted = {k.lower() for k in kinds}
+    dates: list[date] = []
+    for a in record.get("activities") or []:
+        act = a.get("activity") if isinstance(a, dict) else None
+        if not isinstance(act, dict):
+            continue
+        if str(act.get("activity", "")).lower() in wanted:
+            d = _parse_iso_date(act.get("date"))
+            if d:
+                dates.append(d)
+    return min(dates) if dates else None
+
+
+def _registered_address(record: dict[str, Any]) -> str | None:
+    entries = record.get("adresses") or []
+    parsed = [e.get("address") or {} for e in entries if isinstance(e, dict)]
+    chosen = next(
+        (a for a in parsed if a.get("current") and str(a.get("typeCode")) == "2"), None
+    ) or next((a for a in parsed if a.get("current")), None) or (
+        parsed[0] if parsed else None
+    )
+    if not chosen:
+        return None
+    parts: list[str] = []
+    for line in chosen.get("addressLine") or []:
+        if line:
+            parts.append(str(line).strip())
+    for key in ("city", "provinceCode", "postalCode", "countryCode"):
+        val = chosen.get(key)
+        if val:
+            parts.append(str(val).strip())
+    return ", ".join(parts) or None
+
+
+def _is_canadian_filer(submissions: dict[str, Any], forms: list[str]) -> bool:
+    """Guard against a US company sharing a Canadian corporation's name."""
+    if any(f in _FOREIGN_ISSUER_FORMS for f in forms):
+        return True
+    addresses = submissions.get("addresses") or {}
+    for slot in ("business", "mailing"):
+        addr = addresses.get(slot) or {}
+        desc = str(addr.get("stateOrCountryDescription") or "").lower()
+        if "canada" in desc:
+            return True
+        if str(addr.get("stateOrCountry") or "").upper() in _CA_STATE_CODES:
+            return True
+    return False
+
+
+_CC_RESULT_RE = re.compile(
+    r'corpId=(?P<id>\d+)[^"\']*["\'][^>]*>(?P<name>.*?)</a>'
+    r'(?P<tail>.*?)(?:Corporation number|Numéro de société|</li>|<a\s)',
     re.IGNORECASE | re.DOTALL,
 )
-
+_STATUS_RE = re.compile(r"Status:\s*(?P<status>.*?)</span>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
-def _strip_tags(s: str) -> str:
-    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub(" ", s))).strip()
+def _clean(text: str) -> str:
+    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub(" ", text))).strip()
 
 
-def _parse_cc_details(html_text: str) -> dict[str, Any]:
-    """Best-effort parse of the federal corporation detail page.
-
-    The page is HTML with French + English label variants. We pick the values
-    by matching either language and normalize whitespace.
-    """
-    fields: dict[str, str] = {}
-    for m in _FIELD_RE.finditer(html_text):
-        label = _strip_tags(m.group("label")).rstrip(":").strip().lower()
-        value = _strip_tags(m.group("value"))
-        if label and value and label not in fields:
-            fields[label] = value
-
-    name = (
-        fields.get("corporate name")
-        or fields.get("corporation name")
-        or fields.get("dénomination sociale")
-        or _extract_h1(html_text)
-    )
-
-    status = (
-        fields.get("status")
-        or fields.get("statut")
-        or fields.get("corporation status")
-    )
-    if status:
-        status = status.lower()
-
-    inc_date = _parse_loose_date(
-        fields.get("date of incorporation")
-        or fields.get("date of amalgamation")
-        or fields.get("date de constitution")
-    )
-    diss_date = _parse_loose_date(
-        fields.get("date of dissolution")
-        or fields.get("date of revocation")
-        or fields.get("date de dissolution")
-    )
-
-    address = (
-        fields.get("registered office address")
-        or fields.get("registered office")
-        or fields.get("adresse du siège social")
-        or fields.get("siège social")
-    )
-
-    directors = _parse_cc_directors(html_text)
-
-    return {
-        "name": name or "",
-        "status": status,
-        "incorporation_date": inc_date,
-        "dissolution_date": diss_date,
-        "registered_address": address,
-        "directors": directors,
-        "raw": fields,
-    }
-
-
-_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
-
-
-def _extract_h1(html_text: str) -> str | None:
-    m = _H1_RE.search(html_text)
-    if not m:
-        return None
-    txt = _strip_tags(m.group(1))
-    return txt or None
-
-
-_DIRECTOR_SECTION_RE = re.compile(
-    r"(?:directors?|administrateurs?)\s*</(?:h\d|caption|legend|th)>\s*"
-    r"(?P<body>.*?)(?:</table>|</section>|<h\d)",
-    re.IGNORECASE | re.DOTALL,
-)
-_LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.IGNORECASE | re.DOTALL)
-_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
-
-
-def _parse_cc_directors(html_text: str) -> list[Director]:
-    section = _DIRECTOR_SECTION_RE.search(html_text)
-    if not section:
-        return []
-    body = section.group("body")
-    raw_items: list[str] = []
-    for m in _LI_RE.finditer(body):
-        raw_items.append(_strip_tags(m.group(1)))
-    if not raw_items:
-        for m in _TR_RE.finditer(body):
-            raw_items.append(_strip_tags(m.group(1)))
-    directors: list[Director] = []
-    for item in raw_items:
-        if not item:
+def _parse_cc_results(html_text: str) -> list[tuple[str, str, str | None]]:
+    """Pull (corporationId, name, status) tuples from a search result page."""
+    out: list[tuple[str, str, str | None]] = []
+    seen: set[str] = set()
+    for m in _CC_RESULT_RE.finditer(html_text):
+        corp_id = m.group("id")
+        if corp_id in seen:
             continue
-        # First comma-separated token is conventionally the name.
-        name = item.split(",", 1)[0].strip()
-        if not name or name.lower() in {"name", "nom"}:
+        seen.add(corp_id)
+        name = _clean(m.group("name"))
+        if not name:
             continue
-        directors.append(Director(name=name))
-        if len(directors) >= 50:
-            break
-    return directors
+        status = None
+        sm = _STATUS_RE.search(m.group("tail") or "")
+        if sm:
+            status = _clean(sm.group("status")) or None
+        out.append((corp_id, name, status))
+    return out
 
 
-_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_LONG_DATE_RE = re.compile(
-    r"(?P<y>\d{4})[-/](?P<m>\d{1,2})[-/](?P<d>\d{1,2})"
-)
-
-
-def _parse_loose_date(s: str | None) -> date | None:
-    if not s:
-        return None
-    m = _ISO_DATE_RE.search(s)
-    if m:
-        try:
-            return date.fromisoformat(m.group(0))
-        except ValueError:
-            return None
-    m = _LONG_DATE_RE.search(s)
-    if m:
-        try:
-            return date(int(m.group("y")), int(m.group("m")), int(m.group("d")))
-        except ValueError:
-            return None
-    return None
-
-
-def _parse_iso_date(s: str | None) -> date | None:
-    if not s:
+def _parse_iso_date(s: Any) -> date | None:
+    if not isinstance(s, str) or not s:
         return None
     try:
         return date.fromisoformat(s[:10])
-    except (ValueError, TypeError):
+    except ValueError:
         return None
+
+
+def _year_of(s: Any) -> int | None:
+    d = _parse_iso_date(s)
+    return d.year if d else None

@@ -33,8 +33,10 @@
   `companyFinancial` array lists every filed annual financial statement:
   `{referencePeriod, FilesAndAuditors:[{balancesheet:[{id, bal_date,
   bal_file_system_file_path, ixbrl_url}], auditors:[...]}]}`. Each filing
-  downloads as a PDF from
-  `GET /api/download/financial/{id}?companyId={gemi}` (no auth). ESEF-listed
+  downloads from `GET /api/download/financial/{id}?companyId={gemi}` (no
+  auth). The served file is either a plain PDF or an iXBRL package
+  (`.xbri`/`.zip`); `document_format` is derived from the
+  `bal_file_system_file_path` extension (`pdf` vs `xbrl`). ESEF-listed
   firms additionally expose an `ixbrl_url` on `filings.businessportal.gr`.
   Re-verified live 2026-07-21: OTE `2518888` (20 MB PDF), Coca-Cola 3E
   `2496492`/`1674808` (1.5 MB PDF), OPAP `2041404` (12 MB PDF).

@@ -1,30 +1,38 @@
-"""Israel adapter — data.gov.il (Israeli Companies Registrar / ICA).
+"""Israel adapter — data.gov.il (registry) + TASE/Maya (listed financials).
 
-Open data portal: https://data.gov.il/dataset/ica_companies
-CKAN datastore API: https://data.gov.il/api/3/action/datastore_search
+Registry (search + lookup): the Israel Corporations Authority (Rasham
+Ha-Hevarot) public register, published as CKAN open data at
+https://data.gov.il/dataset/ica_companies. The 9-digit "Company Number"
+doubles as the VAT registration number, so VAT lookups route through the same
+field. The datastore columns are Hebrew names *with spaces* (e.g. ``מספר חברה``,
+``שם חברה``, ``שם באנגלית``); filtering on an unknown column makes CKAN return
+**409 Conflict** (ValidationError), which data.gov.il also uses when
+rate-limiting.
 
-The dataset publishes the public register maintained by the Israel Corporations
-Authority (Rasham Ha-Hevarot). For Israeli companies the 9-digit "Company
-Number" doubles as the VAT registration number, so VAT lookups are routed
-through the same field.
+Financials (listed companies): the Tel Aviv Stock Exchange disclosure system
+"Maya". Its two undocumented JSON hosts are read key-free:
 
-The datastore columns are Hebrew names *with spaces* (e.g. ``מספר חברה``,
-``שם חברה``, ``שם באנגלית``) — filtering on an unknown column makes CKAN
-return **409 Conflict** (ValidationError), which data.gov.il also uses when
-rate-limiting. The adapter filters on the Hebrew column and keeps the legacy
-English/underscore names as read-side fallbacks for older snapshots.
+- ``https://api.tase.co.il/api/content/searchentities`` — the full entity list
+  (company short-name → Maya ``companyId``). Behind an Imperva WAF that only
+  answers the legacy ``FSL`` user-agent it whitelists.
+- ``https://mayaapi.tase.co.il/api/company/{alldetails,financereports}`` —
+  per-company details (carries the 9-digit ``CorporateNo``, letting us verify a
+  name match) and the latest filed financial reports. Answers any user-agent
+  that sends the ``X-Maya-With: allow`` header.
 
-Listed-company financials live on TASE / Maya (https://maya.tase.co.il/) but
-the disclosure portal does not expose a stable open JSON feed, so
-`fetch_financials` returns an empty list for the MVP — the caller can still
-follow `source_url` on `CompanyDetails`.
+The registrar company number is not present in the entity list, so
+``fetch_financials`` resolves it by matching the registry name against Maya's
+short names and then confirming the candidate's ``CorporateNo`` via
+``alldetails`` before trusting the ``companyId``.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import time
 from datetime import date
+from difflib import SequenceMatcher
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
@@ -35,6 +43,7 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -47,10 +56,41 @@ _COMPANY_NUMBER_RE = re.compile(r"^\d{9}$")
 # rotates when the publisher republishes the file; override via env to avoid a
 # code change in that case. Discover the current id via
 # https://data.gov.il/api/3/action/package_show?id=ica_companies
-# (verified current 2026-07-20).
+# (verified current 2026-07-21).
 _DEFAULT_RESOURCE_ID = "f004176c-b85f-4542-8901-7b3176f9a054"
 
 _COMPANY_NUMBER_FIELD = "מספר חברה"
+
+_TASE_API = "https://api.tase.co.il/api"
+_MAYA_API = "https://mayaapi.tase.co.il/api"
+
+# Imperva on api.tase.co.il only serves this legacy FSL user-agent; a modern
+# browser UA is silently 403'd. mayaapi keys off the X-Maya-With header instead.
+_TASE_HEADERS = {
+    "User-Agent": "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; FSL 7.0.6.01001)",
+    "Referer": "https://www.tase.co.il/",
+    "Accept": "application/json, text/plain, */*",
+}
+_MAYA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "X-Maya-With": "allow",
+    "Referer": "https://maya.tase.co.il/",
+    "Accept": "application/json, text/plain, */*",
+}
+
+# Maya publishes the whole listed universe in one call, so it is cached in
+# process rather than fetched per lookup.
+_ENTITY_TYPE_COMPANY = 5
+_ENTITIES_TTL_SECONDS = 6 * 3600
+_entities_cache: dict[str, Any] = {"ts": 0.0, "companies": None}
+
+_CURRENCY_BY_CODE = {1: "ILS", 2: "USD", 3: "EUR", 4: "GBP"}
+
+_ANNUAL_MARKERS = ("שנתי", "annual", "10-k", "yearly")
+_LEGAL_SUFFIX_RE = re.compile(
+    r'\b(ltd\.?|limited|inc\.?|corp\.?|plc|b\.?m\.?|company)\b|בע["~\']?מ',
+    re.IGNORECASE,
+)
 
 
 class _FilterRejected(AdapterError):
@@ -113,9 +153,9 @@ class ILAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
-            notes="Financials via TASE/Maya not yet wired — listed cos only.",
+            notes="Registry via data.gov.il; listed-company financials via TASE/Maya.",
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
@@ -146,20 +186,9 @@ class ILAdapter(CountryAdapter):
                 f"IL supports COMPANY_NUMBER or VAT, got {id_type}"
             )
         cn = _normalize_company_number(value)
-        try:
-            records = await self._ckan_search(
-                filters={_COMPANY_NUMBER_FIELD: int(cn)}, limit=1
-            )
-        except _FilterRejected:
-            records = []
-        if not records:
-            # Older snapshots published the column under English names — a
-            # broad full-text `q` still hits those.
-            records = await self._ckan_search(q=cn, limit=5)
-            records = [r for r in records if _record_company_number(r) == cn]
-            if not records:
-                return None
-        rec = records[0]
+        rec = await self._ckan_record(cn)
+        if rec is None:
+            return None
         return CompanyDetails(
             id=cn,
             name=_record_name(rec),
@@ -188,12 +217,185 @@ class ILAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # TASE/Maya is the only free source of Israeli filings and it exposes
-        # disclosures as HTML/PDF without a stable identifier-keyed JSON feed.
-        # Leaving this empty keeps the "no mock data" rule intact; the UI can
-        # still link to maya.tase.co.il via the company source_url.
-        _normalize_company_number(company_id)
-        return []
+        cn = _normalize_company_number(company_id)
+        rec = await self._ckan_record(cn)
+        name_en = _first(
+            rec or {}, ["שם באנגלית", "Company_Name_Eng", "company_name_eng", "Name_Eng"]
+        )
+        name_he = _first(rec or {}, ["שם חברה", "Company_Name", "company_name", "שם_חברה"])
+        maya_id = await self._resolve_maya_company_id(cn, name_en, name_he)
+        if maya_id is None:
+            return []
+        report = await self._maya_financereports(maya_id)
+        if report is None:
+            return []
+        return self._build_filings(cn, maya_id, report, years)
+
+    async def _ckan_record(self, cn: str) -> dict[str, Any] | None:
+        try:
+            records = await self._ckan_search(
+                filters={_COMPANY_NUMBER_FIELD: int(cn)}, limit=1
+            )
+        except _FilterRejected:
+            records = []
+        if not records:
+            records = await self._ckan_search(q=cn, limit=5)
+            records = [r for r in records if _record_company_number(r) == cn]
+        return records[0] if records else None
+
+    async def _resolve_maya_company_id(
+        self, company_number: str, name_en: Any, name_he: Any
+    ) -> str | None:
+        target_en = _normalize_name(name_en)
+        target_he = _normalize_name(name_he)
+        if not target_en and not target_he:
+            return None
+        companies = await self._load_maya_companies()
+        scored: list[tuple[float, str]] = []
+        for entity in companies:
+            score = max(
+                _name_score(entity.get("en"), target_en),
+                _name_score(entity.get("he"), target_he),
+            )
+            if score > 0:
+                scored.append((score, entity["id"]))
+        scored.sort(reverse=True)
+        for _, maya_id in scored[:12]:
+            details = await self._maya_alldetails(maya_id)
+            if details is None:
+                continue
+            corporate_no = re.sub(
+                r"\D", "", str(details.get("CorporateNo") or "")
+            )
+            if corporate_no == company_number:
+                return maya_id
+        return None
+
+    def _build_filings(
+        self,
+        company_number: str,
+        maya_id: str,
+        report: dict[str, Any],
+        years: int,
+    ) -> list[FinancialFiling]:
+        currency = _CURRENCY_BY_CODE.get(report.get("CurrencyCode"))
+        company_url = (
+            f"https://maya.tase.co.il/en/company/{maya_id}?view=finance-reports"
+        )
+        candidates: list[tuple[int, FilingType, str, str | None]] = []
+
+        previous_year = report.get("PreviousYear") or {}
+        py_year = previous_year.get("Year")
+        if isinstance(py_year, int):
+            candidates.append(
+                (py_year, FilingType.ANNUAL_REPORT, company_url, None)
+            )
+
+        for entry in report.get("LastReports") or []:
+            title = str(entry.get("Title") or "")
+            rpt_cd = entry.get("RptCd")
+            year = _year_from_iso(entry.get("PubDate"))
+            if year is None or rpt_cd is None:
+                continue
+            candidates.append(
+                (
+                    year,
+                    _filing_type_from_title(title),
+                    f"https://maya.tase.co.il/en/reports/{rpt_cd}",
+                    date(year, 12, 31)
+                    if _filing_type_from_title(title) is FilingType.ANNUAL_REPORT
+                    else None,
+                )
+            )
+
+        if not candidates:
+            return []
+
+        latest_year = max(year for year, *_ in candidates)
+        min_year = latest_year - years + 1
+        seen: set[tuple[int, FilingType, str]] = set()
+        filings: list[FinancialFiling] = []
+        for year, filing_type, source_url, period_end in sorted(
+            candidates, key=lambda c: c[0], reverse=True
+        ):
+            if year < min_year:
+                continue
+            key = (year, filing_type, source_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            filings.append(
+                FinancialFiling(
+                    company_id=company_number,
+                    year=year,
+                    type=filing_type,
+                    period_end=period_end
+                    or (date(year, 12, 31) if filing_type is FilingType.ANNUAL_REPORT else None),
+                    currency=currency,
+                    document_format="html",
+                    source_url=source_url,
+                )
+            )
+        return filings
+
+    async def _load_maya_companies(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        cached = _entities_cache["companies"]
+        if cached is not None and now - _entities_cache["ts"] < _ENTITIES_TTL_SECONDS:
+            return cached
+        english = await self._tase_searchentities(lang=1)
+        hebrew = await self._tase_searchentities(lang=2)
+        merged: dict[str, dict[str, Any]] = {}
+        for lang_key, rows in (("en", english), ("he", hebrew)):
+            for row in rows:
+                if row.get("Type") != _ENTITY_TYPE_COMPANY:
+                    continue
+                cid = str(row.get("Id"))
+                merged.setdefault(cid, {"id": cid, "en": None, "he": None})
+                merged[cid][lang_key] = row.get("Name")
+        companies = list(merged.values())
+        _entities_cache["companies"] = companies
+        _entities_cache["ts"] = now
+        return companies
+
+    async def _tase_searchentities(self, *, lang: int) -> list[dict[str, Any]]:
+        async with build_http_client(
+            base_url=_TASE_API, headers=_TASE_HEADERS
+        ) as client:
+            resp = await get_with_retry(
+                client, "/content/searchentities", params={"lang": lang}
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        return payload if isinstance(payload, list) else []
+
+    async def _maya_alldetails(self, company_id: str) -> dict[str, Any] | None:
+        payload = await self._maya_get(
+            "/company/alldetails", {"companyId": company_id, "lang": 1}
+        )
+        if not payload:
+            return None
+        return payload.get("CompanyDetails")
+
+    async def _maya_financereports(self, company_id: str) -> dict[str, Any] | None:
+        return await self._maya_get(
+            "/company/financereports", {"companyId": company_id, "lang": 1}
+        )
+
+    async def _maya_get(
+        self, path: str, params: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        async with build_http_client(
+            base_url=_MAYA_API, headers=_MAYA_HEADERS
+        ) as client:
+            resp = await get_with_retry(client, path, params=params)
+            if resp.status_code != 200:
+                return None
+            ctype = resp.headers.get("content-type", "").lower()
+            if "json" not in ctype:
+                return None
+            payload = resp.json()
+        return payload if isinstance(payload, dict) else None
 
     async def _ckan_search(
         self,
@@ -307,6 +509,39 @@ def _record_identifiers(
             label="VAT (Osek)",
         ),
     ]
+
+
+def _normalize_name(value: Any) -> str:
+    if not value:
+        return ""
+    text = _LEGAL_SUFFIX_RE.sub(" ", str(value))
+    text = re.sub(r"[^0-9A-Za-z֐-׿]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip().upper()
+
+
+def _name_score(maya_name: Any, target: str) -> float:
+    candidate = _normalize_name(maya_name)
+    if not candidate or not target:
+        return 0.0
+    if candidate in target:
+        return 0.5 + 0.5 * (len(candidate) / len(target))
+    if target in candidate:
+        return 0.5 + 0.5 * (len(target) / len(candidate))
+    return SequenceMatcher(None, candidate, target).ratio()
+
+
+def _filing_type_from_title(title: str) -> FilingType:
+    lowered = title.lower()
+    if any(marker in lowered for marker in _ANNUAL_MARKERS):
+        return FilingType.ANNUAL_REPORT
+    return FilingType.BALANCE_SHEET
+
+
+def _year_from_iso(value: Any) -> int | None:
+    if not value:
+        return None
+    match = re.match(r"(\d{4})", str(value))
+    return int(match.group(1)) if match else None
 
 
 def _parse_date(s: Any) -> date | None:

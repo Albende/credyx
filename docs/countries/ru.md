@@ -27,12 +27,24 @@
     2. `GET https://egrul.nalog.ru/search-result/{token}` →
        returns `{"rows": [...], "status": 0|1}`. `status=1` means
        still computing; the adapter polls with short back-offs.
-- https://bo.nalog.ru/ — ГИРБО, State Information Resource for
-  Accounting Reports. Free PDF / Excel downloads of annual accounts
-  filed to the FNS since 2019.
-  - `POST/GET /nbo/organizations/search?query=<INN>&page=0`
-  - `GET /nbo/organizations/{id}/bfo/`
-  - `GET /nbo/bfo/{report_id}/transformation-file/` (raw document).
+- https://www.cbr.ru/finorg/ — Bank of Russia (Центральный банк РФ)
+  financial-organization disclosure portal. Every supervised financial
+  entity (credit institution, NPF, insurer, MFO, broker, …) files its
+  statutory reporting forms here. Free, no auth, internationally
+  reachable.
+  - `GET /finorg/foinfo/reports/?ogrn=<OGRN>` → HTML index listing every
+    filed form. The adapter extracts the CBR `regnum` and the set of
+    Форма 102 (statement of financial results) reporting dates.
+  - `GET /banking_sector/credit/coinfo/f102?regnum=<regnum>&dt=YYYY-01-01`
+    → the statement of financial results for the year `YYYY-1`
+    (also f101 turnover balance, f123/f135 capital, f802/f803/f805
+    consolidated).
+- https://bo.nalog.gov.ru/ — ГИРБО, State Information Resource for
+  Accounting Reports (non-financial companies' balance sheets since
+  2019). **Geo-blocked**: the search index returns an empty result set
+  to non-RU IPs (confirmed against a real browser session), so it is not
+  usable from an ex-RU deployment and is not wired in. Use it only when
+  the platform runs from a Russian egress.
 - **Auth**: None.
 - **Rate limit**: Self-imposed at 30 req/min. Neither portal publishes
   a budget; both serve a public registry and can geo-throttle.
@@ -42,16 +54,24 @@
 
 ## Financials
 
-Annual accounting reports (Бухгалтерская (финансовая) отчётность)
-filed with the FNS since 2019 are published free at bo.nalog.ru.
-`fetch_financials` returns one `FinancialFiling` per filed year, with
-the FNS `transformation-file` URL as `document_url` (`document_format`
-= "pdf"; the same endpoint also serves the original XLS-derived file).
-PDF text extraction is not yet wired in — see the cross-cutting infra
-notes in CLAUDE.md.
+`fetch_financials` serves financial-sector counterparties from the Bank
+of Russia disclosure portal (cbr.ru). It resolves the input INN/OGRN to
+the entity's OGRN (via a single EGRUL round-trip when an INN is given),
+loads `/finorg/foinfo/reports/?ogrn=`, and returns one `FinancialFiling`
+per filed year — `type=ANNUAL_REPORT`, `currency="RUB"`, `period_end`
+= 31 Dec of the year, and `source_url` pointing at that entity's official
+Форма 102 statement of financial results (`.../coinfo/f102?regnum=<n>&dt=
+YYYY-01-01`, which is the results for `YYYY-1`). No fabricated numbers are
+returned; `structured_data`/`document_url` stay `None` until the CBR
+form-102/101 HTML parser is wired in (see cross-cutting infra in
+CLAUDE.md).
 
-Pre-2019 statements were filed with Rosstat (state statistics service)
-and are not centrally republished for free.
+Non-financial companies (e.g. Gazprom, Rosneft) have no CBR disclosure;
+their statutory accounts live in ГИРБО (bo.nalog.gov.ru), whose search
+index is geo-blocked outside Russia (see Sources), so `fetch_financials`
+returns an empty list for them from an ex-RU deployment rather than
+inventing data. Pre-2019 statements filed with Rosstat are not centrally
+republished for free.
 
 ## Test companies
 
@@ -70,11 +90,12 @@ unit-test suite).
 
 | Capability  | Status                                          |
 |-------------|-------------------------------------------------|
-| Name search | ✅ Live (egrul.nalog.ru two-step JSON)          |
-| INN lookup  | ✅ Live (egrul.nalog.ru)                        |
-| OGRN lookup | ✅ Live (egrul.nalog.ru)                        |
-| Financials  | ✅ Live (bo.nalog.ru, PDF document URLs, 2019+) |
-| Health      | ✅ Probes Sberbank INN                          |
+| Name search | ✅ Live (egrul.nalog.ru two-step JSON)                    |
+| INN lookup  | ✅ Live (egrul.nalog.ru)                                  |
+| OGRN lookup | ✅ Live (egrul.nalog.ru)                                  |
+| Financials  | ✅ Live for financial-sector entities (cbr.ru Форма 102) |
+|             | ⚠️ Non-financial GIRBO needs a RU egress (geo-block)     |
+| Health      | ✅ Probes Sberbank INN                                    |
 
 ## Limitations
 
@@ -87,9 +108,15 @@ unit-test suite).
 - **Geo-blocking and CAPTCHA.** Both portals occasionally rate-limit
   or challenge non-Russian IPs; persistent blocks should be treated
   as `BLOCKED`. The adapter does not solve CAPTCHAs.
-- **No structured XBRL.** bo.nalog.ru ships PDF and a proprietary
-  transformation file, not iXBRL. Number extraction requires the
-  pypdf / pdfplumber pipeline noted in CLAUDE.md.
+- **Financials limited to the financial sector.** cbr.ru only discloses
+  supervised financial organizations (banks, NPFs, insurers, MFOs, …).
+  Non-financial companies' accounts are in ГИРБО, which geo-blocks
+  ex-RU IPs, so their `fetch_financials` returns `[]` from outside
+  Russia.
+- **No structured numbers yet.** The adapter returns Форма 102 filing
+  metadata + the official CBR source URL, not parsed line items. The
+  CBR form-102/101 HTML tables are highly regular and amenable to a
+  deterministic parser (see Recommended next steps).
 - **Sanctions context.** A large share of Russian legal entities
   listed on egrul.nalog.ru are subject to EU / UK / US / Swiss
   sanctions, including all four test companies (Sberbank, Gazprom,

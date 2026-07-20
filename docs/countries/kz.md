@@ -48,7 +48,7 @@
 - КазМунайГаз (АО "НК "КазМунайГаз") — BIN `020240000555` (form 665)
 - Kaspi (financial org, IFRS reports) — BIN `971240001315`
 - Kazatomprom — BIN `970240000816`
-- Air Astana — BIN `200340008979`
+- Air Astana (АО "ЭЙР АСТАНА", listed carrier, form 665) — BIN `010940000162`
 - ТОО "TESM Company" — BIN `980440000757` (registry hit; **not** a
   public-interest filer, so `fetch_financials` returns `[]`)
 

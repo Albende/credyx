@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.ar import ARAdapter
 from packages.adapters.ar.adapter import _normalize_cuit
-from packages.shared.models import IdentifierType
+from packages.shared.models import FilingType, IdentifierType
 
 
 def test_normalize_cuit_accepts_formatted():
@@ -28,10 +25,20 @@ def test_normalize_cuit_rejects_bad_checksum():
 
 
 @pytest.mark.asyncio
-async def test_search_by_name_is_unimplemented():
+async def test_search_by_name_rejects_short_term():
     adapter = ARAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("YPF")
+    with pytest.raises(InvalidIdentifierError):
+        await adapter.search_by_name("YP")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_search_by_name_finds_ypf():
+    adapter = ARAdapter()
+    matches = await adapter.search_by_name("YPF", limit=5)
+    assert matches
+    assert any(m.id == "30546689979" for m in matches)
+    assert all(m.country == "AR" for m in matches)
 
 
 @pytest.mark.asyncio
@@ -58,7 +65,20 @@ async def test_lookup_banco_macro():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_fetch_financials_empty_for_non_listed():
+async def test_fetch_financials_ypf():
+    adapter = ARAdapter()
+    filings = await adapter.fetch_financials("30-54668997-9", years=3)
+    assert filings
+    latest = filings[0]
+    assert latest.currency == "ARS"
+    assert latest.type in (FilingType.ANNUAL_REPORT, FilingType.BALANCE_SHEET)
+    assert latest.document_url and "aif2.cnv.gov.ar" in latest.document_url
+    assert latest.period_end is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_empty_for_non_issuer():
     adapter = ARAdapter()
     filings = await adapter.fetch_financials("30703088534")
     assert filings == []
