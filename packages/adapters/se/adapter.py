@@ -296,8 +296,8 @@ class SEAdapter(CountryAdapter):
                     period_end=date(year, 12, 31),
                     currency="SEK",
                     structured_data=None,
-                    document_url=nasdaq_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=nasdaq_url,
                 )
             )

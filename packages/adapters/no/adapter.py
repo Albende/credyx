@@ -236,10 +236,9 @@ def _filing_year(entry: dict[str, Any]) -> int | None:
 
 
 def _document_url(org_nr: str, entry: dict[str, Any]) -> str | None:
-    # Brreg exposes the PDF via the regnskap document endpoint per filing id.
-    filing_id = entry.get("id") or entry.get("regnskapId")
-    if filing_id:
-        return f"https://data.brreg.no/regnskapsregisteret/regnskap/{org_nr}/{filing_id}/dokumenter"
+    # Brreg's free API serves structured accounts only — the signed annual
+    # report PDF is a paid/authenticated product, so there is no honest
+    # download URL to offer. HAL links are honored if Brreg ever adds one.
     links = entry.get("_links") or {}
     for key in ("dokumenter", "dokument", "pdf"):
         link = links.get(key)

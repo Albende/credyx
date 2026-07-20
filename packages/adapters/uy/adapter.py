@@ -207,8 +207,8 @@ class UYAdapter(CountryAdapter):
                     period_end=date(yr, 12, 31),
                     currency="UYU",
                     structured_data=None,
-                    document_url=bvm_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=bvm_url,
                 )
             )

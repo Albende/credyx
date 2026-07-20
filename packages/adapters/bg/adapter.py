@@ -240,7 +240,8 @@ class BGAdapter(CountryAdapter):
                     currency="BGN",
                     structured_data=None,
                     document_url=document_url,
-                    document_format="pdf",
+                    # The token link opens the register's per-document viewer
+                    document_format="html",
                     source_url=f"{self.PORTAL_BASE}/CR/Reports/VerificationPersonOrg?uic={eik}",
                 )
             )

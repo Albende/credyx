@@ -205,8 +205,8 @@ class QAAdapter(CountryAdapter):
                     type=FilingType.ANNUAL_REPORT,
                     period_end=date(year, 12, 31),
                     currency="QAR",
-                    document_url=url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=self.QSE_BASE,
                 )
             )

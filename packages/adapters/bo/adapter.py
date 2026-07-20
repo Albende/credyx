@@ -137,8 +137,8 @@ class BOAdapter(CountryAdapter):
                     period_end=date(yr, 12, 31),
                     currency="BOB",
                     structured_data=None,
-                    document_url=bbv_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=bbv_url,
                 )
             )

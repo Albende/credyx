@@ -233,8 +233,8 @@ class ITAdapter(CountryAdapter):
                     period_end=date(year, 12, 31),
                     currency="EUR",
                     structured_data=None,
-                    document_url=borsa_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=borsa_url,
                 )
             )

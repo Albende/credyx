@@ -322,8 +322,8 @@ class KZAdapter(CountryAdapter):
                 period_end=date(current_year - 1, 12, 31),
                 currency="KZT",
                 structured_data=None,
-                document_url=issuer_url,
-                document_format="html",
+                document_url=None,
+                document_format=None,
                 source_url=issuer_url,
             )
         ]

@@ -279,8 +279,8 @@ class CLAdapter(CountryAdapter):
                     period_end=date(yr, 12, 31),
                     currency="CLP",
                     structured_data=None,
-                    document_url=cmf_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=cmf_url,
                 )
             )

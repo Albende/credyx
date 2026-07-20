@@ -201,8 +201,8 @@ class MTAdapter(CountryAdapter):
                 period_end=None,
                 currency="EUR",
                 structured_data=None,
-                document_url=issuer_url,
-                document_format="html",
+                document_url=None,
+                document_format=None,
                 source_url=issuer_url,
             )
         ]

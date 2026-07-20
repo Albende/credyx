@@ -231,8 +231,8 @@ class CRAdapter(CountryAdapter):
                     period_end=date(yr, 12, 31),
                     currency="CRC",
                     structured_data=None,
-                    document_url=index_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=index_url,
                 )
             )

@@ -173,8 +173,8 @@ class BRAdapter(CountryAdapter):
                     period_end=date(yr, 12, 31),
                     currency="BRL",
                     structured_data=None,
-                    document_url=rad_url,
-                    document_format="html",
+                    document_url=None,
+                    document_format=None,
                     source_url=rad_url,
                 )
             )
