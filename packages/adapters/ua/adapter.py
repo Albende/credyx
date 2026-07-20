@@ -16,10 +16,16 @@ Identifier: EDRPOU — 8 digits. Ukrainian VAT numbers are 12 digits;
 practical lookups against the registry still hinge on EDRPOU, so VAT is
 normalized down to its embedded EDRPOU when possible.
 
-Financials: Ukraine has no free centralized annual-report dataset. A
-small set of listed companies file with SMIDA (smida.gov.ua); we surface
-that URL as a best-effort document link and otherwise return an empty
-list. No mock numbers.
+Financials: Ukraine has no free centralized annual-report dataset for the
+general population, but SMIDA (smida.gov.ua) — the NSSMC-run securities
+disclosure system — publishes the filed regular (annual) reports of every
+company that has issued securities. The issuer profile lives at
+`/db/prof/{edrpou}`; its "Регулярна інформація" reports are loaded from the
+AJAX fragment `/db/prof/tabs/{edrpou}/regularXml`, which lists each filed
+report with its year, period type and a per-filing viewer URL. We parse
+that table and return one `FinancialFiling` per annual report, pointing
+`document_url` at the real per-company filing page. Non-issuers (the
+majority of LLCs) have no profile and return an empty list. No mock numbers.
 """
 from __future__ import annotations
 
@@ -37,6 +43,7 @@ from packages.shared.models import (
     CompanyDetails,
     CompanyMatch,
     Director,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -54,6 +61,11 @@ _SEARCH_CARD_RE = re.compile(
     r'(?:<div[^>]*class="address[^"]*"[^>]*>(.*?)</div>)?',
     re.S,
 )
+
+_SMIDA_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_SMIDA_YEAR_HREF_RE = re.compile(r'href="(/db/emitent/report/year/xml/show/\d+)"')
+_SMIDA_CELL_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
 
 
 def _normalize_edrpou(value: str) -> str:
@@ -99,7 +111,9 @@ class UAAdapter(CountryAdapter):
     rate_limit_per_minute = 30
 
     BASE_URL = "https://clarity-project.info"
-    SMIDA_URL = "https://smida.gov.ua/db/emitent/{code}"
+    SMIDA_BASE = "https://smida.gov.ua"
+    SMIDA_PROFILE_URL = "https://smida.gov.ua/db/prof/{code}"
+    SMIDA_REPORTS_TAB_URL = "https://smida.gov.ua/db/prof/tabs/{code}/regularXml"
 
     async def _fetch_page(self, path: str) -> tuple[str, int]:
         text, status, _source = await fetch_with_bot_bypass(
@@ -124,12 +138,12 @@ class UAAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
                 "Registry via Clarity Project HTML (open data mirror of YeDR), "
                 "Cloudflare-walled — FlareSolverr fallback required. "
-                "Financials limited to SMIDA links for listed companies."
+                "Financials via SMIDA regular annual reports (securities issuers only)."
             ),
         )
 
@@ -229,19 +243,63 @@ class UAAdapter(CountryAdapter):
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         edrpou = _normalize_edrpou(company_id)
-        smida_url = self.SMIDA_URL.format(code=edrpou)
-        async with build_http_client() as client:
+        tab_url = self.SMIDA_REPORTS_TAB_URL.format(code=edrpou)
+        async with build_http_client(timeout=30.0) as client:
             try:
-                resp = await get_with_retry(client, smida_url)
+                resp = await get_with_retry(client, tab_url)
             except Exception:
                 return []
-        if resp.status_code != 200 or "emitent" not in resp.text.lower():
+        if resp.status_code != 200:
             return []
-        # SMIDA only confirms the company is a registered issuer; structured
-        # year-by-year filings live behind separate pages that change shape
-        # often. We surface the issuer page as a single document pointer so
-        # downstream code can render a link, but never fabricate periods.
-        return []
+
+        profile_url = self.SMIDA_PROFILE_URL.format(code=edrpou)
+        filings: list[FinancialFiling] = []
+        seen_years: set[int] = set()
+        for year, report_path in _parse_smida_annual_reports(resp.text):
+            if year in seen_years:
+                continue
+            seen_years.add(year)
+            filings.append(
+                FinancialFiling(
+                    company_id=edrpou,
+                    year=year,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=date(year, 12, 31),
+                    currency="UAH",
+                    document_url=f"{self.SMIDA_BASE}{report_path}",
+                    document_format="html",
+                    source_url=profile_url,
+                )
+            )
+        filings.sort(key=lambda f: f.year, reverse=True)
+        return filings[:years]
+
+
+def _parse_smida_annual_reports(fragment: str) -> list[tuple[int, str]]:
+    """Extract (year, report_path) pairs for each annual filing.
+
+    Rows in the `regularXml` tab render as `date | year | quarter | type |
+    view-link`; annual filings carry the type "Річна" and a link under
+    `/db/emitent/report/year/xml/show/{id}`.
+    """
+    reports: list[tuple[int, str]] = []
+    for row in _SMIDA_ROW_RE.finditer(fragment):
+        block = row.group(1)
+        if "Річна" not in block:
+            continue
+        href = _SMIDA_YEAR_HREF_RE.search(block)
+        if not href:
+            continue
+        year: int | None = None
+        for cell in _SMIDA_CELL_RE.findall(block):
+            text = _squash_spaces(_strip_tags(cell))
+            if _YEAR_RE.match(text):
+                year = int(text)
+                break
+        if year is None:
+            continue
+        reports.append((year, href.group(1)))
+    return reports
 
 
 def _parse_edr_info(page: str) -> dict[str, str]:

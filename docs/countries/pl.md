@@ -13,9 +13,12 @@
 | Purpose | Endpoint | Auth | Notes |
 |---------|----------|------|-------|
 | Full registry record | `GET https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs}?rejestr=P&format=json` | none | Falls back to `rejestr=S` (associations) on 404 |
+| Filing mentions | `GET https://api-krs.ms.gov.pl/api/krs/OdpisPelny/{krs}?rejestr=P&format=json` | none | `dzial3.wzmiankiOZlozonychDokumentach` records every annual-statement filing (period, submission date, entry id) |
 | NIP → KRS / VAT status | `GET https://wl-api.mf.gov.pl/api/search/nip/{nip}?date=YYYY-MM-DD` | none | `date` parameter is required |
-| Filings (RDF) | `https://ekrs.ms.gov.pl/rdf/pd/search_df?krs={krs}` | none | **Blocked** by Incapsula bot protection — see below |
-| Name search (web) | `https://wyszukiwarka-krs.ms.gov.pl/` | none | **Blocked** — JS-rendered, session-based; needs Playwright |
+| Name → KRS | `GET https://api.gleif.org/api/v1/lei-records?filter[entity.legalName]={name}&filter[entity.legalAddress.country]=PL` | none | Polish LEI records carry KRS in `entity.registeredAs` under authority `RA000484`. LEI-registered entities only |
+| Filing PDF | `GET https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Search?krs={krs}&signatureType=B&...` → `Monitor/Download?id={id}` | none | MSiG search is **not** behind Incapsula; RDF-signature (`[RDF/…]`) rows are the financial filings; `Download` serves the real gazette PDF |
+| Name search (web) | `https://wyszukiwarka-krs.ms.gov.pl/` | none | **Blocked** — Incapsula, session-based (GLEIF used instead) |
+| Filings (RDF portal) | `https://ekrs.ms.gov.pl/rdf/pd/search_df?nr_krs={krs}` | none | **Blocked** by Incapsula; kept as human `source_url` deep-link only |
 
 - **Rate limit**: KRS REST tolerates ~60 req/min in practice; adapter caps
   at the same. Biała Lista API is generous and we hit it at most once per
@@ -37,24 +40,27 @@
 |-----------|--------|
 | `lookup_by_identifier` (KRS, NIP, VAT) | ✅ Live |
 | `lookup_by_identifier` (REGON) | 🚫 Not implemented — GUS BIR key needed |
-| `search_by_name` | 🚫 Not implemented — no public name-search API |
-| `fetch_financials` | 🚫 Returns `[]` — RDF host is bot-protected |
+| `search_by_name` | ✅ Live via GLEIF (LEI-registered entities → KRS) |
+| `fetch_financials` | ✅ Live — filing metadata from OdpisPelny + downloadable MSiG gazette PDFs |
 
 ## Known limitations
 
-- **No name search.** The KRS REST surface is keyed by KRS number only.
-  The public web search at `wyszukiwarka-krs.ms.gov.pl` runs on a JS
-  front-end with an XSRF/session form, so it cannot be hit with httpx.
-  Reaching it would need Playwright (tracked under the cross-cutting
-  browser-pool work in `CLAUDE.md`). The adapter raises
-  `AdapterNotImplementedError` rather than ship a brittle scrape.
-- **No structured financials yet.** Polish annual financial statements
-  (sprawozdania finansowe) are filed to RDF, the
-  Repozytorium Dokumentów Finansowych at `ekrs.ms.gov.pl/rdf/pd/`. That
-  host is fronted by Incapsula and serves a JS challenge to any plain
-  HTTP client — a true browser is required. Once the project gains a
-  Playwright pool, the adapter can list filings + download iXBRL/PDF
-  blobs.
+- **Name search covers LEI-registered entities only.** The official KRS
+  web search at `wyszukiwarka-krs.ms.gov.pl` is behind Incapsula and needs
+  a full browser session, so it is not a reliable request-path source.
+  Instead the adapter resolves names through GLEIF's public JSON:API:
+  Polish LEI records carry their KRS in `entity.registeredAs` under
+  registration authority `RA000484`, so a name hit resolves straight to a
+  KRS. This means SMEs without an LEI won't surface in name search —
+  lookup by KRS / NIP still works for them.
+- **Financials are filing metadata + the official gazette PDF, not parsed
+  numbers.** `OdpisPelny` lists every annual-statement filing (fiscal
+  period, submission date, entry id). The statement files themselves live
+  in the Incapsula-walled RDF portal, but the same filings are announced in
+  MSiG (Monitor Sądowy i Gospodarczy), whose search API is open. RDF-signature
+  announcements (`[RDF/…]`) are the financial filings; `Monitor/Download?id=`
+  serves the real gazette-issue PDF, attached as `document_url`. Parsing the
+  statement line-items (iXBRL) is still future work.
 - **PESEL / surnames are masked** by the KRS API itself (e.g. Director
   `"nazwiskoICzlon": "N**********"`). This is by design and not an
   adapter issue. The `directors` list will contain partial names from
@@ -63,9 +69,11 @@
 
 ## Status
 
-🟢 **LIVE** — KRS + Biała Lista lookups by KRS / NIP / VAT work against
-production endpoints. Name search and structured filings deferred to the
-browser-pool milestone.
+🟢 **LIVE** — all three capabilities work against production endpoints,
+key-free: lookup by KRS / NIP / VAT (KRS REST + Biała Lista), name search
+via GLEIF (→ KRS), and `fetch_financials` returning filing metadata from
+OdpisPelny plus downloadable MSiG gazette PDFs.
 
-**Next steps:** wire Playwright pool → enable name search via
-wyszukiwarka-krs and RDF filings download.
+**Next steps:** parse the MSiG / RDF PDFs into structured line-items
+(iXBRL) so the risk engine gets real balance-sheet numbers; add GUS BIR key
+for REGON lookup and non-LEI SME name search.

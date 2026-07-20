@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.bg import BGAdapter
 from packages.shared.models import (
     AdapterStatus,
@@ -26,10 +23,16 @@ def test_normalize_strips_bg_prefix_and_validates():
 
 
 @pytest.mark.asyncio
-async def test_search_by_name_raises_not_implemented():
+@pytest.mark.integration
+async def test_search_by_name_returns_real_matches():
     adapter = BGAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("Sopharma")
+    matches = await adapter.search_by_name("Софарма", limit=5)
+    assert matches, "expected name-search matches for Софарма"
+    eiks = {m.id for m in matches}
+    assert "831902088" in eiks  # Sopharma AD is the exact-name hit
+    for m in matches:
+        assert m.country == "BG"
+        assert m.id.isdigit()
 
 
 @pytest.mark.asyncio
@@ -40,6 +43,7 @@ async def test_health_check_live():
     assert health.country_code == "BG"
     assert health.status in (AdapterStatus.OK, AdapterStatus.DEGRADED)
     assert health.capabilities.get("lookup") is True
+    assert health.capabilities.get("search") is True
 
 
 @pytest.mark.asyncio
@@ -94,4 +98,5 @@ async def test_fetch_financials_returns_annual_reports():
     for f in annual:
         assert f.company_id == "831902088"
         assert f.currency == "BGN"
-        assert f.period_end is not None
+        assert f.document_format == "pdf"
+        assert f.document_url and "/CR/api/Documents/" in f.document_url

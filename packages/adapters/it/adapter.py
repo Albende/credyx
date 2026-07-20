@@ -1,19 +1,24 @@
-"""Italy adapter — VIES VAT + Borsa Italiana / CONSOB for listed firms.
+"""Italy adapter — GLEIF + VIES + filings.xbrl.org (ESEF).
 
 Italy's authoritative registry is Registro Imprese (InfoCamere). Full filing
-access is paid per query and explicitly out of scope for the free MVP. What
-is free and usable:
+access is paid per query and out of scope for the free MVP. The free,
+key-less sources that give real, live data:
 
-- VIES (EU VAT Information Exchange) validates a Partita IVA and returns
-  the registered name + address.
-- Borsa Italiana publishes annual report links on its per-company pages;
-  CONSOB tracks Italian listed issuers. Both are free for listed entities
-  (Euronext Milan / Borsa Italiana).
+- **GLEIF** (Global Legal Entity Identifier Foundation) — free JSON:API.
+  Name search returns Italian entities with their LEI and the Registro
+  Imprese registration number (``registeredAs`` = Partita IVA / Codice
+  Fiscale). This is the name-search + LEI-mapping backbone.
+- **VIES** (EU VAT Information Exchange) — validates a Partita IVA and
+  returns the officially registered name + address.
+- **filings.xbrl.org** — the XBRL International index of ESEF annual
+  financial reports that every EU-listed issuer must file since 2021.
+  Keyed by LEI; returns downloadable iXBRL reports. This is where real,
+  per-company filed financials come from for listed Italian issuers.
 
-So lookup_by_identifier hits VIES; fetch_financials surfaces Borsa Italiana
-per-year pointers for entities we can detect as listed, and an empty list
-otherwise. Name search is not possible from any free authoritative source —
-raise to surface the gap.
+So: ``search_by_name`` → GLEIF; ``lookup_by_identifier`` → VIES (enriched
+with GLEIF LEI); ``fetch_financials`` → Partita IVA → GLEIF LEI →
+filings.xbrl.org ESEF reports. Unlisted entities have no free filed
+accounts (Registro Imprese is paid) and return an empty list.
 
 Partita IVA format: 11 digits. First 7 identify the taxpayer, next 3 the
 issuing tax office, and the 11th is a Luhn-style mod-10 check digit (odd
@@ -22,12 +27,11 @@ product summed individually).
 """
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from typing import Any
-
-import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
@@ -52,6 +56,16 @@ _PIVA_RE = re.compile(r"^\d{11}$")
 _VIES_HEALTH_PROBE = "00484960588"
 
 _VIES_URL = "https://ec.europa.eu/taxation_customs/vies/services/checkVatService"
+
+_GLEIF_BASE = "https://api.gleif.org/api/v1/lei-records"
+_GLEIF_HEADERS = {"Accept": "application/vnd.api+json"}
+
+# Registro Imprese registration authority id inside GLEIF. Used to prefer the
+# Italian commercial-register number when an entity carries several ids.
+_RA_REGISTRO_IMPRESE = "RA000407"
+
+_FILINGS_BASE = "https://filings.xbrl.org"
+_FILINGS_API = f"{_FILINGS_BASE}/api/filings"
 
 _VIES_ENVELOPE = """<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -100,30 +114,57 @@ def _piva_checksum_ok(piva: str) -> bool:
     return check == int(piva[10])
 
 
-# Known Italian listed issuers we can deep-link into Borsa Italiana for. The
-# canonical pivot for Borsa Italiana URLs is the ISIN, not the Partita IVA,
-# so we maintain a small explicit map for the test universe. Extending this
-# to every listed Italian issuer would require parsing the listed-companies
-# index — a follow-up once the scraper pool lands.
-_BORSA_ISIN_BY_PIVA: dict[str, str] = {
-    "00484960588": "IT0003132476",  # Eni S.p.A.
-    "00811720580": "IT0003128367",  # Enel S.p.A.
-    "00799960158": "IT0000072618",  # Intesa Sanpaolo S.p.A.
-    "00348170101": "IT0005239360",  # UniCredit S.p.A.
-}
-
-
-def _borsa_company_url(piva: str) -> str | None:
-    isin = _BORSA_ISIN_BY_PIVA.get(piva)
-    if not isin:
+def _format_gleif_address(addr: dict[str, Any] | None) -> str | None:
+    if not addr:
         return None
-    return f"https://www.borsaitaliana.it/borsa/azioni/scheda/{isin}.html"
+    parts = list(addr.get("addressLines") or [])
+    for key in ("postalCode", "city", "region", "country"):
+        val = addr.get(key)
+        if val:
+            parts.append(str(val))
+    joined = ", ".join(p for p in parts if p)
+    return joined or None
+
+
+def _gleif_identifiers(entity: dict[str, Any], lei: str) -> list[RegistryIdentifier]:
+    identifiers = [
+        RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI"),
+    ]
+    registered_as = (entity.get("registeredAs") or "").strip()
+    if _PIVA_RE.match(registered_as):
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.VAT,
+                value=f"IT{registered_as}",
+                label="Partita IVA",
+            )
+        )
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.COMPANY_NUMBER,
+                value=registered_as,
+                label="Codice Fiscale",
+            )
+        )
+    elif registered_as:
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.OTHER,
+                value=registered_as,
+                label="Registro Imprese id",
+            )
+        )
+    return identifiers
 
 
 class ITAdapter(CountryAdapter):
     country_code = "IT"
     country_name = "Italy"
-    identifier_types = [IdentifierType.VAT, IdentifierType.COMPANY_NUMBER]
+    identifier_types = [
+        IdentifierType.VAT,
+        IdentifierType.COMPANY_NUMBER,
+        IdentifierType.LEI,
+    ]
     primary_identifier = IdentifierType.VAT
     requires_api_key = False
     api_key_env = None
@@ -139,7 +180,7 @@ class ITAdapter(CountryAdapter):
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={"search": False, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": True, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=f"VIES probe failed: {str(exc)[:160]}",
             )
@@ -148,7 +189,7 @@ class ITAdapter(CountryAdapter):
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={"search": False, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": True, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes="VIES reachable but Eni Partita IVA reported invalid.",
             )
@@ -156,36 +197,80 @@ class ITAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup via VIES; financials only for Borsa Italiana-listed "
-                "firms. Name search unavailable from any free authoritative "
-                "source (Registro Imprese is paid)."
+                "Name search via GLEIF; lookup via VIES (+GLEIF LEI); filed "
+                "financials via filings.xbrl.org ESEF for listed issuers. "
+                "Registro Imprese filings for unlisted firms are paid — "
+                "unlisted fetch_financials returns []."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Italy has no free authoritative name-search API. Registro "
-            "Imprese (InfoCamere) charges per query; VIES does not accept "
-            "name queries. Use OpenCorporates global search or look up "
-            "directly by Partita IVA."
+        query = name.strip()
+        if not query:
+            raise InvalidIdentifierError("Empty company name")
+        records = await self._gleif_search(
+            {
+                "filter[entity.legalName]": query,
+                "filter[entity.legalAddress.country]": "IT",
+            },
+            limit=limit,
         )
+        if not records:
+            raise AdapterNotImplementedError(
+                f"No GLEIF-registered Italian entity matched '{name}'. GLEIF "
+                "covers entities that hold an LEI; smaller firms without one "
+                "are only in the paid Registro Imprese."
+            )
+        matches: list[CompanyMatch] = []
+        for rec in records:
+            attrs = rec.get("attributes") or {}
+            entity = attrs.get("entity") or {}
+            lei = attrs.get("lei") or rec.get("id") or ""
+            legal_name = ((entity.get("legalName") or {}).get("name") or "").strip()
+            registered_as = (entity.get("registeredAs") or "").strip()
+            local_id = registered_as if _PIVA_RE.match(registered_as) else lei
+            matches.append(
+                CompanyMatch(
+                    id=local_id,
+                    name=legal_name or local_id,
+                    country="IT",
+                    identifiers=_gleif_identifiers(entity, lei),
+                    address=_format_gleif_address(entity.get("legalAddress")),
+                    status=(entity.get("status") or "").lower() or None,
+                    source_url=f"https://search.gleif.org/#/record/{lei}" if lei else None,
+                )
+            )
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
-        if id_type not in (IdentifierType.VAT, IdentifierType.COMPANY_NUMBER):
+        if id_type not in (
+            IdentifierType.VAT,
+            IdentifierType.COMPANY_NUMBER,
+            IdentifierType.LEI,
+        ):
             raise InvalidIdentifierError(
-                f"IT supports VAT/COMPANY_NUMBER, got {id_type}"
+                f"IT supports VAT/COMPANY_NUMBER/LEI, got {id_type}"
             )
         piva = _normalize_piva(value)
-        vies = await self._vies_check(piva)
-        if not vies or not vies.get("valid"):
+
+        gleif = await self._gleif_by_registered_as(piva)
+        vies = await self._vies_check_safe(piva)
+
+        if (not vies or not vies.get("valid")) and gleif is None:
             return None
 
-        borsa_url = _borsa_company_url(piva)
+        entity = (gleif or {}).get("entity") or {}
+        lei = (gleif or {}).get("lei") or ""
+
+        vies_name = ((vies or {}).get("name") or "").strip()
+        gleif_name = ((entity.get("legalName") or {}).get("name") or "").strip()
+        vies_address = ((vies or {}).get("address") or "").strip()
+
         identifiers = [
             RegistryIdentifier(
                 type=IdentifierType.VAT, value=f"IT{piva}", label="Partita IVA"
@@ -196,49 +281,141 @@ class ITAdapter(CountryAdapter):
                 label="Codice Fiscale",
             ),
         ]
+        if lei:
+            identifiers.append(
+                RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI")
+            )
+
+        legal_form = None
+        legal_form_id = (entity.get("legalForm") or {}).get("id")
+        if legal_form_id:
+            legal_form = str(legal_form_id)
+
+        source_url = (
+            f"https://search.gleif.org/#/record/{lei}"
+            if lei
+            else "https://ec.europa.eu/taxation_customs/vies/"
+        )
         return CompanyDetails(
             id=piva,
-            name=(vies.get("name") or "").strip() or piva,
+            name=vies_name or gleif_name or piva,
             country="IT",
-            legal_form=None,
-            status="active",
-            registered_address=(vies.get("address") or "").strip() or None,
+            legal_form=legal_form,
+            status=(entity.get("status") or "").lower() or "active",
+            registered_address=vies_address
+            or _format_gleif_address(entity.get("legalAddress")),
             capital_currency="EUR",
             identifiers=identifiers,
-            raw={"vies": vies, "borsa_listed": bool(borsa_url)},
-            source_url=borsa_url,
+            raw={"vies": vies, "gleif_lei": lei or None},
+            source_url=source_url,
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         piva = _normalize_piva(company_id)
-        borsa_url = _borsa_company_url(piva)
-        if not borsa_url:
+        gleif = await self._gleif_by_registered_as(piva)
+        lei = (gleif or {}).get("lei")
+        if not lei:
             return []
-        # Borsa Italiana publishes annual reports on each issuer's scheda
-        # page; per-document URLs require parsing the page, which is a
-        # follow-up once the scraper pool lands. Surface one entry per
-        # recent year pointing at the durable scheda page so the LLM /
-        # operator can deep-link in.
-        current_year = datetime.utcnow().year
+
+        filings_raw = await self._filings_by_lei(lei)
         filings: list[FinancialFiling] = []
-        for offset in range(1, years + 1):
-            year = current_year - offset
+        seen_years: set[int] = set()
+        for item in filings_raw:
+            attrs = item.get("attributes") or {}
+            period_end = attrs.get("period_end")
+            if not period_end:
+                continue
+            try:
+                pe = date.fromisoformat(period_end)
+            except ValueError:
+                continue
+            if pe.year in seen_years:
+                continue
+            seen_years.add(pe.year)
+
+            report_url = attrs.get("report_url")
+            document_url = f"{_FILINGS_BASE}{report_url}" if report_url else None
+            viewer_url = attrs.get("viewer_url")
+            source_url = (
+                f"{_FILINGS_BASE}{viewer_url}" if viewer_url else _FILINGS_API
+            )
             filings.append(
                 FinancialFiling(
                     company_id=piva,
-                    year=year,
+                    year=pe.year,
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=date(year, 12, 31),
+                    period_end=pe,
                     currency="EUR",
                     structured_data=None,
-                    document_url=None,
-                    document_format=None,
-                    source_url=borsa_url,
+                    document_url=document_url,
+                    document_format="xbrl",
+                    source_url=source_url,
                 )
             )
-        return filings
+
+        filings.sort(key=lambda f: f.year, reverse=True)
+        return filings[:years]
+
+    async def _gleif_search(
+        self, filters: dict[str, str], *, limit: int
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = dict(filters)
+        params["page[size]"] = min(max(limit, 1), 50)
+        async with build_http_client(
+            timeout=30.0, headers=_GLEIF_HEADERS
+        ) as client:
+            resp = await get_with_retry(client, _GLEIF_BASE, params=params)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        return payload.get("data") or []
+
+    async def _gleif_by_registered_as(self, piva: str) -> dict[str, Any] | None:
+        records = await self._gleif_search(
+            {
+                "filter[entity.registeredAs]": piva,
+                "filter[entity.legalAddress.country]": "IT",
+            },
+            limit=5,
+        )
+        best: dict[str, Any] | None = None
+        for rec in records:
+            attrs = rec.get("attributes") or {}
+            entity = attrs.get("entity") or {}
+            if best is None:
+                best = attrs
+            registered_at = (entity.get("registeredAt") or {}).get("id")
+            if registered_at == _RA_REGISTRO_IMPRESE:
+                return attrs
+        return best
+
+    async def _filings_by_lei(self, lei: str) -> list[dict[str, Any]]:
+        filter_expr = json.dumps(
+            [{"name": "entity.identifier", "op": "eq", "val": lei}]
+        )
+        params = {
+            "filter": filter_expr,
+            "sort": "-period_end",
+            "page[size]": 20,
+        }
+        async with build_http_client(
+            timeout=30.0, headers=_GLEIF_HEADERS
+        ) as client:
+            resp = await get_with_retry(client, _FILINGS_API, params=params)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        return payload.get("data") or []
+
+    async def _vies_check_safe(self, piva: str) -> dict[str, Any] | None:
+        try:
+            return await self._vies_check(piva)
+        except Exception:
+            return None
 
     async def _vies_check(self, piva: str) -> dict[str, Any] | None:
         envelope = _VIES_ENVELOPE.format(cc="IT", vat=piva)

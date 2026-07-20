@@ -1,47 +1,55 @@
-"""Romania adapter — ANAF (tax authority) free VAT validator.
+"""Romania adapter — ANAF (tax authority) free JSON services.
 
-ANAF exposes a free, no-auth JSON endpoint that returns name, address, VAT
-registration state, and fiscal flags for any Romanian CUI (Cod Unic de
-Înregistrare). It is the only first-party Romanian source that offers
-structured data without a paid contract or scrape — ONRC's RECOM portal
-needs a commercial subscription for anything beyond a manual page view.
+Three first-party / free sources, none needing an API key:
 
-- Endpoint: https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva
-- Method:   POST
-- Body:     `[{"cui": <int>, "data": "YYYY-MM-DD"}]` (batched, max 100/req)
-- Auth:     None.
-- Cost:     Free.
-- Response: `{"found": [...], "notFound": [...]}` — v9 dropped the old
-  `cod`/`message` envelope.
+- **Lookup** — ANAF VAT validator. `POST` the CUI, get legal name, address,
+  ONRC registration number, fiscal status, VAT flags, NACE, incorporation
+  date.
+  `https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva`
 
-Financials are not exposed by ANAF. Listed companies file annual reports on
-the Bucharest Stock Exchange (BVB) but only as per-company PDF/HTML, so we
-return an empty list rather than fabricate a feed.
+- **Financials** — ANAF's public balance-sheet feed (`/bilant`). `GET` with
+  `an` (year) + `cui`, get the filed annual accounts as a flat list of
+  Romanian statutory indicators (assets, liabilities, equity, turnover,
+  profit) in RON. Data goes back years and includes the most recent filed
+  fiscal year.
+  `https://webservicesp.anaf.ro/bilant?an=YYYY&cui=NNN`
+
+- **Search** — ANAF/ONRC does not expose a first-party name-search API to
+  foreign IPs (mfinante.gov.ro is geoblocked). The free DemoANAF aggregator
+  indexes the full ~4M-row ONRC register and returns the CUI for each hit,
+  which is exactly what the lookup + financials paths need. No key,
+  300 req/min.
+  `https://demoanaf.ro/api/search?q=...`
 """
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
     AdapterError,
-    AdapterNotImplementedError,
     InvalidIdentifierError,
 )
-from packages.adapters._base.http import build_http_client
+from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
 )
 
 _CUI_RE = re.compile(r"^\d{2,10}$")
+
+ANAF_TVA_URL = "https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva"
+ANAF_BILANT_URL = "https://webservicesp.anaf.ro/bilant"
+DEMOANAF_SEARCH_URL = "https://demoanaf.ro/api/search"
 
 
 def _normalize_cui(value: str) -> int:
@@ -69,15 +77,11 @@ class ROAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 60
 
-    ANAF_URL = (
-        "https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva"
-    )
-
     async def health_check(self) -> AdapterHealth:
         try:
             payload = self._anaf_payload(1590082)
             async with build_http_client() as client:
-                resp = await client.post(self.ANAF_URL, json=payload)
+                resp = await client.post(ANAF_TVA_URL, json=payload)
                 resp.raise_for_status()
                 body = resp.json()
             if "found" not in body:
@@ -94,19 +98,31 @@ class ROAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": False},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup via ANAF VAT validator. No free name search. "
-                "Filings not exposed (BVB per-company PDFs only)."
+                "Lookup + financials via ANAF (VAT validator + /bilant). "
+                "Name search via DemoANAF ONRC index."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Romania has no free name-search registry. ONRC RECOM is paid; "
-            "ANAF only accepts CUI lookups."
-        )
+        query = name.strip()
+        if not query:
+            return []
+        async with build_http_client() as client:
+            resp = await get_with_retry(
+                client, DEMOANAF_SEARCH_URL, params={"q": query}
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            body = resp.json()
+
+        if not body.get("success"):
+            raise AdapterError(f"DemoANAF search failed: {str(body)[:200]}")
+        rows = body.get("data") or []
+        return [_match_from_demoanaf(row) for row in rows[:limit]]
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -119,7 +135,7 @@ class ROAdapter(CountryAdapter):
         payload = self._anaf_payload(cui)
 
         async with build_http_client() as client:
-            resp = await client.post(self.ANAF_URL, json=payload)
+            resp = await client.post(ANAF_TVA_URL, json=payload)
             # v9 answers HTTP 404 (with a valid JSON body) when the CUI is
             # not registered — only treat other errors as failures.
             if resp.status_code != 404:
@@ -129,30 +145,82 @@ class ROAdapter(CountryAdapter):
         found = body.get("found") or []
         if not found:
             return None
-        record = found[0]
-        return _details_from_anaf(record, cui)
+        return _details_from_anaf(found[0], cui)
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # ANAF does not expose balance sheets; BVB annual reports are
-        # per-issuer PDF pages with no machine-readable index. Without
-        # introducing a scraper we cannot return real filings.
-        return []
+        cui = _normalize_cui(company_id)
+        cui_str = str(cui)
+        current_year = datetime.utcnow().year
+
+        filings: list[FinancialFiling] = []
+        async with build_http_client() as client:
+            for an in range(current_year, current_year - years - 2, -1):
+                if len(filings) >= years:
+                    break
+                resp = await get_with_retry(
+                    client, ANAF_BILANT_URL, params={"an": an, "cui": cui}
+                )
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
+                body = resp.json()
+                indicators = body.get("i") or []
+                if not indicators:
+                    continue
+                filings.append(_filing_from_bilant(body, cui_str, an))
+        return filings
 
     @staticmethod
     def _anaf_payload(cui: int) -> list[dict[str, Any]]:
         return [{"cui": cui, "data": datetime.utcnow().strftime("%Y-%m-%d")}]
 
 
-def _details_from_anaf(record: dict[str, Any], cui: int) -> CompanyDetails:
-    """Map ANAF's nested response into CompanyDetails.
+def _match_from_demoanaf(row: dict[str, Any]) -> CompanyMatch:
+    cui_str = str(row.get("cui") or "").strip()
+    identifiers = [
+        RegistryIdentifier(
+            type=IdentifierType.COMPANY_NUMBER, value=cui_str, label="CUI"
+        )
+    ]
+    reg_no = (row.get("registrationNumber") or "").strip()
+    if reg_no:
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.OTHER, value=reg_no, label="ONRC registration"
+            )
+        )
 
-    ANAF groups fields under `date_generale`, `inregistrare_scop_Tva`,
-    `inregistrare_RTVAI`, `stare_inactiv`, and `inregistrare_SplitTVA`. We
-    only consume `date_generale` and the VAT-status block; the rest is
-    preserved in `raw` for downstream consumers.
-    """
+    locality = (row.get("locality") or "").strip()
+    county = (row.get("county") or "").strip()
+    address = ", ".join(part for part in (locality, county) if part) or None
+
+    label = (row.get("statusLabel") or "").strip()
+    status = _STATUS_LABELS.get(_strip_diacritics(label).lower(), label or None)
+
+    return CompanyMatch(
+        id=cui_str,
+        name=(row.get("name") or "").strip(),
+        country="RO",
+        identifiers=identifiers,
+        address=address,
+        status=status,
+        source_url=DEMOANAF_SEARCH_URL,
+    )
+
+
+_STATUS_LABELS = {
+    "functiune": "active",
+    "radiata": "dissolved",
+    "insolventa": "insolvent",
+    "dizolvare": "dissolving",
+    "lichidare": "liquidation",
+}
+
+
+def _details_from_anaf(record: dict[str, Any], cui: int) -> CompanyDetails:
+    """Map ANAF's nested VAT-validator response into CompanyDetails."""
     gen: dict[str, Any] = record.get("date_generale") or {}
     vat_block: dict[str, Any] = record.get("inregistrare_scop_Tva") or {}
     inactive_block: dict[str, Any] = record.get("stare_inactiv") or {}
@@ -211,9 +279,103 @@ def _details_from_anaf(record: dict[str, Any], cui: int) -> CompanyDetails:
         identifiers=identifiers,
         phone=phone,
         raw=record,
-        source_url=(
-            "https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva"
-        ),
+        source_url=ANAF_TVA_URL,
+    )
+
+
+# ANAF `/bilant` reports the Romanian statutory indicator set. The I-codes are
+# not stable across taxonomies (banks/insurers use a different chart), so we
+# map by the label text, not the code. Anything we can't confidently match
+# stays out of the typed sections and is preserved under `raw_concepts`.
+_BALANCE_MATCHERS: dict[str, tuple[str, ...]] = {
+    "non_current_assets": ("active imobilizate",),
+    "current_assets": ("active circulante",),
+    "inventories": ("stocuri",),
+    "trade_receivables": ("creante",),
+    "cash_and_equivalents": ("casa si conturi la banci",),
+    "total_liabilities": ("datorii",),
+    "total_equity": ("capitaluri",),
+    "share_capital": ("capital subscris varsat",),
+}
+_INCOME_MATCHERS: dict[str, tuple[str, ...]] = {
+    "revenue": ("cifra de afaceri neta",),
+}
+
+
+def _filing_from_bilant(body: dict[str, Any], cui: str, year: int) -> FinancialFiling:
+    indicators = body.get("i") or []
+    values: dict[str, float] = {}
+    raw_concepts: dict[str, Any] = {}
+    net_profit = net_loss = prepaid = None
+    for item in indicators:
+        label = _strip_diacritics(str(item.get("val_den_indicator") or "")).lower().strip()
+        val = item.get("val_indicator")
+        code = str(item.get("indicator") or "")
+        raw_concepts[code] = {"label": item.get("val_den_indicator"), "value": val}
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            continue
+        num = float(val)
+        for key, needles in _BALANCE_MATCHERS.items():
+            if key not in values and any(n in label for n in needles):
+                values[key] = num
+        for key, needles in _INCOME_MATCHERS.items():
+            if key not in values and any(n in label for n in needles):
+                values[key] = num
+        if label.startswith("cheltuieli in avans"):
+            prepaid = num
+        elif label.startswith("profit net"):
+            net_profit = num
+        elif label.startswith("pierdere neta"):
+            net_loss = num
+
+    balance_sheet = {
+        k: values[k]
+        for k in _BALANCE_MATCHERS
+        if k in values
+    }
+    non_current = balance_sheet.get("non_current_assets")
+    current = balance_sheet.get("current_assets")
+    if non_current is not None and current is not None:
+        balance_sheet["total_assets"] = non_current + current + (prepaid or 0.0)
+
+    income_statement: dict[str, float] = {
+        k: values[k] for k in _INCOME_MATCHERS if k in values
+    }
+    if net_profit:
+        income_statement["net_income"] = net_profit
+    elif net_loss:
+        income_statement["net_income"] = -net_loss
+
+    structured = {
+        "currency": "RON",
+        "period_end": f"{year}-12-31",
+        "consolidated": False,
+        "balance_sheet": balance_sheet,
+        "income_statement": income_statement,
+        "caen": body.get("caen"),
+        "caen_description": body.get("den_caen"),
+        "raw_concepts": raw_concepts,
+    }
+
+    source_url = f"{ANAF_BILANT_URL}?an={year}&cui={cui}"
+    return FinancialFiling(
+        company_id=cui,
+        year=year,
+        type=FilingType.ANNUAL_REPORT,
+        period_end=date(year, 12, 31),
+        currency="RON",
+        structured_data=structured,
+        document_url=source_url,
+        document_format="json",
+        source_url=source_url,
+    )
+
+
+def _strip_diacritics(value: str) -> str:
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(ch)
     )
 
 

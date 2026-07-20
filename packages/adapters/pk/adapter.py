@@ -1,33 +1,35 @@
-"""Pakistan adapter — SECP + FBR + PSX.
+"""Pakistan adapter — PSX Data Portal (listed companies).
 
 Sources
 -------
-- SECP eServices public name search (HTML):
-    https://www.secp.gov.pk/data-and-statistics/eservices/
-- SECP company detail pages (HTML, partial public):
-    https://www.secp.gov.pk/
-- FBR NTN online verification (partial public HTML):
-    https://e.fbr.gov.pk/
-- PSX Data Portal — annual reports for listed companies (free):
-    https://dps.psx.com.pk/
+- PSX Data Portal symbol directory (JSON, free, no key):
+    https://dps.psx.com.pk/symbols
+- PSX Data Portal per-company page (HTML, free, no key):
+    https://dps.psx.com.pk/company/{SYMBOL}
+  Carries a company profile, key people, an annual/quarterly financials
+  table with filed figures, and an announcements table linking the real
+  annual-report PDFs the company transmitted to the exchange.
 
-SECP's eServices portal is session + CAPTCHA + ViewState gated; there is
-no honest free way to drive the name search programmatically. Per the
-no-mock-data rule we surface that as `AdapterNotImplementedError` (501).
-Direct company-detail URLs by Incorporation Number are partially public
-and can be scraped when SECP exposes them; if the registry blocks the
-request (CAPTCHA, geoblock) we raise instead of inventing data.
+The Securities & Exchange Commission of Pakistan (SECP) eServices name
+search and the FBR NTN inquiry are ASP.NET ViewState + CAPTCHA gated with
+no free programmatic path, so unlisted-company lookup by Incorporation
+Number and NTN is surfaced as `AdapterNotImplementedError` (501) rather
+than faked. Listed companies — the entities that matter for credit work —
+are fully served from the PSX Data Portal.
 
 Identifiers
 -----------
-- Incorporation Number — variable format, typically a 7-digit numeric ID
-  optionally zero-padded (e.g. `0012345`). Primary.
-- NTN (National Tax Number) — 7- or 8-digit numeric ID issued by FBR;
-  mapped to `IdentifierType.VAT`.
+- Incorporation Number — variable-length numeric SECP id. Primary type.
+  A PSX trading symbol (short alpha token, e.g. ``HBL``) is accepted on
+  the same identifier slot and routed to the working PSX path.
+- NTN (National Tax Number) — FBR tax id; mapped to ``IdentifierType.VAT``.
 """
 from __future__ import annotations
 
+import html
+import json
 import re
+from datetime import date
 
 import httpx
 
@@ -42,6 +44,8 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    Director,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -50,21 +54,19 @@ from packages.shared.models import (
 
 _INC_NUMBER_RE = re.compile(r"^\d{1,10}$")
 _NTN_RE = re.compile(r"^\d{7,8}(-\d)?$")
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,20}$")
 
-# Major PSX-listed companies for which the Data Portal hosts annual
-# reports. Symbol is the PSX trading symbol; name is used to confirm
-# matches on lookup. The map is intentionally small — only entries we
-# can verify exist on dps.psx.com.pk are kept here.
-PSX_LISTED: dict[str, dict[str, str]] = {
-    "HBL": {"name": "Habib Bank Limited", "sector": "Commercial Banks"},
-    "ENGRO": {"name": "Engro Corporation Limited", "sector": "Chemicals"},
-    "PPL": {"name": "Pakistan Petroleum Limited", "sector": "Oil & Gas Exploration"},
-    "LUCK": {"name": "Lucky Cement Limited", "sector": "Cement"},
-    "OGDC": {"name": "Oil & Gas Development Company Limited", "sector": "Oil & Gas Exploration"},
-    "MCB": {"name": "MCB Bank Limited", "sector": "Commercial Banks"},
-    "UBL": {"name": "United Bank Limited", "sector": "Commercial Banks"},
-    "FFC": {"name": "Fauji Fertilizer Company Limited", "sector": "Fertilizer"},
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_PERIOD_RE = re.compile(
+    r"([A-Za-z]+)\s+(\d{1,2})\s*,?\s*(\d{4})"
+)
 
 
 def normalize_incorporation_number(value: str) -> str:
@@ -87,6 +89,52 @@ def normalize_ntn(value: str) -> str:
     return cleaned
 
 
+def _strip_tags(fragment: str) -> str:
+    return html.unescape(_TAG_RE.sub(" ", fragment)).strip()
+
+
+def _slice_between(source: str, start_marker: str, *end_markers: str) -> str | None:
+    start = source.find(start_marker)
+    if start < 0:
+        return None
+    tail = source[start + len(start_marker):]
+    end = len(tail)
+    for marker in end_markers:
+        pos = tail.find(marker)
+        if 0 <= pos < end:
+            end = pos
+    return tail[:end]
+
+
+def _parse_number(raw: str) -> float | int | None:
+    text = _strip_tags(raw).replace(",", "").strip()
+    if not text or text in {"-", "N/A", "--"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.strip("()").replace("%", "")
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if negative:
+        value = -value
+    return int(value) if value.is_integer() else value
+
+
+def _parse_period_end(title: str) -> date | None:
+    match = _PERIOD_RE.search(title)
+    if not match:
+        return None
+    month = _MONTHS.get(match.group(1).lower())
+    if not month:
+        return None
+    day, year = int(match.group(2)), int(match.group(3))
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
 class PKAdapter(CountryAdapter):
     country_code = "PK"
     country_name = "Pakistan"
@@ -95,22 +143,26 @@ class PKAdapter(CountryAdapter):
     requires_api_key = False
     rate_limit_per_minute = 30
 
-    SECP_BASE = "https://www.secp.gov.pk"
-    FBR_BASE = "https://e.fbr.gov.pk"
     PSX_BASE = "https://dps.psx.com.pk"
 
-    def _client(self, base_url: str | None = None) -> httpx.AsyncClient:
+    def _client(self) -> httpx.AsyncClient:
         return build_http_client(
-            base_url=base_url or self.SECP_BASE,
+            base_url=self.PSX_BASE,
             headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "Referer": f"{self.PSX_BASE}/",
             },
         )
+
+    async def _fetch_symbols(self, client: httpx.AsyncClient) -> list[dict]:
+        resp = await get_with_retry(client, "/symbols", max_attempts=3)
+        resp.raise_for_status()
+        return json.loads(resp.text)
 
     async def health_check(self) -> AdapterHealth:
         try:
             async with self._client() as client:
-                resp = await get_with_retry(client, "/", max_attempts=2)
+                resp = await get_with_retry(client, "/symbols", max_attempts=2)
                 ok = resp.status_code < 500
         except Exception as exc:
             return AdapterHealth(
@@ -125,28 +177,34 @@ class PKAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK if ok else AdapterStatus.DEGRADED,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Name search disabled (SECP eServices is CAPTCHA + ViewState "
-                "gated). Lookup is limited to PSX-listed companies via the "
-                "PSX Data Portal; SECP filing scrape is not free for unlisted."
+                "Coverage is PSX-listed companies via the PSX Data Portal "
+                "(search, profile, filed financials, annual-report PDFs). "
+                "Unlisted SECP/FBR lookup is CAPTCHA-gated and returns 501."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        # Surface listed companies that match — these are the only entities
-        # we can honestly return without driving the SECP CAPTCHA flow.
         needle = name.strip().lower()
         if not needle:
             return []
+        async with self._client() as client:
+            symbols = await self._fetch_symbols(client)
+
         matches: list[CompanyMatch] = []
-        for symbol, info in PSX_LISTED.items():
-            if needle in info["name"].lower() or needle == symbol.lower():
+        for entry in symbols:
+            symbol = entry.get("symbol", "")
+            company_name = entry.get("name", "")
+            if not symbol or not company_name:
+                continue
+            if needle in company_name.lower() or needle == symbol.lower():
+                sector = entry.get("sectorName") or None
                 matches.append(
                     CompanyMatch(
                         id=symbol,
-                        name=info["name"],
+                        name=company_name,
                         country=self.country_code,
                         identifiers=[
                             RegistryIdentifier(
@@ -163,12 +221,10 @@ class PKAdapter(CountryAdapter):
                     break
         if matches:
             return matches
-        # No listed match and the SECP name-search route is gated; raise per
-        # contract instead of returning fake or empty-but-misleading results.
         raise AdapterNotImplementedError(
-            "SECP eServices name search is CAPTCHA + ViewState gated; only "
-            "PSX-listed companies can be returned without auth. See "
-            "docs/countries/pk.md."
+            "No PSX-listed company matched. SECP eServices name search for "
+            "unlisted companies is CAPTCHA + ViewState gated and unavailable "
+            "for free. See docs/countries/pk.md."
         )
 
     async def lookup_by_identifier(
@@ -176,67 +232,97 @@ class PKAdapter(CountryAdapter):
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.VAT:
             ntn = normalize_ntn(value)
-            # FBR's Online NTN/STRN Inquiry requires CAPTCHA + ViewState; no
-            # free programmatic lookup. Surface 501 honestly.
             raise AdapterNotImplementedError(
                 f"FBR NTN inquiry ({ntn}) is CAPTCHA-gated at e.fbr.gov.pk. "
-                "Use Incorporation Number via SECP, or PSX symbol for listed."
+                "Use a PSX symbol for listed companies."
             )
         if id_type != IdentifierType.COMPANY_NUMBER:
             raise InvalidIdentifierError(
-                f"PK supports COMPANY_NUMBER (Incorporation Number) and VAT "
-                f"(NTN), got {id_type}"
+                f"PK supports COMPANY_NUMBER (Incorporation Number / PSX "
+                f"symbol) and VAT (NTN), got {id_type}"
             )
 
-        raw = value.strip()
-        # PSX symbols (e.g. "HBL") are short alpha tokens; route them to the
-        # listed-company path which is the only free working source.
-        if raw.upper() in PSX_LISTED:
-            return self._details_from_psx(raw.upper())
+        raw = value.strip().upper()
+        if _SYMBOL_RE.match(raw) and not raw.isdigit():
+            async with self._client() as client:
+                symbols = await self._fetch_symbols(client)
+                entry = next((e for e in symbols if e.get("symbol") == raw), None)
+                if entry is None:
+                    raise InvalidIdentifierError(
+                        f"{raw!r} is not a listed PSX symbol. Free PK coverage "
+                        "is limited to PSX-listed companies."
+                    )
+                page = await self._fetch_company_page(client, raw)
+            return self._details_from_page(raw, entry, page)
 
-        # Otherwise treat the value as a numeric Incorporation Number.
         inc = normalize_incorporation_number(raw)
-        async with self._client() as client:
-            try:
-                resp = await get_with_retry(
-                    client,
-                    "/",
-                    params={"q": inc},
-                    max_attempts=2,
-                )
-            except httpx.HTTPError as exc:
-                raise AdapterNotImplementedError(
-                    f"SECP company detail by Incorporation Number requires the "
-                    f"eServices session flow; not available for free ({exc})."
-                )
-            if resp.status_code >= 500:
-                resp.raise_for_status()
-        # Even when SECP's homepage answers, the per-company detail data lives
-        # behind the eServices session; we cannot honestly extract company
-        # facts from a public URL. Surface 501 rather than parse mock data.
         raise AdapterNotImplementedError(
             f"SECP Incorporation Number {inc} lookup needs the eServices "
-            "authenticated session. Free MVP supports PSX-listed companies "
-            "only via PSX symbol."
+            "authenticated session (CAPTCHA + ViewState); not available for "
+            "free. Free PK coverage is PSX-listed companies via PSX symbol."
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # Per the no-mock-data rule, we never emit per-year filings without
-        # confirming the year exists. Discovering PSX per-year PDFs requires
-        # the Data Portal session/JS; that lives in Phase 2 behind the
-        # browser pool. Until then we return [] honestly — `CompanyDetails`
-        # already exposes the PSX financial-reports listing URL for listed
-        # companies, which is the navigation pointer the UI needs.
-        _ = company_id, years
-        return []
+        symbol = company_id.strip().upper()
+        if not (_SYMBOL_RE.match(symbol) and not symbol.isdigit()):
+            raise AdapterNotImplementedError(
+                "Financials are available only for PSX-listed companies "
+                "(by PSX symbol). SECP filings for unlisted companies are not "
+                "free. See docs/countries/pk.md."
+            )
+        async with self._client() as client:
+            page = await self._fetch_company_page(client, symbol)
 
-    def _details_from_psx(self, symbol: str) -> CompanyDetails:
-        info = PSX_LISTED[symbol]
+        annual = self._parse_annual_financials(page)
+        pdf_by_year = self._parse_annual_report_pdfs(page)
+        source_url = f"{self.PSX_BASE}/company/{symbol}"
+
+        filings: list[FinancialFiling] = []
+        for year in sorted(annual, reverse=True)[:years]:
+            metrics = annual[year]
+            pdf = pdf_by_year.get(year)
+            filings.append(
+                FinancialFiling(
+                    company_id=symbol,
+                    year=year,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=(pdf["period_end"] if pdf else date(year, 12, 31)),
+                    currency="PKR",
+                    structured_data={
+                        "metrics": metrics,
+                        "unit": "PKR thousands (EPS in PKR per share)",
+                    },
+                    document_url=(pdf["url"] if pdf else None),
+                    document_format=("pdf" if pdf else None),
+                    source_url=source_url,
+                )
+            )
+        return filings
+
+    async def _fetch_company_page(
+        self, client: httpx.AsyncClient, symbol: str
+    ) -> str:
+        resp = await get_with_retry(client, f"/company/{symbol}", max_attempts=3)
+        resp.raise_for_status()
+        return resp.text
+
+    def _details_from_page(
+        self, symbol: str, entry: dict, page: str
+    ) -> CompanyDetails:
+        name = entry.get("name") or self._extract_quote_name(page) or symbol
+        sector = entry.get("sectorName") or None
+        description = self._extract_business_description(page)
+        directors = self._extract_key_people(page)
+        raw: dict = {"psx_symbol": symbol}
+        if sector:
+            raw["sector"] = sector
+        if description:
+            raw["business_description"] = description
         return CompanyDetails(
             id=symbol,
-            name=info["name"],
+            name=name,
             country=self.country_code,
             legal_form="Public Limited Company (Listed)",
             status="listed",
@@ -248,15 +334,120 @@ class PKAdapter(CountryAdapter):
                     label="PSX Symbol",
                 ),
             ],
-            raw={"psx_symbol": symbol, "sector": info["sector"]},
+            directors=directors,
+            raw=raw,
             source_url=f"{self.PSX_BASE}/company/{symbol}",
             capital_currency="PKR",
         )
+
+    @staticmethod
+    def _extract_quote_name(page: str) -> str | None:
+        match = re.search(r'class="quote__name"[^>]*>(.*?)<', page)
+        return html.unescape(match.group(1)).strip() if match else None
+
+    @staticmethod
+    def _extract_business_description(page: str) -> str | None:
+        block = _slice_between(page, "BUSINESS DESCRIPTION", "profile__item")
+        if not block:
+            return None
+        para = re.search(r"<p>(.*?)</p>", block, re.S)
+        if not para:
+            return None
+        text = _strip_tags(para.group(1))
+        return text or None
+
+    @staticmethod
+    def _extract_key_people(page: str) -> list[Director]:
+        block = _slice_between(page, "profile__item--people", "</table>")
+        if not block:
+            return []
+        people: list[Director] = []
+        for row in re.findall(r"<tr>(.*?)</tr>", block, re.S):
+            cells = [_strip_tags(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+            cells = [c for c in cells if c]
+            if not cells:
+                continue
+            name = cells[0]
+            role = cells[1] if len(cells) > 1 else None
+            people.append(Director(name=name, role=role))
+        return people
+
+    @staticmethod
+    def _parse_annual_financials(page: str) -> dict[int, dict[str, float | int]]:
+        section = _slice_between(page, 'id="financials"', 'id="reports"', 'id="profile"')
+        if section is None:
+            return {}
+        panel = _slice_between(
+            section, 'tabs__panel" data-name="Annual"', 'tabs__panel" data-name="Quarterly"'
+        )
+        if panel is None:
+            return {}
+        header = re.search(r"<thead[^>]*>(.*?)</tr>", panel, re.S)
+        if not header:
+            header = re.search(r"<tr>(.*?)</tr>", panel, re.S)
+        if not header:
+            return {}
+        years: list[int] = []
+        for th in re.findall(r"<th[^>]*>(.*?)</th>", header.group(1), re.S):
+            text = _strip_tags(th)
+            if re.fullmatch(r"\d{4}", text):
+                years.append(int(text))
+        if not years:
+            return {}
+
+        result: dict[int, dict[str, float | int]] = {y: {} for y in years}
+        body = _slice_between(panel, "tbl__body", "</table>") or panel
+        for row in re.findall(r"<tr>(.*?)</tr>", body, re.S):
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+            if len(cells) < 2:
+                continue
+            label = _strip_tags(cells[0])
+            if not label or re.fullmatch(r"\d{4}", label):
+                continue
+            for idx, year in enumerate(years, start=1):
+                if idx >= len(cells):
+                    break
+                number = _parse_number(cells[idx])
+                if number is not None:
+                    result[year][label] = number
+        return {y: m for y, m in result.items() if m}
+
+    @staticmethod
+    def _parse_annual_report_pdfs(page: str) -> dict[int, dict]:
+        panel = _slice_between(
+            page,
+            'tabs__panel" data-name="Financial Results"',
+            'tabs__panel" data-name="Board Meetings"',
+        )
+        if panel is None:
+            return {}
+        result: dict[int, dict] = {}
+        for row in re.findall(r"<tr>(.*?)</tr>", panel, re.S):
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+            if len(cells) < 3:
+                continue
+            title = _strip_tags(cells[1])
+            if "annual report" not in title.lower():
+                continue
+            period_end = _parse_period_end(title)
+            if not period_end:
+                continue
+            href = re.search(r'href="(/download/[^"]+\.pdf)"', row)
+            if not href:
+                continue
+            result.setdefault(
+                period_end.year,
+                {
+                    "url": f"https://dps.psx.com.pk{href.group(1)}",
+                    "period_end": period_end,
+                    "title": title,
+                },
+            )
+        return result
 
 
 __all__ = [
     "PKAdapter",
     "normalize_incorporation_number",
     "normalize_ntn",
-    "PSX_LISTED",
 ]

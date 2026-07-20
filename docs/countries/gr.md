@@ -29,8 +29,16 @@
     and the token flow needs wiring.
 - **VIES** SOAP — https://ec.europa.eu/taxation_customs/vies/services/checkVatService
   - `countryCode=EL`, returns name + address for valid ΑΦΜ.
-- **ATHEX** (listed companies only) — https://www.athexgroup.gr/web/guest/companies-financial-data
-  - Free PDF annual reports. Index discovery is brittle JSP — not wired.
+- **Financials** — same GEMI `company/details` payload. Its
+  `companyFinancial` array lists every filed annual financial statement:
+  `{referencePeriod, FilesAndAuditors:[{balancesheet:[{id, bal_date,
+  bal_file_system_file_path, ixbrl_url}], auditors:[...]}]}`. Each filing
+  downloads as a PDF from
+  `GET /api/download/financial/{id}?companyId={gemi}` (no auth). ESEF-listed
+  firms additionally expose an `ixbrl_url` on `filings.businessportal.gr`.
+  Re-verified live 2026-07-21: OTE `2518888` (20 MB PDF), Coca-Cola 3E
+  `2496492`/`1674808` (1.5 MB PDF), OPAP `2041404` (12 MB PDF).
+  The portal rate-limits bursts hard (HTTP 429) — space requests out.
 
 ## Test companies
 
@@ -52,19 +60,21 @@ Active, capital EUR 173,788,380) were re-verified against the live
 | `search_by_name` | ✅ | GEMI publicity portal (best-effort) |
 | `lookup_by_identifier(COMPANY_NUMBER)` | ✅ | GEMI detail endpoint |
 | `lookup_by_identifier(VAT)` | ✅ | VIES (`EL` prefix) |
-| `fetch_financials` | ⚠️ | Returns `[]`; ATHEX index not yet wired |
+| `fetch_financials` | ✅ | GEMI `companyFinancial` → per-year PDF via `/api/download/financial/{id}` |
 
 - `requires_api_key = False`
 - `rate_limit_per_minute = 30`
 
 ## Status
 
-🟢 **Wired (MVP)**: name search + identifier lookup via GEMI publicity
-portal and VIES. Financials are an explicit gap.
+🟢 **Wired (MVP)**: name search, identifier lookup (GEMI + VIES), and
+annual financial statements — all via the free GEMI publicity portal, no
+API key.
 
 **Recommended next steps:**
-1. Wire ATHEX listed-company annual report PDFs into `fetch_financials`
-   once the PDF extraction pipeline lands.
+1. Feed the downloaded financial-statement PDFs (and the ESEF `ixbrl_url`
+   for listed firms) into the PDF/XBRL extraction pipeline so the risk
+   engine gets structured line items rather than just filing metadata.
 2. Re-validate GEMI portal endpoints during the next adapter sweep — the
    JSON paths are undocumented and may shift.
 3. Consider OpenSanctions enrichment for Greek shipping holdings (high

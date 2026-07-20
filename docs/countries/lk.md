@@ -12,8 +12,9 @@
 - Base: https://www.cse.lk
 - Undocumented JSON POST endpoints used by the public site, both `application/x-www-form-urlencoded`:
   - `POST /api/companyInfoSummery` — symbol → issuer snapshot (name, issue date, par value, prices).
-  - `POST /api/companyInfoFinancials` — symbol → list of filed annual report PDFs (`infoAnnualData[].path`, `manualDate`).
-- PDFs are served from `https://cdn.cse.lk/{path}`.
+  - `POST /api/financials` — symbol → list of filed annual report PDFs (`infoAnnualData[].path`, `manualDate`, `fileText`). Renamed from the retired `/api/companyInfoFinancials` when cse.lk migrated to Next.js (verified 2026-07-20).
+- PDFs are served from `https://cdn.cse.lk/{path}` (current paths are `cmt/upload_report_file/{secId}_{ts}.pdf`).
+- Human profile deep-link (used as `source_url`): `https://www.cse.lk/equity/company-data?symbol={symbol}` (the old `/pages/company-profile/...component.html` route now 404s).
 - **Auth**: None.
 - **Rate limit**: Undocumented; we self-throttle to 30 req/min.
 - **ToS / robots.txt**: Public site, no machine-readable license; the endpoints are the ones the browser already calls, so this is "respectful client" usage.
@@ -38,9 +39,11 @@
 ## Status
 
 🟡 **Partial** — CSE-listed issuer search, lookup and annual-report PDF
-links all work via the CSE JSON endpoints. DRC eROC and IRD TIN lookups
-raise `AdapterNotImplementedError` because neither source publishes a
-machine-readable API and both require a browser session.
+links all work via the CSE JSON endpoints (search + lookup via
+`/api/companyInfoSummery`, financials via `/api/financials`; all three
+verified live 2026-07-20, PDFs return `200 application/pdf`). DRC eROC and
+IRD TIN lookups raise `AdapterNotImplementedError` because neither source
+publishes a machine-readable API and both require a browser session.
 
 **Recommended next step:** Once `packages/adapters/_base/browser.py`
 (Playwright pool) lands as part of the cross-cutting infra, add a DRC

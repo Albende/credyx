@@ -18,6 +18,7 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -35,6 +36,7 @@ class FIAdapter(CountryAdapter):
     rate_limit_per_minute = 60
 
     BASE_URL = "https://avoindata.prh.fi/opendata-ytj-api/v3"
+    XBRL_URL = "https://avoindata.prh.fi/opendata-xbrl-api/v3"
 
     async def health_check(self) -> AdapterHealth:
         try:
@@ -51,8 +53,8 @@ class FIAdapter(CountryAdapter):
         return AdapterHealth(
             country_code=self.country_code, name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
-            notes="Financials require PRH paid service — not in MVP.",
+            capabilities={"search": True, "lookup": True, "financials": True},
+            notes="Financials via PRH Opendata XBRL API (iXBRL digital statements only, ~5% of filers).",
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
@@ -118,7 +120,38 @@ class FIAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        return []
+        v = company_id.strip().replace(" ", "")
+        if not _BID_RE.match(v):
+            raise InvalidIdentifierError(f"Finnish Y-tunnus must look like 1234567-8: {company_id}")
+        async with build_http_client(base_url=self.XBRL_URL) as client:
+            resp = await get_with_retry(client, "/financials", params={"businessId": v})
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        periods = payload.get("financials") or []
+        periods.sort(key=lambda p: p.get("financialDate") or "", reverse=True)
+        out: list[FinancialFiling] = []
+        for p in periods[:years]:
+            end = _parse_date(p.get("financialDate"))
+            if end is None:
+                continue
+            out.append(
+                FinancialFiling(
+                    company_id=v,
+                    year=end.year,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=end,
+                    currency="EUR",
+                    document_url=(
+                        f"{self.XBRL_URL}/financial?businessId={v}"
+                        f"&financialDate={end.isoformat()}"
+                    ),
+                    document_format="xbrl",
+                    source_url=f"https://tietopalvelu.ytj.fi/yritystiedot.aspx?ytunnus={v}",
+                )
+            )
+        return out
 
 
 def _pick_name(names: list[dict[str, Any]]) -> str:

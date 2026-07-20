@@ -1,18 +1,25 @@
-"""Spain adapter — VIES VAT + CNMV listed-company filings.
+"""Spain adapter — einforma registry preview + GLEIF + filings.xbrl.org ESEF.
 
-Spain has no free official API for the Registro Mercantil; filed annual
-accounts for private companies sit behind paid InfoCamere-style services we
-explicitly refuse to integrate. What is free and usable:
+Spain has no free official REST API for the Registro Mercantil, and VIES
+confirms a CIF/NIF is a valid Spanish VAT registration but returns no name or
+address for Spanish traders (both come back as ``---``). What is free and
+usable, key-free:
 
-- VIES (EU VAT Information Exchange) confirms a CIF/NIF is a valid Spanish
-  VAT registration and returns the registered name + address.
-- CNMV (Comisión Nacional del Mercado de Valores) publishes annual reports
-  and XBRL filings for every Spanish listed company at no cost.
+- **einforma** publishes a free per-CIF preview page (registered name, legal
+  form, registered address, activity) sourced from BORME / the Registro
+  Mercantil. Used to resolve a CIF to its real registered company.
+- **GLEIF** (Global LEI Foundation) exposes a free structured API for name
+  search and for mapping a company name to its Legal Entity Identifier.
+- **filings.xbrl.org** hosts every EU ESEF (iXBRL) annual report for free,
+  keyed by LEI. This is the durable, downloadable source of filed accounts
+  for Spanish listed issuers.
 
-So lookup_by_identifier hits VIES then opportunistically attaches CNMV
-filing pointers when the entity is listed; fetch_financials returns CNMV
-filings for listed CIFs and an empty list otherwise. Name search is not
-possible from any free authoritative source — raise to surface the gap.
+So ``search_by_name`` queries GLEIF; ``lookup_by_identifier`` validates the
+CIF against VIES and enriches it from einforma; ``fetch_financials`` walks
+CIF -> registered name (einforma) -> LEI (GLEIF) -> ESEF filings
+(filings.xbrl.org), returning real downloadable annual reports. Private
+companies that are not ESEF filers have no free filed accounts, so they
+return an empty list rather than fabricated data.
 
 CIF format: leading letter (organisation class) + 7 digits + check char
 (letter or digit). The check character is computed from the 7-digit body.
@@ -20,17 +27,14 @@ CIF format: leading letter (organisation class) + 7 digits + check char
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
+import unicodedata
 from datetime import date, datetime
 from typing import Any
 
 import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -49,6 +53,25 @@ _CIF_LETTER_REQUIRES_LETTER_CHECK = set("PQRSNW")
 _CIF_LETTER_REQUIRES_DIGIT_CHECK = set("ABEH")
 
 _VIES_HEALTH_PROBE = "A28015865"  # Telefónica — stable, always-valid CIF
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+)
+
+_GLEIF_BASE = "https://api.gleif.org/api/v1/lei-records"
+_GLEIF_HEADERS = {"Accept": "application/vnd.api+json"}
+_FILINGS_BASE = "https://filings.xbrl.org"
+_VIES_REST = "https://ec.europa.eu/taxation_customs/vies/rest-api/ms/ES/vat"
+_EINFORMA_ENTITY = (
+    "https://www.einforma.com/servlet/app/portal/ENTP/prod/ETIQUETA_EMPRESA/nif"
+)
+
+_LEGAL_FORM_TOKENS = {
+    "SA", "SL", "SAU", "SLU", "SAL", "SLL", "SCA", "SC", "SRL",
+    "SOCIEDAD", "ANONIMA", "LIMITADA", "RESPONSABILIDAD", "LABORAL",
+    "UNIPERSONAL", "COOPERATIVA", "COMANDITARIA", "COLECTIVA", "CIVIL",
+}
 
 
 def _normalize_cif(value: str) -> str:
@@ -95,22 +118,33 @@ def _cif_checksum_ok(cif: str) -> bool:
     return given == str(control_digit) or given == control_letter
 
 
-_VIES_ENVELOPE = """<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:urn="urn:ec.europa.eu:taxud:vies:services:checkVat:types">
-  <soapenv:Header/>
-  <soapenv:Body>
-    <urn:checkVat>
-      <urn:countryCode>{cc}</urn:countryCode>
-      <urn:vatNumber>{vat}</urn:vatNumber>
-    </urn:checkVat>
-  </soapenv:Body>
-</soapenv:Envelope>"""
+def _ascii_fold(value: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c)
+    )
 
-_VIES_NS = {
-    "soap": "http://schemas.xmlsoap.org/soap/envelope/",
-    "vies": "urn:ec.europa.eu:taxud:vies:services:checkVat:types",
-}
+
+_LEGAL_FORM_CANON = [
+    ("SOCIEDAD ANONIMA LABORAL", "SAL"),
+    ("SOCIEDAD DE RESPONSABILIDAD LIMITADA", "SL"),
+    ("SOCIEDAD LIMITADA LABORAL", "SLL"),
+    ("SOCIEDAD LIMITADA", "SL"),
+    ("SOCIEDAD ANONIMA", "SA"),
+    ("SOCIEDAD COOPERATIVA", "SCOOP"),
+]
+
+
+def _norm_name(value: str) -> str:
+    folded = _ascii_fold(value).upper()
+    for phrase, short in _LEGAL_FORM_CANON:
+        folded = folded.replace(phrase, short)
+    return re.sub(r"[^A-Z0-9]", "", folded)
+
+
+def _name_core_tokens(value: str) -> list[str]:
+    tokens = re.findall(r"[A-Z0-9]+", _ascii_fold(value).upper())
+    core = [t for t in tokens if t not in _LEGAL_FORM_TOKENS]
+    return core or tokens
 
 
 class ESAdapter(CountryAdapter):
@@ -122,51 +156,74 @@ class ESAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    VIES_URL = "https://ec.europa.eu/taxation_customs/vies/services/checkVatService"
-    CNMV_ENTITY_URL = (
-        "https://www.cnmv.es/Portal/Consultas/EE/InformacionEntidad.aspx"
-    )
-
     async def health_check(self) -> AdapterHealth:
         try:
-            payload = await self._vies_check(_VIES_HEALTH_PROBE)
+            details = await self.lookup_by_identifier(
+                IdentifierType.CIF, _VIES_HEALTH_PROBE
+            )
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={"search": False, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": False, "financials": False},
                 rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=f"VIES probe failed: {str(exc)[:160]}",
+                notes=f"Lookup probe failed: {str(exc)[:160]}",
             )
-        if not payload or not payload.get("valid"):
+        if details is None or not details.name or details.name == _VIES_HEALTH_PROBE:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={"search": False, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": True, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
-                notes="VIES reachable but Telefónica CIF reported invalid.",
+                notes="Telefónica probe reachable but returned no registered name.",
             )
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup via VIES; financials only for CNMV-listed firms. "
-                "Name search unavailable from any free authoritative source."
+                "Search via GLEIF; lookup via einforma + VIES; financials via "
+                "ESEF filings (filings.xbrl.org) for listed issuers."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Spain has no free authoritative name-search API. "
-            "Registro Mercantil charges per query; BORME publishes daily PDFs "
-            "without a name index. Use OpenCorporates global search or look up "
-            "directly by CIF/NIF/VAT."
-        )
+        params = {
+            "filter[entity.legalName]": name,
+            "filter[entity.legalAddress.country]": "ES",
+            "page[size]": str(max(1, min(limit, 50))),
+        }
+        async with build_http_client(timeout=30.0, headers=_GLEIF_HEADERS) as client:
+            resp = await get_with_retry(client, _GLEIF_BASE, params=params)
+            if resp.status_code != 200:
+                return []
+            payload = resp.json()
+        matches: list[CompanyMatch] = []
+        for record in payload.get("data", []):
+            attrs = record.get("attributes", {})
+            entity = attrs.get("entity", {})
+            lei = attrs.get("lei") or record.get("id")
+            legal_name = (entity.get("legalName") or {}).get("name")
+            if not lei or not legal_name:
+                continue
+            matches.append(
+                CompanyMatch(
+                    id=lei,
+                    name=legal_name,
+                    country="ES",
+                    identifiers=[
+                        RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI")
+                    ],
+                    address=_gleif_address(entity.get("legalAddress")),
+                    status=_gleif_status((attrs.get("registration") or {}).get("status")),
+                    source_url=f"{_GLEIF_BASE}/{lei}",
+                )
+            )
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -176,120 +233,224 @@ class ESAdapter(CountryAdapter):
             IdentifierType.NIF,
             IdentifierType.VAT,
         ):
-            raise InvalidIdentifierError(
-                f"ES supports CIF/NIF/VAT, got {id_type}"
-            )
+            raise InvalidIdentifierError(f"ES supports CIF/NIF/VAT, got {id_type}")
         cif = _normalize_cif(value)
-        vies = await self._vies_check(cif)
-        if not vies or not vies.get("valid"):
+        vat_valid = await self._vies_valid(cif)
+        registry = await self._einforma_lookup(cif)
+        if registry is None and not vat_valid:
             return None
 
-        cnmv_listed = await self._cnmv_entity_exists(cif)
+        name = (registry or {}).get("name") or cif
         identifiers = [
             RegistryIdentifier(type=IdentifierType.CIF, value=cif, label="CIF"),
             RegistryIdentifier(type=IdentifierType.VAT, value=f"ES{cif}", label="VAT"),
         ]
         return CompanyDetails(
             id=cif,
-            name=(vies.get("name") or "").strip() or cif,
+            name=name,
             country="ES",
-            legal_form=_legal_form_from_cif_letter(cif[0]),
-            status="active",
-            registered_address=(vies.get("address") or "").strip() or None,
+            legal_form=(registry or {}).get("legal_form")
+            or _legal_form_from_cif_letter(cif[0]),
+            status="active" if vat_valid else (registry or {}).get("status"),
+            registered_address=(registry or {}).get("address"),
             capital_currency="EUR",
+            nace_codes=(registry or {}).get("nace_codes", []),
             identifiers=identifiers,
             raw={
-                "vies": vies,
-                "cnmv_listed": cnmv_listed,
+                "vies": {"valid": vat_valid},
+                "einforma": registry,
             },
-            source_url=(
-                f"{self.CNMV_ENTITY_URL}?nif={cif}" if cnmv_listed else None
-            ),
+            source_url=f"{_EINFORMA_ENTITY}/{cif}" if registry else None,
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         cif = _normalize_cif(company_id)
-        if not await self._cnmv_entity_exists(cif):
+        registry = await self._einforma_lookup(cif)
+        if not registry or not registry.get("name"):
             return []
-        # CNMV exposes annual reports as PDF/XBRL on the entity page itself;
-        # the listing page is the durable, citable URL. We surface one filing
-        # entry per recent year pointing at the entity page so the LLM /
-        # operator can deep-link in. Real per-document URLs require parsing
-        # the entity page's HTML — pulled in a follow-up once the PDF
-        # extraction pipeline lands.
-        page_url = f"{self.CNMV_ENTITY_URL}?nif={cif}"
-        current_year = datetime.utcnow().year
-        filings: list[FinancialFiling] = []
-        for offset in range(1, years + 1):
-            year = current_year - offset
-            filings.append(
-                FinancialFiling(
-                    company_id=cif,
-                    year=year,
-                    type=FilingType.ANNUAL_REPORT,
-                    period_end=date(year, 12, 31),
-                    currency="EUR",
-                    structured_data=None,
-                    document_url=page_url,
-                    document_format="html",
-                    source_url=page_url,
-                )
-            )
-        return filings
+        lei = await self._resolve_lei(registry["name"])
+        if not lei:
+            return []
+        filings = await self._esef_filings(lei)
+        return self._select_filings(cif, filings, years)
 
-    async def _vies_check(self, cif: str) -> dict[str, Any] | None:
-        envelope = _VIES_ENVELOPE.format(cc="ES", vat=cif)
-        headers = {
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "",
-        }
-        async with build_http_client(timeout=30.0, headers=headers) as client:
-            resp = await client.post(self.VIES_URL, content=envelope)
-            if resp.status_code >= 500:
-                resp.raise_for_status()
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-        return _parse_vies_response(resp.text)
-
-    async def _cnmv_entity_exists(self, cif: str) -> bool:
-        url = f"{self.CNMV_ENTITY_URL}?nif={cif}"
+    async def _vies_valid(self, cif: str) -> bool:
         try:
-            async with build_http_client(timeout=20.0) as client:
+            async with build_http_client(
+                timeout=20.0, headers={"Accept": "application/json"}
+            ) as client:
+                resp = await client.get(f"{_VIES_REST}/{cif}")
+            if resp.status_code != 200:
+                return False
+            return bool(resp.json().get("isValid"))
+        except (httpx.HTTPError, ValueError):
+            return False
+
+    async def _einforma_lookup(self, cif: str) -> dict[str, Any] | None:
+        url = f"{_EINFORMA_ENTITY}/{cif}"
+        try:
+            async with build_http_client(
+                timeout=25.0, headers={"User-Agent": _BROWSER_UA}
+            ) as client:
                 resp = await get_with_retry(client, url)
         except httpx.HTTPError:
-            return False
+            return None
         if resp.status_code != 200:
-            return False
-        body = resp.text.lower()
-        # CNMV returns 200 even when the CIF is unknown but renders a
-        # "no se ha encontrado" notice; presence of the canonical entity
-        # heading distinguishes a real match.
-        if "no se ha encontrado" in body or "no se han encontrado" in body:
-            return False
-        return "informacionentidad" in body or "denominaci" in body
+            return None
+        return _parse_einforma(resp.text)
+
+    async def _resolve_lei(self, registered_name: str) -> str | None:
+        core = _name_core_tokens(registered_name)
+        if not core:
+            return None
+        params = {
+            "filter[entity.legalName]": " ".join(core),
+            "filter[entity.legalAddress.country]": "ES",
+            "page[size]": "15",
+        }
+        async with build_http_client(timeout=30.0, headers=_GLEIF_HEADERS) as client:
+            resp = await get_with_retry(client, _GLEIF_BASE, params=params)
+            if resp.status_code != 200:
+                return None
+            payload = resp.json()
+        target = _norm_name(registered_name)
+        best: tuple[int, int, int, str] | None = None
+        for record in payload.get("data", []):
+            attrs = record.get("attributes", {})
+            lei = attrs.get("lei") or record.get("id")
+            cand_name = ((attrs.get("entity") or {}).get("legalName") or {}).get("name")
+            if not lei or not cand_name:
+                continue
+            cand = _norm_name(cand_name)
+            if cand == target:
+                score = 3
+            elif cand.startswith(target) or target.startswith(cand):
+                score = 2
+            else:
+                continue
+            issued = 1 if (
+                (attrs.get("registration") or {}).get("status") == "ISSUED"
+            ) else 0
+            key = (score, issued, -len(cand), lei)
+            if best is None or key > best:
+                best = key
+        return best[3] if best else None
+
+    async def _esef_filings(self, lei: str) -> list[dict[str, Any]]:
+        flt = (
+            '[{"name":"entity.identifier","op":"eq","val":"%s"}]' % lei
+        )
+        params = {"filter": flt, "page[size]": "100"}
+        async with build_http_client(timeout=30.0, headers=_GLEIF_HEADERS) as client:
+            resp = await get_with_retry(client, f"{_FILINGS_BASE}/api/filings", params=params)
+            if resp.status_code != 200:
+                return []
+            payload = resp.json()
+        return [item.get("attributes", {}) for item in payload.get("data", [])]
+
+    def _select_filings(
+        self, cif: str, filings: list[dict[str, Any]], years: int
+    ) -> list[FinancialFiling]:
+        by_period: dict[str, dict[str, Any]] = {}
+        for attrs in filings:
+            period_end = attrs.get("period_end")
+            if not period_end:
+                continue
+            current = by_period.get(period_end)
+            if current is None or (
+                attrs.get("country") == "ES" and current.get("country") != "ES"
+            ):
+                by_period[period_end] = attrs
+        selected = sorted(by_period.values(), key=lambda a: a["period_end"], reverse=True)
+        result: list[FinancialFiling] = []
+        for attrs in selected[: max(1, years)]:
+            period = _parse_date(attrs["period_end"])
+            document_path = attrs.get("package_url") or attrs.get("report_url")
+            viewer_path = attrs.get("viewer_url") or attrs.get("report_url")
+            result.append(
+                FinancialFiling(
+                    company_id=cif,
+                    year=period.year if period else 0,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=period,
+                    currency="EUR",
+                    structured_data=None,
+                    document_url=(
+                        f"{_FILINGS_BASE}{document_path}" if document_path else None
+                    ),
+                    document_format="xbrl" if attrs.get("package_url") else "xhtml",
+                    source_url=f"{_FILINGS_BASE}{viewer_path}" if viewer_path else None,
+                )
+            )
+        return result
 
 
-def _parse_vies_response(xml_text: str) -> dict[str, Any] | None:
+def _gleif_address(addr: dict[str, Any] | None) -> str | None:
+    if not addr:
+        return None
+    parts = list(addr.get("addressLines") or [])
+    for key in ("postalCode", "city", "country"):
+        if addr.get(key):
+            parts.append(addr[key])
+    joined = ", ".join(p for p in parts if p)
+    return joined or None
+
+
+def _gleif_status(status: str | None) -> str | None:
+    if not status:
+        return None
+    return "active" if status == "ISSUED" else status.lower()
+
+
+def _parse_date(value: str) -> date | None:
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
         return None
-    body = root.find("soap:Body", _VIES_NS)
-    if body is None:
+
+
+def _einforma_field(html_text: str, label: str) -> str | None:
+    match = re.search(
+        r"<strong>\s*" + re.escape(label) + r"[^<]*:?\s*</strong>\s*</td>\s*<td[^>]*>(.*?)</td>",
+        html_text,
+        re.S | re.I,
+    )
+    if not match:
         return None
-    fault = body.find("soap:Fault", _VIES_NS)
-    if fault is not None:
-        return {"valid": False, "fault": (fault.findtext("faultstring") or "").strip()}
-    resp = body.find("vies:checkVatResponse", _VIES_NS)
-    if resp is None:
+    raw = match.group(1).split("<a")[0]
+    text = re.sub(r"<[^>]+>", " ", raw)
+    return _html_unescape(text).strip() or None
+
+
+def _html_unescape(value: str) -> str:
+    import html
+
+    return re.sub(r"\s+", " ", html.unescape(value))
+
+
+def _parse_einforma(html_text: str) -> dict[str, Any] | None:
+    heading = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
+    if not heading:
         return None
-    valid = (resp.findtext("vies:valid", default="false", namespaces=_VIES_NS) or "").lower() == "true"
-    name = resp.findtext("vies:name", default="", namespaces=_VIES_NS) or ""
-    address = resp.findtext("vies:address", default="", namespaces=_VIES_NS) or ""
-    return {"valid": valid, "name": name, "address": address}
+    name = _html_unescape(re.sub(r"<[^>]+>", " ", heading.group(1))).strip()
+    if not name:
+        return None
+    address_parts = [
+        _einforma_field(html_text, "Domicilio social actual"),
+        _einforma_field(html_text, "Localidad"),
+    ]
+    address = ", ".join(p for p in address_parts if p) or None
+    cnae = _einforma_field(html_text, "CNAE")
+    nace_codes = re.findall(r"\b(\d{3,4})\b", cnae)[:1] if cnae else []
+    return {
+        "name": name,
+        "legal_form": _einforma_field(html_text, "Forma Jur"),
+        "address": address,
+        "activity": cnae,
+        "nace_codes": nace_codes,
+    }
 
 
 def _legal_form_from_cif_letter(letter: str) -> str | None:

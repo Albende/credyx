@@ -1,24 +1,26 @@
-"""Portugal adapter — VIES VAT validation + CMVM listed-company filings.
+"""Portugal adapter — VIES lookup + GLEIF search + ESEF financial filings.
 
-Portugal has no free authoritative name-search API. The Instituto dos
-Registos e do Notariado (IRN / Registo Comercial Online) charges per
+Portugal has no free authoritative name-search API of its own. The Instituto
+dos Registos e do Notariado (IRN / Registo Comercial Online) charges per
 certificate, and Portal da Empresa exposes only an interactive web search
-behind a CAPTCHA — neither qualifies as a free machine-readable source we
-can wire in MVP.
+behind a CAPTCHA — neither qualifies as a free machine-readable source.
 
 What is free and usable:
 
-- VIES (EU VAT Information Exchange) confirms a Portuguese NIPC is a
+- VIES (EU VAT Information Exchange, REST) confirms a Portuguese NIPC is a
   valid VAT registration and returns the registered name + address.
-- CMVM (Comissão do Mercado de Valores Mobiliários) publishes annual
-  reports and other regulated disclosures for every Portuguese listed
-  issuer at no cost. The public consultation page is durable and
-  citable.
+- GLEIF (Global LEI Foundation, JSON:API) offers free full-text company
+  search scoped to Portugal and maps a NIPC to the entity's LEI via the
+  `registeredAs` field. Coverage is limited to LEI-holding entities
+  (listed issuers, funds, regulated and securities-trading firms).
+- filings.xbrl.org publishes every EU-listed issuer's ESEF annual financial
+  report (inline XBRL) keyed by LEI, at no cost. These are the real filed
+  accounts, not a landing page.
 
-So `lookup_by_identifier` hits VIES and opportunistically attaches a
-CMVM source URL when the entity has a listed-issuer page;
-`fetch_financials` returns CMVM filing pointers for listed NIPCs and
-an empty list otherwise. `search_by_name` raises to surface the gap.
+So `search_by_name` queries GLEIF full-text (PT-scoped); `lookup_by_identifier`
+validates the NIPC via VIES and enriches it with the LEI from GLEIF;
+`fetch_financials` resolves the NIPC to a LEI and returns the actual ESEF
+report documents filed by that specific company.
 
 NIPC format: 9 digits. Check digit (last) is computed from the first 8
 digits with weights 9, 8, 7, 6, 5, 4, 3, 2; sum mod 11; if remainder is
@@ -27,11 +29,8 @@ digits with weights 9, 8, 7, 6, 5, 4, 3, 2; sum mod 11; if remainder is
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import date
 from typing import Any
-
-import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
@@ -52,8 +51,7 @@ from packages.shared.models import (
 
 _NIPC_RE = re.compile(r"^\d{9}$")
 
-# EDP — Energias de Portugal, S.A.: a stable, always-valid NIPC used as a
-# VIES liveness probe.
+# EDP, S.A.: a stable, always-valid NIPC used as a VIES liveness probe.
 _VIES_HEALTH_PROBE = "500697256"
 
 
@@ -78,24 +76,6 @@ def _nipc_checksum_ok(nipc: str) -> bool:
     return int(nipc[8]) == expected
 
 
-_VIES_ENVELOPE = """<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:urn="urn:ec.europa.eu:taxud:vies:services:checkVat:types">
-  <soapenv:Header/>
-  <soapenv:Body>
-    <urn:checkVat>
-      <urn:countryCode>{cc}</urn:countryCode>
-      <urn:vatNumber>{vat}</urn:vatNumber>
-    </urn:checkVat>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-_VIES_NS = {
-    "soap": "http://schemas.xmlsoap.org/soap/envelope/",
-    "vies": "urn:ec.europa.eu:taxud:vies:services:checkVat:types",
-}
-
-
 class PTAdapter(CountryAdapter):
     country_code = "PT"
     country_name = "Portugal"
@@ -105,8 +85,9 @@ class PTAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    VIES_URL = "https://ec.europa.eu/taxation_customs/vies/services/checkVatService"
-    CMVM_ENTITY_URL = "https://web3.cmvm.pt/sdi/emitentes/index.cfm"
+    VIES_REST_URL = "https://ec.europa.eu/taxation_customs/vies/rest-api/ms/PT/vat"
+    GLEIF_URL = "https://api.gleif.org/api/v1/lei-records"
+    FILINGS_BASE = "https://filings.xbrl.org"
 
     async def health_check(self) -> AdapterHealth:
         try:
@@ -116,7 +97,7 @@ class PTAdapter(CountryAdapter):
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={"search": False, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": False, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=f"VIES probe failed: {str(exc)[:160]}",
             )
@@ -125,7 +106,7 @@ class PTAdapter(CountryAdapter):
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={"search": False, "lookup": True, "financials": False},
+                capabilities={"search": True, "lookup": True, "financials": True},
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes="VIES reachable but EDP NIPC reported invalid.",
             )
@@ -133,21 +114,37 @@ class PTAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup via VIES; financials only for CMVM-listed issuers. "
-                "Name search unavailable from any free authoritative source."
+                "Lookup via VIES; PT-scoped name search via GLEIF; ESEF "
+                "financial filings via filings.xbrl.org (LEI-holding issuers)."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Portugal has no free authoritative name-search API. "
-            "Registo Comercial Online charges per certificate and Portal da "
-            "Empresa search is interactive only. Use OpenCorporates global "
-            "search or look up directly by NIPC/VAT."
+        term = name.strip()
+        if not term:
+            raise InvalidIdentifierError("Empty search term")
+        records = await self._gleif_query(
+            {
+                "filter[fulltext]": term,
+                "filter[entity.legalAddress.country]": "PT",
+                "page[size]": max(1, min(int(limit), 50)),
+                "page[number]": 1,
+            }
         )
+        matches = [self._gleif_record_to_match(r) for r in records]
+        matches = [m for m in matches if m is not None]
+        if not matches:
+            raise AdapterNotImplementedError(
+                f"No PT entity with an LEI matched '{name}'. GLEIF only covers "
+                "LEI-holding companies (listed issuers, funds, regulated firms). "
+                "Portugal has no free authoritative full-registry name search — "
+                "Registo Comercial Online charges per certificate and Portal da "
+                "Empresa is CAPTCHA-gated. Look up directly by NIPC/VAT instead."
+            )
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -161,7 +158,7 @@ class PTAdapter(CountryAdapter):
         if not vies or not vies.get("valid"):
             return None
 
-        cmvm_listed = await self._cmvm_entity_exists(nipc)
+        gleif = await self._gleif_by_nipc(nipc)
         identifiers = [
             RegistryIdentifier(
                 type=IdentifierType.COMPANY_NUMBER, value=nipc, label="NIPC"
@@ -170,22 +167,35 @@ class PTAdapter(CountryAdapter):
                 type=IdentifierType.VAT, value=f"PT{nipc}", label="VAT"
             ),
         ]
+        lei = None
+        legal_form = None
+        gleif_address = None
+        if gleif:
+            entity = (gleif.get("attributes") or {}).get("entity") or {}
+            lei = gleif.get("id") or (gleif.get("attributes") or {}).get("lei")
+            legal_form = _safe_get(entity, "legalForm", "id")
+            gleif_address = _format_gleif_address(entity.get("legalAddress"))
+            if lei:
+                identifiers.append(
+                    RegistryIdentifier(
+                        type=IdentifierType.LEI, value=str(lei), label="LEI"
+                    )
+                )
+
         return CompanyDetails(
             id=nipc,
             name=(vies.get("name") or "").strip() or nipc,
             country="PT",
+            legal_form=str(legal_form) if legal_form else None,
             status="active",
-            registered_address=(vies.get("address") or "").strip() or None,
+            registered_address=(
+                (vies.get("address") or "").strip() or gleif_address or None
+            ),
             capital_currency="EUR",
             identifiers=identifiers,
-            raw={
-                "vies": vies,
-                "cmvm_listed": cmvm_listed,
-            },
+            raw={"vies": vies, "gleif_lei": lei},
             source_url=(
-                f"{self.CMVM_ENTITY_URL}?dispatch=bynif&nif={nipc}"
-                if cmvm_listed
-                else None
+                f"https://search.gleif.org/#/record/{lei}" if lei else None
             ),
         )
 
@@ -193,86 +203,156 @@ class PTAdapter(CountryAdapter):
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         nipc = _normalize_nipc(company_id)
-        if not await self._cmvm_entity_exists(nipc):
+        gleif = await self._gleif_by_nipc(nipc)
+        if not gleif:
             return []
-        # CMVM exposes annual reports as PDF / iXBRL on each issuer's
-        # disclosure page; the issuer page is the durable, citable URL.
-        # We surface one filing entry per recent year pointing at the
-        # issuer page so downstream operators can deep-link in. Per-doc
-        # URLs need HTML parsing — wired in a follow-up once the PDF
-        # extraction pipeline lands.
-        page_url = f"{self.CMVM_ENTITY_URL}?dispatch=bynif&nif={nipc}"
-        current_year = datetime.utcnow().year
+        lei = gleif.get("id") or (gleif.get("attributes") or {}).get("lei")
+        if not lei:
+            return []
+
+        filings_raw = await self._xbrl_filings_for_lei(str(lei))
         filings: list[FinancialFiling] = []
-        for offset in range(1, years + 1):
-            year = current_year - offset
+        for attrs in filings_raw:
+            period_end_raw = attrs.get("period_end")
+            report_url = attrs.get("report_url")
+            if not period_end_raw or not report_url:
+                continue
+            try:
+                period_end = date.fromisoformat(period_end_raw)
+            except ValueError:
+                continue
+            viewer_url = attrs.get("viewer_url")
             filings.append(
                 FinancialFiling(
                     company_id=nipc,
-                    year=year,
+                    year=period_end.year,
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=date(year, 12, 31),
+                    period_end=period_end,
                     currency="EUR",
                     structured_data=None,
-                    document_url=page_url,
-                    document_format="html",
-                    source_url=page_url,
+                    document_url=f"{self.FILINGS_BASE}{report_url}",
+                    document_format="xbrl",
+                    source_url=(
+                        f"{self.FILINGS_BASE}{viewer_url}"
+                        if viewer_url
+                        else f"{self.FILINGS_BASE}/api/entities/{lei}"
+                    ),
                 )
             )
-        return filings
+        filings.sort(key=lambda f: f.year, reverse=True)
+        return filings[: max(1, years)] if filings else []
 
     async def _vies_check(self, nipc: str) -> dict[str, Any] | None:
-        envelope = _VIES_ENVELOPE.format(cc="PT", vat=nipc)
-        headers = {
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "",
-        }
-        async with build_http_client(timeout=30.0, headers=headers) as client:
-            resp = await client.post(self.VIES_URL, content=envelope)
+        async with build_http_client(
+            timeout=30.0, headers={"Accept": "application/json"}
+        ) as client:
+            resp = await get_with_retry(client, f"{self.VIES_REST_URL}/{nipc}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
-        return _parse_vies_response(resp.text)
-
-    async def _cmvm_entity_exists(self, nipc: str) -> bool:
-        url = f"{self.CMVM_ENTITY_URL}?dispatch=bynif&nif={nipc}"
-        try:
-            async with build_http_client(timeout=20.0) as client:
-                resp = await get_with_retry(client, url)
-        except httpx.HTTPError:
-            return False
-        if resp.status_code != 200:
-            return False
-        body = resp.text.lower()
-        # CMVM's CFM page returns 200 even for unknown NIPCs but renders a
-        # "sem resultados" notice; presence of the canonical issuer detail
-        # markers ("emitente", "nif") with no "sem resultados" string
-        # signals a real listed issuer match.
-        if "sem resultados" in body or "não foram encontrados" in body:
-            return False
-        return "emitente" in body or "nif" in body
-
-
-def _parse_vies_response(xml_text: str) -> dict[str, Any] | None:
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return None
-    body = root.find("soap:Body", _VIES_NS)
-    if body is None:
-        return None
-    fault = body.find("soap:Fault", _VIES_NS)
-    if fault is not None:
+            data = resp.json()
         return {
-            "valid": False,
-            "fault": (fault.findtext("faultstring") or "").strip(),
+            "valid": bool(data.get("isValid")),
+            "name": data.get("name") or "",
+            "address": (data.get("address") or "").replace("\n", ", "),
+            "user_error": data.get("userError"),
         }
-    resp = body.find("vies:checkVatResponse", _VIES_NS)
-    if resp is None:
+
+    async def _gleif_query(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        async with build_http_client(
+            timeout=30.0, headers={"Accept": "application/vnd.api+json"}
+        ) as client:
+            resp = await get_with_retry(client, self.GLEIF_URL, params=params)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        return payload.get("data") or []
+
+    async def _gleif_by_nipc(self, nipc: str) -> dict[str, Any] | None:
+        records = await self._gleif_query(
+            {
+                "filter[entity.registeredAs]": nipc,
+                "filter[entity.legalAddress.country]": "PT",
+                "page[size]": 1,
+            }
+        )
+        return records[0] if records else None
+
+    async def _xbrl_filings_for_lei(self, lei: str) -> list[dict[str, Any]]:
+        url = f"{self.FILINGS_BASE}/api/entities/{lei}"
+        async with build_http_client(
+            timeout=30.0, headers={"Accept": "application/vnd.api+json"}
+        ) as client:
+            resp = await get_with_retry(
+                client, url, params={"include": "filings"}
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        included = payload.get("included") or []
+        return [
+            item.get("attributes") or {}
+            for item in included
+            if item.get("type") == "filing"
+        ]
+
+    def _gleif_record_to_match(
+        self, record: dict[str, Any]
+    ) -> CompanyMatch | None:
+        lei = record.get("id") or (record.get("attributes") or {}).get("lei")
+        if not lei:
+            return None
+        entity = (record.get("attributes") or {}).get("entity") or {}
+        name = _safe_get(entity, "legalName", "name")
+        if not name:
+            return None
+        nipc = entity.get("registeredAs")
+        identifiers = [
+            RegistryIdentifier(type=IdentifierType.LEI, value=str(lei), label="LEI")
+        ]
+        if nipc:
+            identifiers.append(
+                RegistryIdentifier(
+                    type=IdentifierType.COMPANY_NUMBER,
+                    value=str(nipc),
+                    label="NIPC",
+                )
+            )
+        status_raw = (entity.get("status") or "").upper()
+        return CompanyMatch(
+            id=str(nipc) if nipc else str(lei),
+            name=str(name),
+            country="PT",
+            identifiers=identifiers,
+            address=_format_gleif_address(entity.get("legalAddress")),
+            status="active" if status_raw == "ACTIVE" else (status_raw.lower() or None),
+            source_url=f"https://search.gleif.org/#/record/{lei}",
+        )
+
+
+def _safe_get(obj: Any, *keys: str) -> Any:
+    cur: Any = obj
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+        if cur is None:
+            return None
+    return cur
+
+
+def _format_gleif_address(address: Any) -> str | None:
+    if not isinstance(address, dict):
         return None
-    valid = (
-        resp.findtext("vies:valid", default="false", namespaces=_VIES_NS) or ""
-    ).lower() == "true"
-    name = resp.findtext("vies:name", default="", namespaces=_VIES_NS) or ""
-    address = resp.findtext("vies:address", default="", namespaces=_VIES_NS) or ""
-    return {"valid": valid, "name": name, "address": address}
+    parts: list[str] = []
+    lines = address.get("addressLines")
+    if isinstance(lines, list):
+        parts.extend(str(line) for line in lines if line)
+    for key in ("city", "region", "postalCode", "country"):
+        val = address.get(key)
+        if val:
+            parts.append(str(val))
+    cleaned = [p.strip() for p in parts if p and str(p).strip()]
+    return ", ".join(cleaned) if cleaned else None

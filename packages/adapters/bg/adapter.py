@@ -1,36 +1,35 @@
 """Bulgaria adapter — Търговски регистър (Trade Register & NPLE Register).
 
-The Bulgarian Registry Agency exposes a free public JSON API at
-``portal.registryagency.bg/CR/api/Deeds/{eik}`` that returns the full
-canonical extract for a company keyed by its EIK / UIC (Edinen
-Identifikatsionen Kod, 9 or 13 digits). The same payload also embeds the
-"Announced Acts" section (``CR_GL_ANNOUNCED_ACTS_L``) which lists every
-filed document, including the annual financial reports ("Годишен
-финансов отчет") with per-document ``DocumentAccess/{token}`` links.
+The Bulgarian Registry Agency exposes free public JSON endpoints on
+``portal.registryagency.bg/CR/api``:
+
+- ``GET /Deeds/Summary?name={name}&selectedSearchFilter=1`` — legal-entity
+  name search; returns ``[{ident, name, companyFullName, isPhysical}]``.
+- ``GET /Deeds/{eik}`` — full canonical extract for a company keyed by its
+  EIK / UIC (Edinen Identifikatsionen Kod, 9 or 13 digits). The payload
+  embeds the "Announced Acts" section (``CR_GL_ANNOUNCED_ACTS_L``) which
+  lists every filed document, including the annual financial reports
+  ("Годишен финансов отчет") with per-document ``DocumentAccess/{token}``
+  links.
+- ``GET /Documents/{token}`` — streams the actual filed PDF for a given
+  ``DocumentAccess`` token (``application/pdf``, no auth). This is the real
+  downloadable document; the ``/CR/DocumentAccess/{token}`` route is only
+  the JS viewer shell.
 
 VAT validation is delegated to VIES — Bulgarian VAT is literally
 ``BG`` + EIK, so the same identifier resolves both ways.
-
-The public portal does NOT expose a documented JSON name-search endpoint —
-the SPA performs name search server-side and only the SPA HTML shell is
-returned to non-browser callers. ``search_by_name`` therefore raises
-``AdapterNotImplementedError`` per the project rule against scraping
-brittle SPA HTML or fabricating data.
 """
 from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -139,20 +138,63 @@ class BGAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup + annual financial reports via portal.registryagency.bg "
-                "Deeds API. Name search not exposed as JSON — use EIK or VAT."
+                "Name search + lookup + downloadable annual financial reports "
+                "via portal.registryagency.bg CR API."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Bulgarian Trade Register does not expose a free JSON name-search "
-            "endpoint; the public SPA performs the query server-side. "
-            "Look up by EIK / UIC or BG VAT instead."
-        )
+        query = name.strip()
+        if not query:
+            return []
+        params = {
+            "page": 1,
+            "pageSize": max(1, min(limit, 100)),
+            "count": 0,
+            "name": query,
+            "selectedSearchFilter": 1,
+            "includeHistory": "true",
+        }
+        async with build_http_client(base_url=self.PORTAL_BASE, timeout=30.0) as client:
+            resp = await get_with_retry(client, "/CR/api/Deeds/Summary", params=params)
+            resp.raise_for_status()
+            try:
+                rows = resp.json()
+            except ValueError:
+                return []
+        if not isinstance(rows, list):
+            return []
+        matches: list[CompanyMatch] = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("isPhysical"):
+                continue
+            eik = str(row.get("ident") or "").strip()
+            if not _EIK_RE.match(eik):
+                continue
+            display = (row.get("companyFullName") or row.get("name") or "").strip()
+            matches.append(
+                CompanyMatch(
+                    id=eik,
+                    name=display or eik,
+                    country="BG",
+                    identifiers=[
+                        RegistryIdentifier(
+                            type=IdentifierType.COMPANY_NUMBER,
+                            value=eik,
+                            label="EIK / UIC",
+                        )
+                    ],
+                    source_url=(
+                        f"{self.PORTAL_BASE}/CR/en/Reports/ActiveCondition?uic={eik}"
+                    ),
+                )
+            )
+            if len(matches) >= limit:
+                break
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -215,36 +257,30 @@ class BGAdapter(CountryAdapter):
         if deed is None:
             return []
         cutoff_year = datetime.utcnow().year - years
+        source_url = f"{self.PORTAL_BASE}/CR/en/Reports/ActiveCondition?uic={eik}"
+        seen: set[tuple[int, FilingType]] = set()
         filings: list[FinancialFiling] = []
         for entry in _iter_annual_filings(deed):
-            period_end = entry["date"]
-            if period_end is None or period_end.year < cutoff_year:
+            year = entry["year"]
+            if year < cutoff_year:
                 continue
-            doc_token = entry["doc_token"]
-            document_url = (
-                f"{self.PORTAL_BASE}/CR/{doc_token}" if doc_token else None
-            )
+            key = (year, entry["type"])
+            if key in seen:
+                continue
+            seen.add(key)
             filings.append(
                 FinancialFiling(
                     company_id=eik,
-                    # The filing-action year is the year the report was filed;
-                    # the report itself covers the prior fiscal year. Use the
-                    # filed-on year minus one as the canonical reporting year
-                    # only if we have no better signal — for now we record the
-                    # filing date year as ``year`` and let the risk engine
-                    # decide. This keeps the contract simple and avoids
-                    # inventing data.
-                    year=period_end.year,
+                    year=year,
                     type=entry["type"],
-                    period_end=period_end,
                     currency="BGN",
                     structured_data=None,
-                    document_url=document_url,
-                    # The token link opens the register's per-document viewer
-                    document_format="html",
-                    source_url=f"{self.PORTAL_BASE}/CR/Reports/VerificationPersonOrg?uic={eik}",
+                    document_url=f"{self.PORTAL_BASE}/CR/api/Documents/{entry['doc_token']}",
+                    document_format="pdf",
+                    source_url=source_url,
                 )
             )
+        filings.sort(key=lambda f: (f.year, f.type.value), reverse=True)
         return filings
 
     async def _fetch_deed(self, eik: str) -> dict[str, Any] | None:
@@ -288,30 +324,18 @@ def _deed_status_label(code: Any) -> str | None:
     return None
 
 
-_FIELD_TEXT_RE = re.compile(
-    r"<p[^>]*class=['\"]field-text['\"][^>]*>([^<]+)", re.IGNORECASE
+_CAPITAL_RE = re.compile(r"([\d\s][\d\s.,]*)\s*(€|BGN|лв|евро|EUR)", re.IGNORECASE)
+
+# Each Announced-Acts field packs several document blocks into one HTML
+# string: one ``<p class='field-text'>`` per filed document, each carrying a
+# category heading, a ``DocumentAccess/{token}`` download link and a
+# "Дата на обявяване" publication date. The reporting year is stated inline
+# as "за YYYY г." or "Година: YYYYг.".
+_ACT_BLOCK_RE = re.compile(
+    r"<p[^>]*class=['\"]field-text['\"][^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL
 )
-_DOC_HREF_RE = re.compile(r"href=['\"](DocumentAccess/[^'\"]+)['\"]", re.IGNORECASE)
-_CAPITAL_RE = re.compile(r"([\d\s][\d\s.,]*)\s*(BGN|лв|евро|EUR)", re.IGNORECASE)
-
-
-def _field_title(html: str) -> str:
-    m = _FIELD_TEXT_RE.search(html or "")
-    return m.group(1).strip() if m else ""
-
-
-def _field_doc_token(html: str) -> str | None:
-    m = _DOC_HREF_RE.search(html or "")
-    return m.group(1) if m else None
-
-
-def _parse_field_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
+_ACT_DOC_RE = re.compile(r"href=['\"]DocumentAccess/([^'\"]+)['\"]", re.IGNORECASE)
+_REPORT_YEAR_RE = re.compile(r"(?:за|Година\s*:?)\s*((?:19|20)\d{2})\s*г")
 
 
 def _iter_sections(deed: dict[str, Any], name_code: str) -> list[dict[str, Any]]:
@@ -330,75 +354,70 @@ def _iter_fields(
     return out
 
 
-_ANNUAL_TITLE_HINTS = (
-    "годишен финансов отчет",
-    "годишен доклад за дейността",
-    "годишен консолидиран финансов отчет",
-    "одиторски доклад",
-)
-
-
-def _classify_filing(title: str) -> FilingType | None:
-    t = title.lower()
-    if "одиторски" in t:
+def _classify_act(text: str) -> FilingType | None:
+    low = text.lower()
+    if "одиторски" in low or "проверител" in low:
         return FilingType.AUDIT_REPORT
-    if "доклад" in t and "годишен" in t:
+    if "доклад за дейността" in low:
         return FilingType.DIRECTORS_REPORT
-    if "финансов отчет" in t and "годишен" in t:
+    if "финансов отчет" in low:
         return FilingType.ANNUAL_REPORT
     return None
 
 
 def _iter_annual_filings(deed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Yield annual-report-like entries from the ``Announced Acts`` section."""
+    """Yield ``{year, type, doc_token}`` for each downloadable annual filing.
+
+    Only blocks that name both a downloadable document and an explicit
+    reporting year are emitted — the reporting year is never inferred, so no
+    document is mislabelled.
+    """
     out: list[dict[str, Any]] = []
     for field in _iter_fields(deed, "CR_GL_ANNOUNCED_ACTS_L"):
-        html = field.get("htmlData") or ""
-        title = _field_title(html)
-        if not title:
-            continue
-        kind = _classify_filing(title)
-        if kind is None:
-            # Some filings have the title only matched via the hint list when
-            # the Cyrillic prefix differs slightly — fall back to substring.
-            low = title.lower()
-            if not any(hint in low for hint in _ANNUAL_TITLE_HINTS):
+        for block in _ACT_BLOCK_RE.findall(field.get("htmlData") or ""):
+            doc = _ACT_DOC_RE.search(block)
+            if not doc:
                 continue
-            kind = FilingType.ANNUAL_REPORT
-        out.append(
-            {
-                "title": title,
-                "type": kind,
-                "date": _parse_field_date(
-                    field.get("fieldActionDate") or field.get("fieldEntryDate")
-                ),
-                "doc_token": _field_doc_token(html),
-            }
-        )
+            text = _strip_html(block)
+            kind = _classify_act(text)
+            year_match = _REPORT_YEAR_RE.search(text)
+            if kind is None or year_match is None:
+                continue
+            out.append(
+                {
+                    "year": int(year_match.group(1)),
+                    "type": kind,
+                    "doc_token": doc.group(1),
+                }
+            )
     return out
 
 
 def _extract_registered_address(deed: dict[str, Any]) -> str | None:
     """Pull the registered seat ('Седалище и адрес на управление') from the
-    general-status section. The Trade Register encodes it as an HTML snippet,
-    so we strip tags and collapse whitespace.
+    general-status section. It lives in ``CR_F_5_L`` (fallback ``CR_F_5a_L``)
+    encoded as an HTML snippet, so we strip tags and collapse whitespace.
     """
-    for field in _iter_fields(deed, "CR_GL_GENERAL_STATUS_L"):
-        # Field code ``CR_F_3_L`` ≈ seat & management address in the Bulgarian
-        # Trade Register schema. Names vary across legal forms, so we also
-        # accept any field whose plain text mentions ``обл.``/``гр.``.
-        title = _field_title(field.get("htmlData") or "")
-        if field.get("nameCode") == "CR_F_3_L" or "обл." in title or "гр." in title:
-            text = _strip_html(field.get("htmlData") or "")
-            if text:
-                return text
+    by_code = {f.get("nameCode"): f for f in _iter_fields(deed, "CR_GL_GENERAL_STATUS_L")}
+    for code in ("CR_F_5_L", "CR_F_5a_L"):
+        field = by_code.get(code)
+        if field is None:
+            continue
+        text = _strip_html(field.get("htmlData") or "")
+        if text:
+            return text
     return None
 
 
 def _extract_capital(deed: dict[str, Any]) -> tuple[float | None, str | None]:
-    for field in _iter_fields(deed, "CR_GL_GENERAL_STATUS_L"):
-        html = field.get("htmlData") or ""
-        m = _CAPITAL_RE.search(_strip_html(html))
+    """Registered capital lives in ``CR_F_31_L`` (subscribed) with
+    ``CR_F_32_L`` (paid-in) as fallback, e.g. ``274970377.53 €``."""
+    by_code = {f.get("nameCode"): f for f in _iter_fields(deed, "CR_GL_GENERAL_STATUS_L")}
+    for code in ("CR_F_31_L", "CR_F_32_L"):
+        field = by_code.get(code)
+        if field is None:
+            continue
+        m = _CAPITAL_RE.search(_strip_html(field.get("htmlData") or ""))
         if not m:
             continue
         raw_amount = m.group(1).replace(" ", "").replace(",", ".")
@@ -406,8 +425,8 @@ def _extract_capital(deed: dict[str, Any]) -> tuple[float | None, str | None]:
             amount = float(raw_amount)
         except ValueError:
             continue
-        currency_token = m.group(2).lower()
-        currency = "EUR" if currency_token.startswith(("евро", "eur")) else "BGN"
+        token = m.group(2).lower()
+        currency = "EUR" if token in ("€", "eur") or token.startswith("евро") else "BGN"
         return amount, currency
     return None, None
 

@@ -1,19 +1,21 @@
-"""Brazil adapter — BrasilAPI (Receita Federal CNPJ mirror) with ReceitaWS fallback.
+"""Brazil adapter — Receita Federal CNPJ data plus CVM listed-company filings.
 
 Sources:
-- Primary: https://brasilapi.com.br/api/cnpj/v1/{cnpj} — free, no auth, ~3 req/s.
-- Fallback: https://www.receitaws.com.br/v1/cnpj/{cnpj} — free tier 3 req/min.
-- Listed-company financials: CVM cadastro CSV
-  http://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv —
-  maps CNPJ to CVM code, used to construct rad.cvm.gov.br DFP links.
+- Name search: DadosBrasil open API
+  https://api.dadosbrasil.net/api/v1/companies?q={term} — free, no auth,
+  full Receita Federal CNPJ open dataset re-imported monthly.
+- Lookup by CNPJ: BrasilAPI https://brasilapi.com.br/api/cnpj/v1/{cnpj}
+  (free, no auth, ~3 req/s) with ReceitaWS
+  https://www.receitaws.com.br/v1/cnpj/{cnpj} as a 5xx fallback.
+- Listed-company financials: CVM (Comissão de Valores Mobiliários) DFP
+  open data. The cadastro CSV maps CNPJ → CVM code; the yearly DFP bundle
+  https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_{year}.zip
+  carries the per-company filing index (with the official document link)
+  and the structured balance-sheet / income-statement line items.
 
 Identifier: CNPJ (14 digits, format XX.XXX.XXX/XXXX-XX). CNPJ doubles as
 the Brazilian corporate tax ID; there is no separate VAT number, so we
 expose it as the primary VAT and also accept COMPANY_NUMBER.
-
-Name search is not available: Receita Federal's public consultation
-requires solving a CAPTCHA and is therefore raised as
-`AdapterNotImplementedError` per the project's no-mock-data rule.
 """
 from __future__ import annotations
 
@@ -21,14 +23,15 @@ import asyncio
 import csv
 import io
 import re
+import zipfile
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
     InvalidIdentifierError,
 )
 from packages.adapters._base.http import build_http_client, get_with_retry
@@ -47,6 +50,28 @@ from packages.shared.models import (
 _DIGITS_RE = re.compile(r"\D+")
 _CNPJ_WEIGHTS_1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
 _CNPJ_WEIGHTS_2 = [6] + _CNPJ_WEIGHTS_1
+
+_DB_UNAVAILABLE = "database temporarily unavailable"
+
+# CVM DFP standardized account codes → unified financial-statement keys the
+# risk engine reads (packages/risk/ratios.py).
+_BPA_ACCOUNTS = {
+    "1": "total_assets",
+    "1.01": "current_assets",
+    "1.01.01": "cash_and_equivalents",
+    "1.02": "non_current_assets",
+}
+_BPP_ACCOUNTS = {
+    "2.01": "current_liabilities",
+    "2.02": "non_current_liabilities",
+    "2.03": "total_equity",
+}
+_DRE_ACCOUNTS = {
+    "3.01": "revenue",
+    "3.03": "gross_profit",
+    "3.05": "operating_profit",
+    "3.11": "net_income",
+}
 
 
 def _normalize_cnpj(value: str) -> str:
@@ -86,9 +111,11 @@ class BRAdapter(CountryAdapter):
 
     BRASILAPI_BASE = "https://brasilapi.com.br"
     RECEITAWS_BASE = "https://www.receitaws.com.br"
+    DADOSBRASIL_BASE = "https://api.dadosbrasil.net"
     CVM_CADASTRO_URL = (
-        "http://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv"
+        "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv"
     )
+    CVM_DFP_BASE = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS"
 
     # Petrobras — used as the canonical health-check CNPJ.
     _HEALTH_CNPJ = "33000167000101"
@@ -116,19 +143,58 @@ class BRAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Name search blocked by CAPTCHA at Receita Federal. "
-                "Financials limited to CVM-listed companies."
+                "Name search via DadosBrasil open data (Receita Federal CNPJ). "
+                "Financials limited to CVM-listed companies (structured DFP "
+                "line items)."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "Brazilian Receita Federal does not expose free name search "
-            "(public lookup requires CAPTCHA). Use CNPJ lookup directly."
-        )
+        term = (name or "").strip()
+        if not term:
+            return []
+        path = f"/api/v1/companies?q={quote(term)}&limit={max(1, min(limit, 50))}"
+        payload = await self._dadosbrasil_get(path)
+        if not payload:
+            return []
+        matches: list[CompanyMatch] = []
+        for item in payload.get("items") or []:
+            match = _match_from_dadosbrasil(item)
+            if match is not None:
+                matches.append(match)
+        return matches
+
+    async def _dadosbrasil_get(self, path: str) -> dict[str, Any] | None:
+        # The DadosBrasil server intermittently reports its backend as
+        # unavailable — sometimes as a JSON error, sometimes by stalling the
+        # connection until it read-times-out. Retry both across fresh clients.
+        for attempt in range(8):
+            try:
+                async with build_http_client(
+                    base_url=self.DADOSBRASIL_BASE, timeout=12.0
+                ) as client:
+                    resp = await client.get(path)
+            except httpx.HTTPError:
+                await asyncio.sleep(0.8)
+                continue
+            if resp.status_code == 404:
+                return None
+            if resp.status_code >= 500:
+                await asyncio.sleep(0.8)
+                continue
+            try:
+                data = resp.json()
+            except ValueError:
+                await asyncio.sleep(0.8)
+                continue
+            if isinstance(data, dict) and data.get("error") == _DB_UNAVAILABLE:
+                await asyncio.sleep(0.8)
+                continue
+            return data if isinstance(data, dict) else None
+        return None
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -150,35 +216,55 @@ class BRAdapter(CountryAdapter):
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         cnpj = _normalize_cnpj(company_id)
-        cvm_code = await self._cvm_code_for(cnpj)
-        if cvm_code is None:
+        if await self._cvm_code_for(cnpj) is None:
             return []
-        # CVM does not expose direct per-year DFP URLs without a session. The
-        # rad.cvm.gov.br landing page lists every annual report (DFP) and
-        # interim filing for the company. Surface that as the document URL —
-        # the consumer can drill into specific years.
-        rad_url = (
-            "https://www.rad.cvm.gov.br/ENET/frmConsultaExternaCVM.aspx"
-            f"?codigoCVM={cvm_code}"
-        )
+
         current_year = datetime.utcnow().year
         filings: list[FinancialFiling] = []
-        for offset in range(years):
-            yr = current_year - offset
-            filings.append(
-                FinancialFiling(
-                    company_id=cnpj,
-                    year=yr,
-                    type=FilingType.ANNUAL_REPORT,
-                    period_end=date(yr, 12, 31),
-                    currency="BRL",
-                    structured_data=None,
-                    document_url=None,
-                    document_format=None,
-                    source_url=rad_url,
-                )
-            )
+        for ref_year in range(current_year, current_year - (years + 2), -1):
+            if len(filings) >= years:
+                break
+            filing = await self._dfp_filing(cnpj, ref_year)
+            if filing is not None:
+                filings.append(filing)
         return filings
+
+    async def _dfp_filing(self, cnpj: str, year: int) -> FinancialFiling | None:
+        zip_url = f"{self.CVM_DFP_BASE}/dfp_cia_aberta_{year}.zip"
+        try:
+            async with build_http_client(timeout=90.0) as client:
+                resp = await get_with_retry(client, zip_url)
+                if resp.status_code != 200:
+                    return None
+                raw = resp.content
+        except httpx.HTTPError:
+            return None
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile:
+            return None
+
+        index_row = _find_dfp_index_row(zf, f"dfp_cia_aberta_{year}.csv", cnpj)
+        if index_row is None:
+            return None
+
+        structured = _parse_dfp_statements(zf, year, cnpj, "con")
+        if not structured:
+            structured = _parse_dfp_statements(zf, year, cnpj, "ind")
+
+        period_end = _parse_date(index_row.get("DT_REFER")) or date(year, 12, 31)
+        link = (index_row.get("LINK_DOC") or "").strip() or None
+        return FinancialFiling(
+            company_id=cnpj,
+            year=period_end.year,
+            type=FilingType.ANNUAL_REPORT,
+            period_end=period_end,
+            currency="BRL",
+            structured_data=structured or None,
+            document_url=link,
+            document_format="zip" if link else None,
+            source_url=zip_url,
+        )
 
     async def _fetch_brasilapi(self, cnpj: str) -> dict[str, Any] | None:
         try:
@@ -243,6 +329,94 @@ class BRAdapter(CountryAdapter):
                     mapping[cleaned] = code.strip()
             self._cvm_cache = mapping
             return self._cvm_cache
+
+
+def _match_from_dadosbrasil(item: dict[str, Any]) -> CompanyMatch | None:
+    if not isinstance(item, dict):
+        return None
+    tax_id = _DIGITS_RE.sub("", str(item.get("tax_id") or ""))
+    if len(tax_id) != 14:
+        return None
+    name = (item.get("legal_name") or item.get("trade_name") or "").strip()
+    if not name:
+        return None
+    uf = (item.get("uf") or "").strip() or None
+    return CompanyMatch(
+        id=tax_id,
+        name=name,
+        country="BR",
+        identifiers=[
+            RegistryIdentifier(type=IdentifierType.VAT, value=tax_id, label="CNPJ"),
+            RegistryIdentifier(
+                type=IdentifierType.COMPANY_NUMBER, value=tax_id, label="CNPJ"
+            ),
+        ],
+        address=uf,
+        status=(item.get("registration_status") or "").strip() or None,
+        source_url=f"https://api.dadosbrasil.net/api/v1/companies/{tax_id}",
+    )
+
+
+def _read_dfp_rows(zf: zipfile.ZipFile, member: str) -> list[dict[str, str]]:
+    if member not in zf.namelist():
+        return []
+    text = zf.read(member).decode("latin-1")
+    return list(csv.DictReader(io.StringIO(text), delimiter=";"))
+
+
+def _find_dfp_index_row(
+    zf: zipfile.ZipFile, member: str, cnpj: str
+) -> dict[str, str] | None:
+    for row in _read_dfp_rows(zf, member):
+        if _DIGITS_RE.sub("", row.get("CNPJ_CIA") or "") == cnpj:
+            return row
+    return None
+
+
+def _parse_dfp_statements(
+    zf: zipfile.ZipFile, year: int, cnpj: str, scope: str
+) -> dict[str, Any]:
+    balance_sheet: dict[str, float] = {}
+    income_statement: dict[str, float] = {}
+    members = (
+        (f"dfp_cia_aberta_BPA_{scope}_{year}.csv", _BPA_ACCOUNTS, balance_sheet),
+        (f"dfp_cia_aberta_BPP_{scope}_{year}.csv", _BPP_ACCOUNTS, balance_sheet),
+        (f"dfp_cia_aberta_DRE_{scope}_{year}.csv", _DRE_ACCOUNTS, income_statement),
+    )
+    for member, accounts, target in members:
+        for row in _read_dfp_rows(zf, member):
+            if row.get("ORDEM_EXERC") != "ÚLTIMO":
+                continue
+            if _DIGITS_RE.sub("", row.get("CNPJ_CIA") or "") != cnpj:
+                continue
+            key = accounts.get((row.get("CD_CONTA") or "").strip())
+            if key is None:
+                continue
+            value = _scaled_value(row.get("VL_CONTA"), row.get("ESCALA_MOEDA"))
+            if value is not None:
+                target[key] = value
+
+    if {"current_liabilities", "non_current_liabilities"} <= balance_sheet.keys():
+        balance_sheet["total_liabilities"] = (
+            balance_sheet["current_liabilities"]
+            + balance_sheet["non_current_liabilities"]
+        )
+
+    out: dict[str, Any] = {}
+    if balance_sheet:
+        out["balance_sheet"] = balance_sheet
+    if income_statement:
+        out["income_statement"] = income_statement
+    return out
+
+
+def _scaled_value(raw: Any, scale: Any) -> float | None:
+    value = _coerce_float(raw)
+    if value is None:
+        return None
+    if str(scale or "").strip().upper().startswith("MIL"):
+        value *= 1000
+    return value
 
 
 def _details_from_payload(cnpj: str, data: dict[str, Any]) -> CompanyDetails:

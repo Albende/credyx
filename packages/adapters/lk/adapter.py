@@ -4,7 +4,7 @@ CSE exposes undocumented JSON POST endpoints used by their public website
 (cse.lk). Two of them are stable enough to rely on:
 
   POST /api/companyInfoSummery       — registry-style snapshot for a symbol
-  POST /api/companyInfoFinancials    — list of filed annual report PDFs
+  POST /api/financials               — list of filed annual report PDFs
 
 Both take `application/x-www-form-urlencoded` with `symbol=<TICKER>.N0000`.
 PDFs are served from `https://cdn.cse.lk/`.
@@ -190,7 +190,7 @@ class LKAdapter(CountryAdapter):
             return []
         async with build_http_client(base_url=self.CSE_BASE_URL) as client:
             payload = await _cse_post(
-                client, "/api/companyInfoFinancials", {"symbol": _symbol(ticker)}
+                client, "/api/financials", {"symbol": _symbol(ticker)}
             )
         items = (payload or {}).get("infoAnnualData") or []
         filings: list[FinancialFiling] = []
@@ -273,7 +273,7 @@ def _symbol(ticker: str) -> str:
 
 
 def _cse_profile_url(symbol: str) -> str:
-    return f"https://www.cse.lk/pages/company-profile/company-profile.component.html?symbol={symbol}"
+    return f"https://www.cse.lk/equity/company-data?symbol={symbol}"
 
 
 def _parse_epoch_ms(v: Any) -> date | None:

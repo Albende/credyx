@@ -1,4 +1,4 @@
-# 🇧🇷 Brazil — Receita Federal (via BrasilAPI) + CVM
+# 🇧🇷 Brazil — Receita Federal (via DadosBrasil + BrasilAPI) + CVM
 
 ## Identifier
 
@@ -11,36 +11,46 @@
 
 ## Sources
 
-- **Primary**: BrasilAPI — `https://brasilapi.com.br/api/cnpj/v1/{cnpj}`
-  - Community-maintained mirror of the official Receita Federal CNPJ
-    dataset.
+- **Name search**: DadosBrasil open API —
+  `https://api.dadosbrasil.net/api/v1/companies?q={term}`
+  - Open-data mirror of the official Receita Federal CNPJ dataset,
+    re-imported on each monthly release. Full-text match over legal and
+    trade names; returns the 14-digit CNPJ (`tax_id`), UF and status.
   - **Auth**: none.
-  - **Rate limit**: ~3 req/s, no key required.
-- **Fallback**: ReceitaWS — `https://www.receitaws.com.br/v1/cnpj/{cnpj}`
-  - Same dataset, slightly different shape. Used only when BrasilAPI
-    returns 5xx. Free tier is 3 req/min — keep it as a last-resort
-    fallback, not the hot path.
+  - The backend is intermittently reported as "database temporarily
+    unavailable" (sometimes surfaced as a stalled connection). The
+    adapter retries across fresh clients.
+- **Lookup by CNPJ**: BrasilAPI — `https://brasilapi.com.br/api/cnpj/v1/{cnpj}`
+  - Community-maintained mirror of the official Receita Federal CNPJ
+    dataset. **Auth**: none. **Rate limit**: ~3 req/s.
+  - **Fallback**: ReceitaWS — `https://www.receitaws.com.br/v1/cnpj/{cnpj}`
+    (same dataset, slightly different shape). Used only when BrasilAPI
+    returns 5xx. Free tier is 3 req/min — last-resort only.
 - **Listed-company filings**: CVM (Comissão de Valores Mobiliários).
-  - Cadastro CSV: `http://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv`
+  - Cadastro CSV: `https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv`
     (Latin-1, `;`-delimited). Cached in-memory on first use; maps CNPJ
-    → CVM code.
-  - Per-company filings index: `https://www.rad.cvm.gov.br/ENET/frmConsultaExternaCVM.aspx?codigoCVM={code}`
-  - Direct per-year DFP/ITR ZIP files are published at
-    `https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/` as yearly
-    bundles covering *all* listed companies — not currently parsed by
-    this adapter (a future Phase-2 add).
+    → CVM code and gates financials to CVM-registered companies.
+  - Yearly DFP bundle: `https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_{year}.zip`
+    - Index member `dfp_cia_aberta_{year}.csv` carries the per-company
+      filing record with `DT_REFER` and the official document link
+      (`LINK_DOC` on rad.cvm.gov.br — a downloadable ENET package).
+    - Statement members (`BPA`, `BPP`, `DRE`, consolidated `_con` with
+      individual `_ind` fallback) carry the standardized account lines,
+      parsed into `structured_data` (`balance_sheet`, `income_statement`)
+      in the unified schema the risk engine reads. Values are scaled from
+      thousands (MIL REAL) to absolute BRL.
 
 ## Capabilities
 
 | Capability | Status |
 |------------|--------|
-| Search by name | 🔴 Blocked — Receita Federal requires CAPTCHA |
+| Search by name | ✅ Live — DadosBrasil open data (Receita Federal CNPJ) |
 | Lookup by CNPJ | ✅ Live (BrasilAPI primary, ReceitaWS fallback) |
-| Financials | 🟡 Limited — index URL for CVM-listed companies; `[]` for closed-capital companies |
+| Financials | ✅ Live for CVM-listed companies (real DFP line items + document link); `[]` for closed-capital companies |
 
-`search_by_name` raises `AdapterNotImplementedError` with a clear
-message directing the caller to use direct CNPJ lookup. Per the
-project's no-mock-data rule, we don't fabricate name-search results.
+`fetch_financials` returns one `FinancialFiling` per reference year the
+company actually filed (no fabricated years). Non-listed companies get
+`[]` per the no-mock-data rule.
 
 ## Test companies
 
@@ -51,17 +61,15 @@ project's no-mock-data rule, we don't fabricate name-search results.
 
 ## Status
 
-✅ **Live** for CNPJ lookup. 🟡 financials limited to CVM-listed
-companies (returns index URL, not parsed line items). 🔴 name search
-blocked.
+✅ **Live** for name search (DadosBrasil), CNPJ lookup (BrasilAPI), and
+financials (CVM DFP structured line items for listed companies).
 
 **Recommended next steps:**
-1. Wire a Celery job that downloads the yearly CVM DFP bundle
-   (`dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_{year}.zip`),
-   filters by CNPJ, and populates `FinancialFiling.structured_data` with
-   balance sheet / income-statement line items.
-2. For closed-capital companies, evaluate adding a Junta Comercial
-   per-state scraper (JUCESP, JUCESC, JUCERJA, ...) once browser pool
-   infrastructure (`packages/adapters/_base/browser.py`) lands.
-3. Consider integrating SERASA's open data feeds for negative-credit
-   signals (paid in 2026; keep on the Phase-2 watchlist).
+1. Cache downloaded DFP yearly bundles (13–15 MB each) out-of-band via a
+   Celery job rather than pulling them on the request hot path, and
+   persist parsed `structured_data` per company/year.
+2. For closed-capital companies, evaluate a Junta Comercial per-state
+   scraper (JUCESP, JUCESC, JUCERJA, ...) once browser-pool
+   infrastructure lands.
+3. Parse DFC (cash-flow) statement members to populate the `cash_flow`
+   section of `structured_data`.

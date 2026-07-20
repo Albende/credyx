@@ -79,7 +79,22 @@ async def test_lookup_unknown_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_not_implemented():
+@pytest.mark.integration
+async def test_fetch_financials_krka_from_seonet():
+    adapter = SIAdapter()
+    filings = await adapter.fetch_financials("5043611000", years=3)
+    assert filings, "expected Krka (a listed issuer) to have SEOnet filings"
+    for f in filings:
+        assert f.company_id == "5043611000"
+        assert f.currency == "EUR"
+        assert f.source_url and "seonet.ljse.si" in f.source_url
+        assert f.document_url and "AttachmentID=" in f.document_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_private_company_not_implemented():
+    # A private (non-listed) company has no public filings on SEOnet.
     adapter = SIAdapter()
     with pytest.raises(AdapterNotImplementedError):
-        await adapter.fetch_financials("5043611000")
+        await adapter.fetch_financials("8980870000", years=3)

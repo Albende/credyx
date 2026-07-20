@@ -8,11 +8,10 @@ from packages.adapters._base.errors import (
 )
 from packages.adapters.pk import PKAdapter
 from packages.adapters.pk.adapter import (
-    PSX_LISTED,
     normalize_incorporation_number,
     normalize_ntn,
 )
-from packages.shared.models import IdentifierType
+from packages.shared.models import FilingType, IdentifierType
 
 
 def test_normalize_incorporation_number_valid() -> None:
@@ -50,43 +49,10 @@ def test_identifier_types() -> None:
     assert a.rate_limit_per_minute == 30
 
 
-def test_psx_listed_seeds() -> None:
-    # The four required real test companies must be present.
-    for sym in ("HBL", "ENGRO", "PPL", "LUCK"):
-        assert sym in PSX_LISTED
-        assert PSX_LISTED[sym]["name"]
-
-
-@pytest.mark.asyncio
-async def test_search_by_name_returns_listed_hbl() -> None:
-    a = PKAdapter()
-    matches = await a.search_by_name("Habib")
-    assert matches, "expected at least one PSX-listed match for 'Habib'"
-    assert any("habib bank" in m.name.lower() for m in matches)
-    assert all(m.country == "PK" for m in matches)
-
-
-@pytest.mark.asyncio
-async def test_search_by_name_unknown_raises_not_implemented() -> None:
-    a = PKAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await a.search_by_name("no-such-pakistani-company-xyzzy")
-
-
 @pytest.mark.asyncio
 async def test_search_by_name_empty_returns_empty() -> None:
     a = PKAdapter()
     assert await a.search_by_name("   ") == []
-
-
-@pytest.mark.asyncio
-async def test_lookup_by_psx_symbol_returns_details() -> None:
-    a = PKAdapter()
-    details = await a.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "HBL")
-    assert details is not None
-    assert details.country == "PK"
-    assert "habib bank" in details.name.lower()
-    assert details.capital_currency == "PKR"
 
 
 @pytest.mark.asyncio
@@ -104,19 +70,60 @@ async def test_lookup_rejects_bad_identifier_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_unlisted_returns_empty() -> None:
+async def test_lookup_numeric_incorporation_not_implemented() -> None:
     a = PKAdapter()
-    # Unknown / unlisted incorporation number → honest [].
-    assert await a.fetch_financials("0012345") == []
+    with pytest.raises(AdapterNotImplementedError):
+        await a.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "0012345")
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_listed_returns_empty_until_phase2() -> None:
-    # PSX per-year PDF discovery needs the browser pool; until then we
-    # honestly return [] rather than fabricate year-stamped entries. The
-    # listing URL is still exposed via CompanyDetails.source_url.
+@pytest.mark.integration
+async def test_search_by_name_returns_listed_hbl() -> None:
     a = PKAdapter()
-    assert await a.fetch_financials("HBL", years=3) == []
+    matches = await a.search_by_name("Habib Bank")
+    assert matches, "expected at least one PSX-listed match for 'Habib Bank'"
+    assert any("habib bank" in m.name.lower() for m in matches)
+    assert all(m.country == "PK" for m in matches)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_search_by_name_unknown_raises_not_implemented() -> None:
+    a = PKAdapter()
+    with pytest.raises(AdapterNotImplementedError):
+        await a.search_by_name("no-such-pakistani-company-xyzzy")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_lookup_by_psx_symbol_returns_details() -> None:
+    a = PKAdapter()
+    details = await a.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "HBL")
+    assert details is not None
+    assert details.country == "PK"
+    assert "habib bank" in details.name.lower()
+    assert details.capital_currency == "PKR"
+    assert details.source_url and "dps.psx.com.pk" in details.source_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_lookup_unknown_symbol_raises() -> None:
+    a = PKAdapter()
+    with pytest.raises(InvalidIdentifierError):
+        await a.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "ZZZZZZ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_listed_returns_filings() -> None:
+    a = PKAdapter()
+    filings = await a.fetch_financials("HBL", years=3)
+    assert filings, "expected at least one annual filing for HBL"
+    assert all(f.company_id == "HBL" for f in filings)
+    assert all(f.type == FilingType.ANNUAL_REPORT for f in filings)
+    assert all(f.currency == "PKR" for f in filings)
+    assert all(f.structured_data and f.structured_data.get("metrics") for f in filings)
 
 
 @pytest.mark.asyncio
@@ -126,15 +133,12 @@ async def test_health_check_live() -> None:
     h = await a.health_check()
     assert h.country_code == "PK"
     assert h.capabilities.get("lookup") is True
-    assert h.capabilities.get("search") is False
+    assert h.capabilities.get("search") is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_lookup_engro_live() -> None:
-    # Listed-company lookup does not hit the network (data is from the
-    # curated PSX-listed map), but mark it integration since it represents
-    # real-world data linkage to PSX. Sanity-check the source URL too.
     a = PKAdapter()
     details = await a.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "ENGRO")
     assert details is not None

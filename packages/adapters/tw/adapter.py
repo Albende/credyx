@@ -1,15 +1,20 @@
-"""Taiwan adapter — GCIS open data (Ministry of Economic Affairs).
+"""Taiwan adapter — GCIS registry (MOEA) + TWSE OpenAPI financials.
 
-Free OData JSON datasets at https://data.gcis.nat.gov.tw/od/.
-No auth. We throttle to 60/min to stay polite.
+Two free, key-free government sources:
 
-Identifier: 統一編號 (Unified Business Number, UBN), 8 digits. Serves as both
-the tax ID and the company-registry ID, so we expose it as `IdentifierType.VAT`.
+* **Registry** — GCIS open data (Ministry of Economic Affairs) OData JSON at
+  ``https://data.gcis.nat.gov.tw/od/data/api/``. Lookup filters on the
+  Unified Business Number (統一編號, UBN); the keyword dataset supports
+  fuzzy ``Company_Name like`` search on active companies.
+* **Financials** — TWSE OpenAPI (``https://openapi.twse.com.tw/v1``). The
+  Taiwan Stock Exchange publishes structured balance-sheet and
+  income-statement figures for every *listed* company as plain JSON. We map
+  UBN → stock code via the listed-company master file, then pull the latest
+  filed statements. Unlisted companies have no free structured financial
+  source, so ``fetch_financials`` returns ``[]`` for them.
 
-Financials are best-effort: MOPS (twse.com.tw) hosts XBRL for *listed* firms
-behind an interactive HTML form, so we synthesize the canonical filing URL per
-year and return it for caller fetching. Unlisted Taiwanese companies have no
-free financial source — we return [] in that case.
+Identifier: 統一編號 (UBN), 8 digits. Serves as both the tax ID and the
+company-registry ID, so we expose it as ``IdentifierType.VAT``.
 """
 from __future__ import annotations
 
@@ -17,13 +22,8 @@ import re
 from datetime import date, datetime
 from typing import Any
 
-import httpx
-
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -73,22 +73,40 @@ class TWAdapter(CountryAdapter):
     rate_limit_per_minute = 60
 
     GCIS_BASE = "https://data.gcis.nat.gov.tw/od/data/api"
-    # GCIS OData datasets. Only Business_Accounting_NO is filterable on either;
-    # name-based search is not supported by the free open-data layer.
-    COMPANY_DATASET = "6BBA2268-1367-4B42-9CCA-BC17499EBE8C"
+    # Detail dataset (公司登記基本資料-應用一): full record, filterable only on
+    # Business_Accounting_NO.
     COMPANY_DETAIL_DATASET = "5F64D864-61CB-4D0D-8AD9-492047CC1EA6"
-    MOPS_FILING_URL = (
-        "https://mopsfin.twse.com.tw/server-java/t164sb01"
-        "?step=1&CO_ID={ubn}&SYEAR={year}&SSEASON=4&REPORT_ID=C"
+    # Keyword dataset (公司登記關鍵字查詢): supports
+    # ``Company_Name like {kw} and Company_Status eq {code}`` fuzzy search.
+    COMPANY_KEYWORD_DATASET = "6BBA2268-1367-4B42-9CCA-BC17499EBE8C"
+    # GCIS status code 01 = 核准設立 (approved / active).
+    _ACTIVE_STATUS_CODE = "01"
+
+    GCIS_COMPANY_PAGE = (
+        "https://findbiz.nat.gov.tw/fts/query/QueryBar/queryInit.do?keyword={ubn}"
     )
-    GCIS_COMPANY_PAGE = "https://findbiz.nat.gov.tw/fts/query/QueryBar/queryInit.do?keyword={ubn}"
+
+    # TWSE OpenAPI — free, key-free structured filings for listed companies.
+    TWSE_BASE = "https://openapi.twse.com.tw/v1"
+    TWSE_LISTED_MASTER = "opendata/t187ap03_L"
+    # Income-statement / balance-sheet datasets, one pair per industry taxonomy
+    # (ci = general, basi = banks, bd = securities, fh = financial holding,
+    # ins = insurers, mim = other financial). We probe them in order until the
+    # company's stock code is found.
+    TWSE_INCOME_DATASETS = tuple(
+        f"opendata/t187ap06_L_{suf}" for suf in ("ci", "basi", "bd", "fh", "ins", "mim")
+    )
+    TWSE_BALANCE_DATASETS = tuple(
+        f"opendata/t187ap07_L_{suf}" for suf in ("ci", "basi", "bd", "fh", "ins", "mim")
+    )
+    MOPS_COMPANY_PAGE = "https://mops.twse.com.tw/mops/web/t05st03?firstin=1&co_id={stock}"
 
     async def health_check(self) -> AdapterHealth:
         try:
             async with build_http_client(base_url=self.GCIS_BASE) as client:
                 resp = await get_with_retry(
                     client,
-                    f"/{self.COMPANY_DATASET}",
+                    f"/{self.COMPANY_DETAIL_DATASET}",
                     params={
                         "$format": "json",
                         "$filter": "Business_Accounting_NO eq '22099131'",
@@ -110,36 +128,72 @@ class TWAdapter(CountryAdapter):
             status=AdapterStatus.OK,
             capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
-            notes="Registry via GCIS ✅. Financials best-effort: MOPS XBRL for listed firms only.",
+            notes=(
+                "Registry via GCIS ✅. Financials via TWSE OpenAPI for listed "
+                "firms; unlisted return []."
+            ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        # The GCIS open-data OData endpoints only allow filtering on the
-        # primary key (Business_Accounting_NO) — free-text Company_Name search
-        # is not supported there, and findbiz.nat.gov.tw blocks programmatic
-        # access. We therefore accept a UBN here and route it to a real lookup;
-        # arbitrary names raise NotImplemented so callers can't be misled by an
-        # always-empty result.
+        # An 8-digit input is a UBN — route it straight to a precise lookup.
         cleaned = name.strip().replace(" ", "").replace("-", "")
-        if not _UBN_RE.match(cleaned):
-            raise AdapterNotImplementedError(
-                "TW free-text name search is unavailable on free GCIS OData. "
-                "Pass an 8-digit UBN, or use OpenCorporates/GLEIF as a fallback."
-            )
-        details = await self.lookup_by_identifier(IdentifierType.VAT, cleaned)
-        if details is None:
+        if _UBN_RE.match(cleaned):
+            details = await self.lookup_by_identifier(IdentifierType.VAT, cleaned)
+            if details is None:
+                return []
+            return [
+                CompanyMatch(
+                    id=details.id,
+                    name=details.name,
+                    country=self.country_code,
+                    identifiers=details.identifiers,
+                    address=details.registered_address,
+                    status=details.status,
+                    source_url=details.source_url,
+                )
+            ][:limit]
+
+        keyword = name.strip()
+        if not keyword:
             return []
-        return [
-            CompanyMatch(
-                id=details.id,
-                name=details.name,
-                country=self.country_code,
-                identifiers=details.identifiers,
-                address=details.registered_address,
-                status=details.status,
-                source_url=details.source_url,
+        # The keyword dataset requires both the fuzzy name and an explicit
+        # Company_Status; 01 = active. GCIS matches on the registered Chinese
+        # name only — Latin-script queries won't match registry records.
+        rows = await self._gcis_query(
+            self.COMPANY_KEYWORD_DATASET,
+            {
+                "$format": "json",
+                "$filter": (
+                    f"Company_Name like {keyword} "
+                    f"and Company_Status eq {self._ACTIVE_STATUS_CODE}"
+                ),
+                "$skip": "0",
+                "$top": str(max(1, limit)),
+            },
+        )
+        matches: list[CompanyMatch] = []
+        for r in rows[:limit]:
+            ubn = (r.get("Business_Accounting_NO") or "").strip()
+            if not ubn:
+                continue
+            matches.append(
+                CompanyMatch(
+                    id=ubn,
+                    name=(r.get("Company_Name") or "").strip(),
+                    country=self.country_code,
+                    identifiers=[
+                        RegistryIdentifier(
+                            type=IdentifierType.VAT, value=ubn, label="UBN"
+                        )
+                    ],
+                    address=r.get("Company_Location") or None,
+                    status=_status_from_state(
+                        r.get("Company_Status_Desc") or r.get("Company_Status")
+                    ),
+                    source_url=self.GCIS_COMPANY_PAGE.format(ubn=ubn),
+                )
             )
-        ][:limit]
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -147,15 +201,14 @@ class TWAdapter(CountryAdapter):
         if id_type != IdentifierType.VAT:
             raise InvalidIdentifierError(f"TW only supports VAT (UBN), got {id_type}")
         ubn = _normalize_ubn(value)
-        params = {
-            "$format": "json",
-            "$filter": f"Business_Accounting_NO eq '{ubn}'",
-            "$top": "1",
-        }
-        # Prefer the detailed dataset; fall back to the basic one if empty.
-        rows = await self._gcis_query(self.COMPANY_DETAIL_DATASET, params)
-        if not rows:
-            rows = await self._gcis_query(self.COMPANY_DATASET, params)
+        rows = await self._gcis_query(
+            self.COMPANY_DETAIL_DATASET,
+            {
+                "$format": "json",
+                "$filter": f"Business_Accounting_NO eq '{ubn}'",
+                "$top": "1",
+            },
+        )
         if not rows:
             return None
         r = rows[0]
@@ -189,40 +242,64 @@ class TWAdapter(CountryAdapter):
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         ubn = _normalize_ubn(company_id)
-        filings: list[FinancialFiling] = []
-        current_year = datetime.utcnow().year
-        # MOPS publishes annual reports for the previous fiscal year; check the
-        # last `years` years. We probe with a HEAD-ish GET and only keep URLs
-        # that actually return 200 with non-empty content — never invent.
-        async with build_http_client(timeout=15.0) as client:
-            for year in range(current_year - years, current_year):
-                url = self.MOPS_FILING_URL.format(ubn=ubn, year=year)
-                try:
-                    resp = await client.get(url)
-                except (httpx.TransportError, httpx.TimeoutException):
-                    continue
-                if resp.status_code != 200:
-                    continue
-                body = resp.text or ""
-                # MOPS returns an HTML page even for "no data"; require a known
-                # filing-link marker to consider the year covered.
-                if "REPORT_ID" not in body and "FileName" not in body and ".pdf" not in body.lower():
-                    continue
-                filings.append(
-                    FinancialFiling(
-                        company_id=ubn,
-                        year=year,
-                        type=FilingType.ANNUAL_REPORT,
-                        period_end=date(year, 12, 31),
-                        currency="TWD",
-                        document_url=url,
-                        document_format="html",
-                        source_url=(
-                            "https://mops.twse.com.tw/mops/web/index"
-                        ),
-                    )
-                )
-        return filings
+        listed = await self._listed_record_for_ubn(ubn)
+        if listed is None:
+            # Not a TWSE-listed company: no free structured financial source.
+            return []
+        stock = listed["公司代號"].strip()
+
+        income_row, income_src = await self._first_row_for_stock(
+            self.TWSE_INCOME_DATASETS, stock
+        )
+        balance_row, balance_src = await self._first_row_for_stock(
+            self.TWSE_BALANCE_DATASETS, stock
+        )
+        if income_row is None and balance_row is None:
+            return []
+
+        anchor = income_row or balance_row
+        year = _roc_year_to_gregorian(anchor.get("年度"))
+        quarter = _coerce_int(anchor.get("季別")) or 4
+        if year is None:
+            return []
+        period_end = _quarter_end(year, quarter)
+
+        structured = _build_structured(
+            balance_row, income_row, year=year, quarter=quarter, period_end=period_end
+        )
+        return [
+            FinancialFiling(
+                company_id=ubn,
+                year=year,
+                type=(
+                    FilingType.ANNUAL_REPORT
+                    if quarter == 4
+                    else FilingType.BALANCE_SHEET
+                ),
+                period_end=period_end,
+                currency="TWD",
+                structured_data=structured,
+                document_format="json",
+                source_url=f"{self.TWSE_BASE}/{income_src or balance_src}",
+            )
+        ]
+
+    async def _listed_record_for_ubn(self, ubn: str) -> dict[str, Any] | None:
+        rows = await self._twse_query(self.TWSE_LISTED_MASTER)
+        for r in rows:
+            if (r.get("營利事業統一編號") or "").strip() == ubn:
+                return r
+        return None
+
+    async def _first_row_for_stock(
+        self, datasets: tuple[str, ...], stock: str
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        for dataset in datasets:
+            rows = await self._twse_query(dataset)
+            for r in rows:
+                if (r.get("公司代號") or "").strip() == stock:
+                    return r, dataset
+        return None, None
 
     async def _gcis_query(
         self, dataset_id: str, params: dict[str, str]
@@ -236,12 +313,26 @@ class TWAdapter(CountryAdapter):
                 payload = resp.json()
             except ValueError:
                 return []
-        return _coerce_gcis_rows(payload)
+        return _coerce_rows(payload)
+
+    async def _twse_query(self, dataset: str) -> list[dict[str, Any]]:
+        async with build_http_client(base_url=self.TWSE_BASE) as client:
+            resp = await get_with_retry(
+                client, f"/{dataset}", headers={"Accept": "application/json"}
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            try:
+                payload = resp.json()
+            except ValueError:
+                return []
+        return _coerce_rows(payload)
 
 
-def _coerce_gcis_rows(payload: Any) -> list[dict[str, Any]]:
-    # GCIS sometimes returns a bare list, sometimes a dict with an error code,
-    # sometimes an OData envelope. Normalize all three.
+def _coerce_rows(payload: Any) -> list[dict[str, Any]]:
+    # Sources return a bare list (TWSE, GCIS success), an OData envelope, or a
+    # dict with an error code. Normalize all shapes.
     if isinstance(payload, list):
         return [r for r in payload if isinstance(r, dict)]
     if isinstance(payload, dict):
@@ -250,6 +341,90 @@ def _coerce_gcis_rows(payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload.get("data"), list):
             return [r for r in payload["data"] if isinstance(r, dict)]
     return []
+
+
+# TWSE statement field → canonical key. Amounts are in thousands of TWD.
+_BALANCE_FIELD_MAP: dict[str, str] = {
+    "流動資產": "current_assets",
+    "非流動資產": "non_current_assets",
+    "資產總額": "total_assets",
+    "流動負債": "current_liabilities",
+    "非流動負債": "non_current_liabilities",
+    "負債總額": "total_liabilities",
+    "股本": "share_capital",
+    "資本公積": "capital_surplus",
+    "保留盈餘": "retained_earnings",
+    "權益總額": "total_equity",
+    "歸屬於母公司業主之權益合計": "equity_attributable_to_owners",
+}
+
+_INCOME_FIELD_MAP: dict[str, str] = {
+    "營業收入": "revenue",
+    "利息淨收益": "revenue",
+    "營業成本": "cost_of_sales",
+    "營業毛利（毛損）淨額": "gross_profit",
+    "營業毛利（毛損）": "gross_profit",
+    "營業費用": "operating_expenses",
+    "營業利益（損失）": "operating_profit",
+    "稅前淨利（淨損）": "profit_before_tax",
+    "所得稅費用（利益）": "income_tax",
+    "本期淨利（淨損）": "net_income",
+    "淨利（淨損）歸屬於母公司業主": "net_income_attributable_to_owners",
+    "基本每股盈餘（元）": "eps_basic",
+}
+
+
+def _build_structured(
+    balance_row: dict[str, Any] | None,
+    income_row: dict[str, Any] | None,
+    *,
+    year: int,
+    quarter: int,
+    period_end: date,
+) -> dict[str, Any]:
+    balance_sheet = _map_statement(balance_row, _BALANCE_FIELD_MAP)
+    income_statement = _map_statement(income_row, _INCOME_FIELD_MAP)
+    raw_concepts: dict[str, float] = {}
+    for row in (balance_row, income_row):
+        for name, value in _numeric_items(row):
+            raw_concepts.setdefault(name, value)
+    return {
+        "currency": "TWD",
+        "unit": "thousands",
+        "period_end": period_end.isoformat(),
+        "quarter": quarter,
+        "consolidated": True,
+        "balance_sheet": balance_sheet,
+        "income_statement": income_statement,
+        "raw_concepts": raw_concepts,
+    }
+
+
+def _map_statement(
+    row: dict[str, Any] | None, field_map: dict[str, str]
+) -> dict[str, float]:
+    if not row:
+        return {}
+    out: dict[str, float] = {}
+    for field, key in field_map.items():
+        value = _coerce_float(row.get(field))
+        if value is not None:
+            out.setdefault(key, value)
+    return out
+
+
+def _numeric_items(row: dict[str, Any] | None) -> list[tuple[str, float]]:
+    if not row:
+        return []
+    skip = {"出表日期", "年度", "季別", "公司代號", "公司名稱"}
+    items: list[tuple[str, float]] = []
+    for name, raw in row.items():
+        if name in skip:
+            continue
+        value = _coerce_float(raw)
+        if value is not None:
+            items.append((name, value))
+    return items
 
 
 def _status_from_state(state: Any) -> str | None:
@@ -288,6 +463,28 @@ def _parse_roc_or_iso_date(s: Any) -> date | None:
         except ValueError:
             return None
     return None
+
+
+def _roc_year_to_gregorian(raw: Any) -> int | None:
+    n = _coerce_int(raw)
+    if n is None:
+        return None
+    # TWSE reports the ROC year (e.g. 115); Gregorian = ROC + 1911.
+    return n + 1911 if n < 1000 else n
+
+
+def _quarter_end(year: int, quarter: int) -> date:
+    month_day = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}.get(quarter, (12, 31))
+    return date(year, month_day[0], month_day[1])
+
+
+def _coerce_int(v: Any) -> int | None:
+    if v is None or v == "":
+        return None
+    try:
+        return int(float(str(v).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _coerce_float(v: Any) -> float | None:

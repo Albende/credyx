@@ -1,4 +1,4 @@
-# 🇰🇿 Kazakhstan — adata.kz + stat.gov.kz + KASE
+# 🇰🇿 Kazakhstan — adata.kz + DFO financial-statements depository
 
 ## Identifier
 
@@ -12,71 +12,85 @@
 
 ## Sources
 
-- **adata.kz** — `https://adata.kz/v1/info/bin/{bin}`. Community-built,
-  **free** JSON wrapper that surfaces legal-entity records from the
-  Bureau of National Statistics. No auth. Unofficial third party, so the
-  adapter treats it as best-effort and falls back to a stat.gov.kz URL
-  on failure.
-- **stat.gov.kz** — Bureau of National Statistics. Publishes the legal-
-  entity registry as periodic open-data dumps; no live REST search.
-  Used as authoritative `source_url` fallback at
-  `https://stat.gov.kz/ru/lawyer-info/?bin={bin}`.
-- **kgd.gov.kz** — State Revenue Committee. VAT payer search is partial-
-  public and session-bound; not relied on.
-- **kase.kz** — Kazakhstan Stock Exchange. Listed-issuer annual reports
-  are published as free PDFs under `https://kase.kz/en/issuers/{ticker}/`.
-- **Auth**: None.
-- **Rate limit**: Self-imposed at 30 req/min. adata.kz has no published
-  budget; we keep volume polite.
-- **robots.txt / ToS**: adata.kz robots.txt is permissive; KASE allows
-  read-only access to public issuer pages.
+- **adata.kz counterparty API** — `https://pk-api.adata.kz/api/v1/data/...`.
+  The public backend of the adata.kz counterparty checker
+  (`pk.adata.kz`). **Free, no API key, no session cookie** for the
+  endpoints we use. adata aggregates the Kazakhstan legal-entity register
+  from official open sources (stat.gov.kz, kgd.gov.kz, egov.kz).
+  - `GET /api/v1/data/search?most_viewed_companies=0&keyword={q}` —
+    full-text search by name **or** BIN. Returns BIN, name, address,
+    director, status, registration date. Used for both `search_by_name`
+    and `lookup_by_identifier` (a BIN keyword returns the single match).
+  - `GET /api/v1/data/company/authorized-capital/short?id={bin}&initial=1`
+    — charter capital + government-participation share (source: egov.kz).
+- **DFO — Депозитарий финансовой отчётности** — `https://opi.dfo.kz`.
+  Ministry of Finance financial-statements depository. Every
+  public-interest organisation (listed issuers, banks, subsoil users,
+  entities with state participation, etc.) files annual accounts here.
+  Free, no key. JSON endpoints:
+  - `GET /ru/opi/list?flBin={bin}` — resolve BIN → internal object id
+    (HTML, server-rendered).
+  - `GET /ru/report-json/{object}/get-plugins` — report taxonomies +
+    counts. Annual accounts live under the **МСФО** (IFRS, financial
+    orgs) and **665** (non-financial orgs) plugins.
+  - `GET /ru/report-json/{object}/get-reports?pluginId=...` — filed
+    reports (ReportId + load date) for a plugin.
+  - `GET /ru/render-blocks/{object}/get-node-data?...&nodeId=1` — a
+    report's info block, giving the authoritative reporting **year** and
+    period.
+- **Auth**: None. No API key anywhere.
+- **Rate limit**: Self-imposed at 30 req/min.
+- **robots.txt / ToS**: adata pk.adata.kz and opi.dfo.kz both serve the
+  data we read to anonymous public users.
 
 ## Test companies
 
-- KazMunayGas (НК "КазМунайГаз" АО) — BIN `020640000327`
-- Kazatomprom (НАК "Казатомпром" АО) — BIN `970640000147`
-- Kaspi Bank (Kaspi.kz) — BIN `920140000084`
-- Air Astana JSC — BIN `011040000284`
+- КазМунайГаз (АО "НК "КазМунайГаз") — BIN `020240000555` (form 665)
+- Kaspi (financial org, IFRS reports) — BIN `971240001315`
+- Kazatomprom — BIN `970240000816`
+- Air Astana — BIN `200340008979`
+- ТОО "TESM Company" — BIN `980440000757` (registry hit; **not** a
+  public-interest filer, so `fetch_financials` returns `[]`)
 
 ## Status
 
-🟡 **Partial — lookup + listed-issuer financials.**
+🟢 **Live — search + lookup + financials.**
 
-| Capability  | Status                                       |
-|-------------|----------------------------------------------|
-| Name search | ❌ Not implemented (no free endpoint)        |
-| BIN lookup  | ✅ Live via adata.kz (with stat.gov.kz fallback) |
-| Financials  | 🟡 KASE-listed issuers only (PDF/HTML URLs)  |
-| Health      | ✅ Probes adata.kz with KazMunayGas BIN       |
+| Capability  | Status                                                    |
+|-------------|-----------------------------------------------------------|
+| Name search | ✅ Live via adata.kz counterparty API                     |
+| BIN lookup  | ✅ Live via adata.kz (BIN keyword → single match)         |
+| Financials  | ✅ DFO depository annual reports (public-interest filers)  |
+| Health      | ✅ Probes adata.kz search with KazMunayGas BIN            |
 
 ## Limitations
 
-- **No free name search.** Neither adata.kz nor stat.gov.kz expose a
-  public name → BIN endpoint without registration. The adapter raises
-  `AdapterNotImplementedError` on `search_by_name`. A follow-up could
-  integrate OpenCorporates KZ for fuzzy resolution.
-- **adata.kz is community-maintained.** Response shapes have changed
-  across versions; the parser accepts both top-level and `data`/
-  `company`/`result`-wrapped envelopes and tolerates RU and
-  transliterated key names.
-- **General financial statements are not public.** Only KASE-listed
-  issuers publish accounts freely. For unlisted BINs the adapter returns
-  an empty list rather than raising — this is the honest signal.
-- **Mixed Cyrillic / Latin / Kazakh script.** Records mix Russian and
-  Kazakh (both Cyrillic and Latin since 2017). The adapter forces an
-  `Accept-Language: ru,kk;q=0.8,en;q=0.6` header and leaves text in
-  whatever script the source returns; no transliteration.
-- **No charter-capital data for most entities.** adata.kz only surfaces
-  it for a subset; we map `capital_amount` to `None` when absent and
-  default the currency to `KZT`.
+- **Financials cover public-interest organisations only.** The DFO
+  depository holds annual accounts for listed issuers, banks, subsoil
+  users, state-participation entities and similar. Ordinary private LLPs
+  do not file there — for those `fetch_financials` returns `[]` (the
+  honest signal), never a fabricated filing.
+- **Filing metadata, not decoded line items.** The adapter surfaces the
+  reporting year, filing type (annual), currency (KZT), the DFO report
+  metadata (report id, plugin, load date) and a report-specific
+  `source_url`. It does **not** invent balance-sheet numbers. Decoding
+  the DFO report node data (`nodeId=3` financial statements) into
+  `structured_data` figures is a follow-up for the ratio engine.
+- **`document_url` is left `None`.** DFO renders reports in an in-portal
+  viewer rather than a single downloadable file, so we surface the
+  report page `source_url` and do not claim a direct document download.
+- **adata is an aggregator.** It mirrors official registers (stat.gov.kz,
+  kgd.gov.kz, egov.kz). Data is best-effort and mixes Russian and Kazakh
+  script; the adapter leaves text in whatever script the source returns.
+- **Charter capital only for some entities.** adata surfaces it for a
+  subset; `capital_amount` is `None` when absent, currency defaults KZT.
 
 ## Recommended next steps
 
-1. Wire a free name → BIN bridge through OpenCorporates KZ.
-2. Ingest the periodic stat.gov.kz legal-entity dump into Postgres so we
-   can serve name search without third-party dependence.
-3. Once a KASE PDF scraper exists, decode listed-issuer annual reports
-   into `structured_data` instead of just surfacing the issuer URL.
-4. Add KGD (tax authority) VAT-status probe behind the existing
-   adapter — useful as an automatic red flag when a counterparty is
-   delisted as a VAT payer.
+1. Parse DFO report node data (`get-node-data nodeId=3`) into
+   `structured_data` so the risk engine gets real ratios, not just
+   filing metadata.
+2. Ingest the DFO object index so financials resolve without the extra
+   HTML search round-trip per lookup.
+3. Add a KGD (tax authority) VAT-status probe as an automatic red flag
+   when a counterparty is delisted as a VAT payer.

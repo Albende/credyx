@@ -19,17 +19,23 @@ Identifiers supported:
              resolver but requires a free key with manual approval, so we only
              accept REGON values that we can also pull out of the KRS payload.
 
-Limitations (see docs/countries/pl.md):
+Name search (see docs/countries/pl.md):
 
-- Name search is not exposed by the KRS REST API. The public web search
-  (`wyszukiwarka-krs.ms.gov.pl`) sits behind a bot-detection layer and a
-  session form, so it cannot be hit reliably with httpx. We raise
-  `AdapterNotImplementedError` for `search_by_name` rather than ship a
-  brittle scrape.
-- Financial filings (sprawozdania finansowe) are published on
-  `ekrs.ms.gov.pl/rdf/pd/` but the host enforces Incapsula JS challenges
-  that block plain HTTP clients. `fetch_financials` returns `[]` and the
-  CompanyDetails carries the public RDF URL so the UI can deep-link out.
+- The official KRS web search (`wyszukiwarka-krs.ms.gov.pl`) is behind
+  Incapsula and only usable through a browser session. Instead we resolve
+  names through GLEIF's public JSON:API: Polish LEI records carry their KRS
+  number in `entity.registeredAs` under registration authority `RA000484`
+  (Krajowy Rejestr Sądowy), so a name hit yields a KRS this adapter can then
+  look up and file against. Coverage is limited to LEI-registered entities.
+
+Financials:
+
+- The registry doesn't expose statement files over a bot-friendly endpoint,
+  but `OdpisPelny` records every filing mention (period, submission date,
+  entry id). Each becomes a `FinancialFiling`. `document_url` is backfilled
+  from MSiG (Monitor Sądowy i Gospodarczy), whose search API is *not* behind
+  Incapsula: RDF-signature announcements are the financial filings, and
+  `Monitor/Download?id=<id>` serves the real gazette-issue PDF.
 """
 from __future__ import annotations
 
@@ -108,6 +114,7 @@ class PLAdapter(CountryAdapter):
     KRS_BASE_URL = "https://api-krs.ms.gov.pl/api/krs"
     WL_BASE_URL = "https://wl-api.mf.gov.pl/api"
     MSIG_BASE_URL = "https://wyszukiwarka-msig.ms.gov.pl/api"
+    GLEIF_BASE_URL = "https://api.gleif.org/api/v1"
 
     async def health_check(self) -> AdapterHealth:
         try:
@@ -130,84 +137,49 @@ class PLAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": False, "lookup": True, "financials": False},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Name search not exposed by KRS REST (web search behind bot "
-                "wall); filings on ekrs.ms.gov.pl behind Incapsula — both "
-                "tracked in docs/countries/pl.md."
+                "Lookup via KRS REST + Biała Lista; name search via GLEIF "
+                "(RA000484 → KRS); filings from KRS OdpisPelny mentions, "
+                "downloadable gazette PDFs backfilled from MSiG."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        from packages.adapters._base.browser import get_browser_pool
+        """Resolve a company name to KRS-keyed matches via GLEIF.
 
-        pool = get_browser_pool()
-        async with pool.acquire() as ctx:
-            page = await ctx.new_page()
-            try:
-                await page.goto(
-                    "https://wyszukiwarka-krs.ms.gov.pl/",
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
-                await page.get_by_role("textbox", name="Nazwa / Firma").fill(name)
-                await page.get_by_role("button", name="Wyszukaj").first.click()
-                # Wait for either "Brak danych" (no results) or rows containing a 10-digit KRS.
-                await page.wait_for_function(
-                    """() => {
-                        const txt = document.body.innerText;
-                        if (txt.includes('Brak danych')) return true;
-                        return /\\b0\\d{9}\\b/.test(txt);
-                    }""",
-                    timeout=25000,
-                )
-                rows_data = await page.evaluate(
-                    """() => {
-                        const out = [];
-                        for (const tr of document.querySelectorAll('table tbody tr')) {
-                            const cells = {};
-                            for (const td of tr.querySelectorAll('td')) {
-                                const title = td.querySelector('.ds-column-title');
-                                const value = td.querySelector('.ds-column-value');
-                                if (title && value) {
-                                    cells[title.innerText.trim()] = value.innerText.trim();
-                                }
-                            }
-                            if (cells['Numer KRS'] && cells['Nazwa / Firma']) {
-                                out.push({
-                                    krs: cells['Numer KRS'],
-                                    name: cells['Nazwa / Firma'],
-                                    city: cells['Miejscowość'] || null,
-                                });
-                            }
-                        }
-                        return out;
-                    }"""
-                )
-            finally:
-                await page.close()
+        The official KRS web search (`wyszukiwarka-krs.ms.gov.pl`) is fronted
+        by Incapsula and only usable through a full browser session, so it is
+        not a reliable request-path source. GLEIF's public JSON:API covers the
+        Polish register keyed by name, and — because every Polish LEI record
+        carries its KRS number in `entity.registeredAs` under registration
+        authority `RA000484` (Krajowy Rejestr Sądowy) — a name hit resolves
+        straight to a KRS the rest of this adapter can look up and file against.
+        """
+        params: dict[str, str | int] = {
+            "filter[entity.legalName]": name,
+            "filter[entity.legalAddress.country]": self.country_code,
+            "page[size]": max(1, min(int(limit) * 2, 200)),
+            "page[number]": 1,
+        }
+        async with build_http_client(
+            base_url=self.GLEIF_BASE_URL,
+            headers={"Accept": "application/vnd.api+json"},
+        ) as client:
+            resp = await get_with_retry(client, "/lei-records", params=params)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
 
         matches: list[CompanyMatch] = []
-        for row in rows_data[:limit]:
-            krs = (row.get("krs") or "").strip().zfill(10)
-            if not krs.isdigit() or len(krs) != 10:
-                continue
-            matches.append(
-                CompanyMatch(
-                    id=krs,
-                    name=row["name"].strip(),
-                    country=self.country_code,
-                    identifiers=[
-                        RegistryIdentifier(
-                            type=IdentifierType.KRS, value=krs, label="KRS number"
-                        )
-                    ],
-                    address=row.get("city") or None,
-                    status=None,
-                    source_url=f"https://wyszukiwarka-krs.ms.gov.pl/podmiot/{krs}",
-                )
-            )
+        for record in payload.get("data") or []:
+            match = _gleif_record_to_match(record)
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
         return matches
 
     async def lookup_by_identifier(
@@ -376,6 +348,65 @@ def _details_from_odpis(krs: str, payload: dict[str, Any]) -> CompanyDetails:
     )
 
 
+_KRS_REGISTRATION_AUTHORITY = "RA000484"
+
+
+def _gleif_record_to_match(record: dict[str, Any]) -> CompanyMatch | None:
+    lei = record.get("id")
+    entity = ((record.get("attributes") or {}).get("entity")) or {}
+    name = ((entity.get("legalName") or {}).get("name")) or ""
+    if not name:
+        return None
+    address = entity.get("legalAddress") or {}
+    status_raw = (entity.get("status") or "").upper()
+    status = "active" if status_raw == "ACTIVE" else ("ceased" if status_raw == "INACTIVE" else None)
+
+    registered_at = ((entity.get("registeredAt") or {}).get("id")) or ""
+    registered_as = str(entity.get("registeredAs") or "").strip()
+    krs: str | None = None
+    if registered_at == _KRS_REGISTRATION_AUTHORITY and registered_as.isdigit():
+        krs = registered_as.zfill(10)
+        if len(krs) != 10:
+            krs = None
+
+    identifiers: list[RegistryIdentifier] = []
+    if krs:
+        identifiers.append(RegistryIdentifier(type=IdentifierType.KRS, value=krs, label="KRS"))
+    if lei:
+        identifiers.append(RegistryIdentifier(type=IdentifierType.LEI, value=str(lei), label="LEI"))
+    if not identifiers:
+        return None
+
+    match_id = krs or str(lei)
+    source_url = (
+        f"https://wyszukiwarka-krs.ms.gov.pl/podmiot/{krs}"
+        if krs
+        else f"https://search.gleif.org/#/record/{lei}"
+    )
+    return CompanyMatch(
+        id=match_id,
+        name=name,
+        country="PL",
+        identifiers=identifiers,
+        address=_format_gleif_address(address),
+        status=status,
+        source_url=source_url,
+    )
+
+
+def _format_gleif_address(address: dict[str, Any]) -> str | None:
+    parts: list[str] = []
+    lines = address.get("addressLines")
+    if isinstance(lines, list):
+        parts.extend(str(line) for line in lines if line)
+    for key in ("postalCode", "city", "country"):
+        val = address.get(key)
+        if val:
+            parts.append(str(val))
+    cleaned = [p.strip() for p in parts if p and str(p).strip()]
+    return ", ".join(cleaned) if cleaned else None
+
+
 _YEAR_RE = re.compile(r"(\d{4})\s*R")
 
 
@@ -397,11 +428,13 @@ def _extract_filings(krs: str, payload: dict[str, Any], *, years: int = 5) -> li
 
     KINDS: list[tuple[str, FilingType, str]] = [
         ("wzmiankaOZlozeniuRocznegoSprawozdaniaFinansowego", FilingType.ANNUAL_REPORT, "Annual financial statement"),
-        ("wzmiankaOZlozeniuOpinii", FilingType.AUDIT_REPORT, "Auditor opinion"),
+        ("wzmiankaOZlozeniuSkonsolidowanegoRocznegoSprawozdaniaFinansowego", FilingType.ANNUAL_REPORT, "Consolidated financial statement"),
+        ("wzmiankaOZlozeniuSkonsolidowanegoSprawozdaniaFinansowego", FilingType.ANNUAL_REPORT, "Consolidated financial statement"),
+        ("wzmiankaOZlozeniuOpiniiBieglegoRewidentaSprawozdaniaZBadania", FilingType.AUDIT_REPORT, "Auditor opinion"),
         ("wzmiankaOZlozeniuOpiniiBieglegoRewidenta", FilingType.AUDIT_REPORT, "Auditor opinion"),
+        ("wzmiankaOZlozeniuUchwalyPostanowieniaOZatwierdzeniuRocznegoSprawozdaniaFinansowego", FilingType.DIRECTORS_REPORT, "Approval resolution"),
         ("wzmiankaOZlozeniuUchwalyZatwierdzajacejRocznySf", FilingType.DIRECTORS_REPORT, "Approval resolution"),
         ("wzmiankaOZlozeniuSprawozdaniaZDzialalnosci", FilingType.DIRECTORS_REPORT, "Management report"),
-        ("wzmiankaOZlozeniuSkonsolidowanegoSprawozdaniaFinansowego", FilingType.ANNUAL_REPORT, "Consolidated financial statement"),
     ]
 
     for key, filing_type, label in KINDS:
@@ -552,29 +585,21 @@ def _format_address(siedziba_blok: dict[str, Any]) -> str | None:
 
 
 _MSIG_SEARCH_URL = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Search"
-_MSIG_DETALIS_URL = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Detalis"
 _MSIG_DOWNLOAD_URL = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Download"
-_FINANCIAL_KEYWORDS = (
-    "sprawozdani",
-    "bilans",
-    "rachunek zysk",
-    "wzmianka",
-    "wzmianki",
-    "rdf/",
-    "wpisy w dziale 3",
-    "dz. 3.",
-    "rub. 2. wzmianki",
-)
+_RDF_SIGNATURE_RE = re.compile(r"RDF/", re.IGNORECASE)
 
 
 async def _enrich_with_msig(filings: list[FinancialFiling], krs: str) -> None:
-    """Backfill `document_url` on each filing using MSiG search.
+    """Attach a real downloadable gazette PDF to each filing via MSiG.
 
-    MSiG (Monitor Sądowy i Gospodarczy) publishes mandatory KRS announcements
-    as PDFs that are downloadable WITHOUT going through the Incapsula-protected
-    RDF portal. We search MSiG for the company, identify announcements that
-    relate to financial-statement filings, and attach the gazette-issue PDF
-    URL + the page within it where the company's record appears.
+    Financial-statement filings (the RDF stream — Repozytorium Dokumentów
+    Finansowych) are announced in Monitor Sądowy i Gospodarczy, and MSiG's
+    search API is *not* behind Incapsula. Every RDF announcement carries a
+    `signatureKRS` shaped `[RDF/<id>/<yy>/<seq>]`, which lets us pick out the
+    financial filings from ordinary court entries straight off the search
+    list — no per-record detail crawl. `Monitor/Download?id=<id>` then serves
+    the actual gazette-issue PDF (`application/pdf`) containing that company's
+    published statement, so `document_url` genuinely downloads.
     """
     if not filings:
         return
@@ -583,13 +608,14 @@ async def _enrich_with_msig(filings: list[FinancialFiling], krs: str) -> None:
 
     today = _date.today()
     earliest_year = min(f.year for f in filings)
-    earliest = f"{earliest_year - 1}-1-1"
+    earliest = f"{earliest_year}-1-1"
     latest = f"{today.year}-{today.month}-{today.day}"
 
-    candidates: list[dict[str, Any]] = []
+    rdf_entries: list[dict[str, Any]] = []
+    seen_ids: set[Any] = set()
     timeout = httpx.Timeout(15.0, connect=8.0)
     async with httpx.AsyncClient(timeout=timeout, headers={"Accept": "application/json"}) as client:
-        for page_num in range(1, 11):  # cap to 10 pages so we don't hammer
+        for page_num in range(1, 13):
             params = {
                 "entityName": "",
                 "krs": krs,
@@ -614,100 +640,56 @@ async def _enrich_with_msig(filings: list[FinancialFiling], krs: str) -> None:
             items = data.get("list") or []
             if not items:
                 break
-            candidates.extend(items)
+            for item in items:
+                signature = item.get("signatureKRS") or ""
+                if not _RDF_SIGNATURE_RE.search(signature):
+                    continue
+                item_id = item.get("id")
+                if item_id is None or item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                pub = item.get("dateOfPublication") or ""
+                year_match = re.match(r"(\d{4})", pub)
+                rdf_entries.append(
+                    {
+                        "id": item_id,
+                        "monitor": item.get("monitorNumber") or "",
+                        "signature": signature.strip("[]"),
+                        "pub_year": int(year_match.group(1)) if year_match else None,
+                    }
+                )
             if page_num >= int(data.get("countPages") or 1):
                 break
 
-        # Fetch details for each candidate and keep those with financial-filing
-        # keywords. The full gazette PDF is the same for many candidates from
-        # the same monitor issue — we dedupe by monitor number.
-        seen_monitors: dict[str, dict[str, Any]] = {}
-        for cand in candidates[:60]:
-            try:
-                detail_r = await client.get(_MSIG_DETALIS_URL, params={"Id": cand["id"]})
-                if detail_r.status_code != 200:
-                    continue
-                detail = detail_r.json()
-            except (httpx.HTTPError, ValueError):
-                continue
-            body = (detail.get("textInBody") or "").lower()
-            position = (detail.get("textInPosition") or "").lower()
-            full = body + " " + position
-            if not any(kw in full for kw in _FINANCIAL_KEYWORDS):
-                continue
-            monitor = detail.get("monitorNumber") or ""
-            if not monitor:
-                continue
-            pub = detail.get("dateOfPublication") or ""
-            year_match = re.search(r"(\d{4})", pub)
-            pub_year = int(year_match.group(1)) if year_match else None
-            # Extract fiscal-period end year from the body text. Polish entries
-            # write the period as "okres OD 01.08.2023 DO 31.07.2024" — the DO
-            # date's year is the fiscal year.
-            period_end_year: int | None = None
-            period_match = re.search(
-                r"OD\s+\d{2}[.\s]?\d{2}[.\s]?\d{4}\s+DO\s+\d{2}[.\s]?\d{2}[.\s]?(\d{4})",
-                detail.get("textInBody") or "",
-                re.IGNORECASE,
-            )
-            if period_match:
-                period_end_year = int(period_match.group(1))
-            entry = {
-                "monitor": monitor,
-                "page": detail.get("page"),
-                "id": cand["id"],
-                "pub_year": pub_year,
-                "period_end_year": period_end_year,
-                "text": detail.get("textInBody") or "",
-            }
-            key = f"{monitor}-{period_end_year}" if period_end_year else monitor
-            if key not in seen_monitors or (entry["pub_year"] or 0) > (seen_monitors[key]["pub_year"] or 0):
-                seen_monitors[key] = entry
-
-    if not seen_monitors:
+    if not rdf_entries:
         return
 
-    monitor_entries = sorted(
-        seen_monitors.values(),
-        key=lambda e: (e["pub_year"] or 0),
-        reverse=True,
-    )
-
-    # Index by filing year — match a filing to the earliest monitor entry that
-    # mentions a statement for that fiscal year.
     for filing in filings:
-        match = _best_msig_match(filing.year, monitor_entries)
+        match = _best_rdf_match(filing.year, rdf_entries)
         if match is None:
             continue
-        # Slice endpoint extracts just the company's pages from the full
-        # MSiG gazette; full PDF is kept under `source_url` for context.
-        filing.document_url = f"/api/pl/msig/slice/{match['id']}?krs={krs}"
-        filing.source_url = f"{_MSIG_DOWNLOAD_URL}?id={match['id']}"
+        filing.document_url = f"{_MSIG_DOWNLOAD_URL}?id={match['id']}"
         filing.document_format = "pdf"
         existing = filing.structured_data or {}
         existing.update(
             {
                 "msig_number": match["monitor"],
-                "msig_page": match["page"],
+                "msig_signature": match["signature"],
                 "msig_published_year": match["pub_year"],
-                "msig_excerpt": (match["text"] or "")[:280],
                 "msig_id": match["id"],
             }
         )
         filing.structured_data = existing
 
 
-def _best_msig_match(filing_year: int, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    # First try exact fiscal-period-year match — MSiG entries with the same
-    # period-end year as the filing's fiscal year are the definitive match.
-    exact = [e for e in entries if e.get("period_end_year") == filing_year]
+def _best_rdf_match(filing_year: int, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Polish annual statements are published the year after the fiscal year,
+    so an RDF announcement in `filing_year + 1` is the canonical match."""
+    exact = [e for e in entries if e.get("pub_year") == filing_year + 1]
     if exact:
-        exact.sort(key=lambda e: e.get("pub_year") or 0, reverse=True)
         return exact[0]
-    # Fall back to publication-year proximity (filings are registered shortly
-    # after the fiscal year closes).
-    eligible = [e for e in entries if (e["pub_year"] or 0) >= filing_year - 1]
+    eligible = [e for e in entries if (e.get("pub_year") or 0) > filing_year]
     if not eligible:
-        return entries[0] if entries else None
-    eligible.sort(key=lambda e: abs((e["pub_year"] or 0) - filing_year))
+        return None
+    eligible.sort(key=lambda e: abs((e.get("pub_year") or 0) - (filing_year + 1)))
     return eligible[0]

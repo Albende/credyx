@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.tw import TWAdapter
 from packages.adapters.tw.adapter import _normalize_ubn, _validate_ubn_checksum
 from packages.shared.models import FilingType, IdentifierType
@@ -43,10 +40,12 @@ async def test_search_by_ubn_returns_tsmc():
 
 
 @pytest.mark.asyncio
-async def test_search_freetext_name_raises_not_implemented():
+@pytest.mark.integration
+async def test_search_freetext_name_returns_matches():
     adapter = TWAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("台灣積體電路", limit=5)
+    matches = await adapter.search_by_name("台灣積體電路", limit=5)
+    assert matches
+    assert any(m.id == TSMC_UBN for m in matches)
 
 
 @pytest.mark.asyncio
@@ -79,12 +78,16 @@ async def test_fetch_financials_tsmc_structure():
     adapter = TWAdapter()
     filings = await adapter.fetch_financials(TSMC_UBN, years=3)
     assert isinstance(filings, list)
+    assert filings, "TSMC is TWSE-listed and must return a filing"
     for f in filings:
         assert f.company_id == TSMC_UBN
-        assert f.type == FilingType.ANNUAL_REPORT
+        assert f.type in (FilingType.ANNUAL_REPORT, FilingType.BALANCE_SHEET)
         assert f.year > 2000
         assert f.currency == "TWD"
-        assert f.document_url and f.document_url.startswith("https://")
+        assert f.source_url and f.source_url.startswith("https://")
+        sd = f.structured_data or {}
+        assert sd.get("income_statement", {}).get("revenue")
+        assert sd.get("balance_sheet", {}).get("total_assets")
 
 
 @pytest.mark.asyncio

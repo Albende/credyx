@@ -17,11 +17,13 @@ Two complementary free sources:
 - VIES (EU VAT Information Exchange) covers ΑΦΜ lookups under the EL
   country prefix and returns the registered legal name + address.
 
-ATHEX (Athens Exchange) hosts free PDF annual reports for listed
-companies. Index discovery is brittle and outside the MVP scope — we
-return `[]` from `fetch_financials` and surface the ATHEX entity URL on
-the `CompanyDetails.raw` payload for listed firms when we can detect
-them.
+Financials come from the same GEMI ``company/details`` payload: its
+``companyFinancial`` array lists every filed annual financial statement
+(``referencePeriod`` + a ``balancesheet`` entry with a numeric ``id``).
+Each file downloads as a PDF from
+``GET /api/download/financial/{id}?companyId={gemi}`` (verified live
+2026-07-21 for OTE, Coca-Cola 3E and OPAP; ESEF-listed firms also expose
+an ``ixbrl_url``). No API key, no CAPTCHA.
 
 Identifiers:
 
@@ -50,6 +52,7 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -152,8 +155,8 @@ class GRAdapter(CountryAdapter):
         if gemi_reachable and vies_ok:
             status = AdapterStatus.OK
             notes = (
-                "GEMI publicity portal + VIES reachable. Financials available "
-                "only for ATHEX-listed firms via free PDF index (not wired)."
+                "GEMI publicity portal + VIES reachable. Annual financial "
+                "statements served as PDF from the GEMI filings endpoint."
             )
         else:
             status = AdapterStatus.DEGRADED
@@ -165,7 +168,7 @@ class GRAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=status,
-            capabilities={"search": gemi_reachable, "lookup": True, "financials": False},
+            capabilities={"search": gemi_reachable, "lookup": True, "financials": gemi_reachable},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=notes,
         )
@@ -249,10 +252,61 @@ class GRAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # ATHEX hosts free annual report PDFs but its index is a JSP grid with
-        # no stable JSON surface; integration is deferred. Non-listed firms
-        # have no free filings source.
-        return []
+        gemi = _normalize_gemi(company_id)
+        async with build_http_client(base_url=self.GEMI_BASE_URL, timeout=30.0) as client:
+            resp = await client.post(
+                "/api/company/details",
+                json={"query": {"arGEMI": gemi}, "token": None, "language": "en"},
+                headers={"Accept": "application/json"},
+            )
+            if resp.status_code == 404:
+                return []
+            if resp.status_code == 429:
+                raise RateLimitError(
+                    "GEMI publicity portal rate-limited the financials fetch "
+                    "(429) — back off before retrying."
+                )
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except ValueError:
+                return []
+
+        payload = ((data or {}).get("companyInfo") or {}).get("payload") or {}
+        entries = payload.get("companyFinancial") or []
+
+        filings: list[FinancialFiling] = []
+        seen_years: set[int] = set()
+        for entry in entries:
+            period_end = _period_end(_str_or_none(entry.get("referencePeriod")))
+            if period_end is None or period_end.year in seen_years:
+                continue
+            groups = entry.get("FilesAndAuditors") or []
+            first = groups[0] if groups else {}
+            for sheet in first.get("balancesheet") or []:
+                file_id = sheet.get("id")
+                if file_id is None:
+                    continue
+                seen_years.add(period_end.year)
+                filings.append(
+                    FinancialFiling(
+                        company_id=gemi,
+                        year=period_end.year,
+                        type=FilingType.ANNUAL_REPORT,
+                        period_end=period_end,
+                        currency="EUR",
+                        document_url=(
+                            f"{self.GEMI_BASE_URL}/api/download/financial/"
+                            f"{int(file_id)}?companyId={gemi}"
+                        ),
+                        document_format="pdf",
+                        source_url=f"{self.GEMI_BASE_URL}/company/{gemi}",
+                    )
+                )
+                break
+
+        filings.sort(key=lambda f: f.year, reverse=True)
+        return filings[:years]
 
     async def _lookup_by_gemi(self, gemi: str) -> CompanyDetails | None:
         async with build_http_client(base_url=self.GEMI_BASE_URL, timeout=20.0) as client:
@@ -464,6 +518,16 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _period_end(reference_period: str | None) -> date | None:
+    """``"01/01/2025 - 31/12/2025"`` → the closing date of the period."""
+    if not reference_period:
+        return None
+    parts = reference_period.split("-")
+    if len(parts) != 2:
+        return None
+    return _parse_date(parts[1].strip())
 
 
 def _parse_date(s: str | None) -> date | None:

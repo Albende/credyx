@@ -43,16 +43,31 @@
 
 ## Financials
 
-Ukraine has no free centralized annual-report dataset:
+Ukraine has no free centralized annual-report dataset for the general
+population, but the NSSMC securities-disclosure system does expose the
+filed reports of every **securities issuer** for free:
 
-- SMIDA (https://smida.gov.ua) hosts filings for listed issuers only —
-  a small population.
-- General LLC/JSC accounts are filed with the State Tax Service but are
-  not publicly searchable.
+- SMIDA (https://smida.gov.ua) — the issuer profile lives at
+  `/db/prof/{edrpou}` and its filed regular reports are served from the
+  AJAX fragment `/db/prof/tabs/{edrpou}/regularXml`. That fragment lists
+  each filing with `date | year | quarter | type | view-link`; annual
+  filings carry the type `Річна` and a per-company viewer URL
+  `/db/emitent/report/year/xml/show/{id}`.
+- `fetch_financials` fetches that fragment (plain httpx — SMIDA is not
+  Cloudflare-walled), parses the annual rows, and returns one
+  `FinancialFiling` per year (`ANNUAL_REPORT`, `currency=UAH`,
+  `document_url` = the real per-company filing page,
+  `source_url` = the issuer profile). No numbers are fabricated —
+  `structured_data` is left null; the viewer URL is a genuine link to
+  that company's filed report.
+- Coverage note: the `regularXml` system holds the statutory "regular
+  information" filings (~2012–2018); post-2018 regulated disclosure moved
+  to the cabinet system on stockmarket.gov.ua. Historical annual reports
+  remain live and per-company.
+- General LLC/JSC accounts (non-issuers) are filed with the State Tax
+  Service but are not publicly searchable, so `fetch_financials` returns
+  `[]` for companies without a SMIDA issuer profile.
 - Paid mirrors (YouControl, Opendatabot) wrap the same source.
-
-`fetch_financials` therefore returns `[]` for the overwhelming majority
-of companies. Per the MVP rule we do **not** fabricate periods.
 
 ## Test companies
 
@@ -66,9 +81,11 @@ of companies. Per the MVP rule we do **not** fabricate periods.
 ✅ **Live** (July 2026, re-verified) — search + lookup via Clarity Project
 HTML with FlareSolverr bot-wall bypass; directors/KVED reduced vs. the old
 JSON API.
-⚠️ Financials: limited (no free national dataset).
+✅ Financials: SMIDA regular annual reports for securities issuers
+(verified live for EDRPOU `20077720` Naftogaz and `00135390` Ukrnafta —
+3 annual filings each). Non-issuers return `[]` (no free national dataset).
 
 **Recommended next step:** Subscribe nightly to the data.gov.ua YeDR
-dump as a fallback when Clarity Project is unreachable, and add a
-SMIDA-specific parser to pick up the ~200 listed-issuer balance
-sheets.
+dump as a fallback when Clarity Project is unreachable, and add a parser
+for the post-2018 cabinet disclosure system on stockmarket.gov.ua to pick
+up recent-year balance sheets (SMIDA `regularXml` tops out ~2018).

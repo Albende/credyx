@@ -1,13 +1,20 @@
-"""Czech Republic adapter — ARES (Administrativní registr ekonomických subjektů).
+"""Czech Republic adapter.
 
-Free public REST API at https://ares.gov.cz/ekonomicke-subjekty/.
-Identifier: IČO, 8 digits. No auth.
+Registry data (search + lookup) comes from ARES — the free public REST API
+at https://ares.gov.cz/ekonomicke-subjekty/. Identifier: IČO, 8 digits, no auth.
+
+Financial filings come from the Sbírka listin (collection of documents) of the
+public register at or.justice.cz. Each company's filed financial statements
+(účetní závěrka) and annual reports (výroční zpráva) are public downloads
+(PDF or iXBRL/ESEF xhtml). No auth, no bot wall.
 """
 from __future__ import annotations
 
 import re
 from datetime import date
 from typing import Any
+
+import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import InvalidIdentifierError
@@ -17,12 +24,27 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
 )
 
 _ICO_RE = re.compile(r"^\d{8}$")
+
+_JUSTICE_ORIGIN = "https://or.justice.cz"
+_JUSTICE_UI = f"{_JUSTICE_ORIGIN}/ias/ui"
+
+_SUBJEKT_RE = re.compile(r"subjektId=(\d+)")
+_ROW_RE = re.compile(r"<tr>(.*?)</tr>", re.S)
+_DOKUMENT_RE = re.compile(r"vypis-sl-detail\?dokument=(\d+)")
+_SPIS_RE = re.compile(r"vypis-sl-detail\?dokument=\d+&(?:amp;)?subjektId=\d+&(?:amp;)?spis=(\d+)")
+_SYMBOL_RE = re.compile(r'<span class="symbol">([^<]+)</span>')
+_YEAR_RE = re.compile(r"\[(\d{4})\]")
+_DOWNLOAD_RE = re.compile(
+    r'href="(/ias/content/download\?id=[0-9a-fA-F]+)"[^>]*>\s*<span>([^<]+)</span>'
+)
+_FILENAME_DATE_RE = re.compile(r"-(\d{4})-(\d{2})-(\d{2})-")
 
 
 class CZAdapter(CountryAdapter):
@@ -52,8 +74,8 @@ class CZAdapter(CountryAdapter):
         return AdapterHealth(
             country_code=self.country_code, name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
-            notes="Financials available via Sbírka listin (justice.cz) — PDFs, not yet wired.",
+            capabilities={"search": True, "lookup": True, "financials": True},
+            notes="Registry via ARES; filings via Sbírka listin (or.justice.cz).",
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
@@ -129,11 +151,72 @@ class CZAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # CZ filings are available as PDFs in Sbírka listin on justice.cz. The
-        # link is per-IČO. We return a single "discovery" pointer so the UI can
-        # surface it; structured data would need PDF scraping which is outside
-        # MVP scope.
-        return []
+        ico = company_id.strip().replace(" ", "").zfill(8)
+        if not _ICO_RE.match(ico):
+            raise InvalidIdentifierError(f"IČO must be 8 digits: {company_id}")
+
+        async with build_http_client() as client:
+            subjekt_id = await self._resolve_subjekt_id(client, ico)
+            if subjekt_id is None:
+                return []
+
+            resp = await get_with_retry(
+                client, f"{_JUSTICE_UI}/vypis-sl-firma?subjektId={subjekt_id}"
+            )
+            resp.raise_for_status()
+            candidates = _parse_document_rows(resp.text)
+            if not candidates:
+                return []
+
+            wanted_years = sorted({c["year"] for c in candidates}, reverse=True)[:years]
+            selected: list[dict[str, Any]] = []
+            seen: set[tuple[int, FilingType]] = set()
+            for cand in candidates:
+                if cand["year"] not in wanted_years:
+                    continue
+                key = (cand["year"], cand["type"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                selected.append(cand)
+
+            filings: list[FinancialFiling] = []
+            for cand in selected:
+                detail_url = (
+                    f"{_JUSTICE_UI}/vypis-sl-detail?dokument={cand['dokument']}"
+                    f"&subjektId={subjekt_id}&spis={cand['spis']}"
+                )
+                detail = await get_with_retry(client, detail_url)
+                if detail.status_code != 200:
+                    continue
+                link = _DOWNLOAD_RE.search(detail.text)
+                if not link:
+                    continue
+                document_url = _JUSTICE_ORIGIN + link.group(1)
+                filename = link.group(2).strip()
+                filings.append(
+                    FinancialFiling(
+                        company_id=ico,
+                        year=cand["year"],
+                        type=cand["type"],
+                        period_end=_period_end(filename, cand["year"]),
+                        currency="CZK",
+                        document_url=document_url,
+                        document_format=_doc_format(filename),
+                        source_url=detail_url,
+                    )
+                )
+            return filings
+
+    async def _resolve_subjekt_id(
+        self, client: httpx.AsyncClient, ico: str
+    ) -> int | None:
+        resp = await get_with_retry(
+            client, f"{_JUSTICE_UI}/rejstrik-$firma?ico={ico}"
+        )
+        resp.raise_for_status()
+        match = _SUBJEKT_RE.search(resp.text)
+        return int(match.group(1)) if match else None
 
 
 def _address(s: dict[str, Any]) -> str | None:
@@ -154,3 +237,54 @@ def _parse_date(s: str | None) -> date | None:
         return date.fromisoformat(s[:10])
     except ValueError:
         return None
+
+
+def _classify(symbols: str) -> FilingType | None:
+    if "výroční zpráva" in symbols:
+        return FilingType.ANNUAL_REPORT
+    if "účetní závěrka" in symbols:
+        return FilingType.BALANCE_SHEET
+    if "zpráva auditora" in symbols or "zpráva o auditu" in symbols:
+        return FilingType.AUDIT_REPORT
+    return None
+
+
+def _parse_document_rows(html: str) -> list[dict[str, Any]]:
+    """Extract financial-filing rows (newest first) from a Sbírka listin listing."""
+    out: list[dict[str, Any]] = []
+    for row in _ROW_RE.findall(html):
+        doc_match = _DOKUMENT_RE.search(row)
+        if not doc_match:
+            continue
+        symbols = " ".join(_SYMBOL_RE.findall(row))
+        filing_type = _classify(symbols)
+        if filing_type is None:
+            continue
+        years = [int(y) for y in _YEAR_RE.findall(symbols)]
+        if not years:
+            continue
+        spis_match = _SPIS_RE.search(row)
+        out.append(
+            {
+                "dokument": doc_match.group(1),
+                "spis": spis_match.group(1) if spis_match else None,
+                "type": filing_type,
+                "year": max(years),
+            }
+        )
+    return out
+
+
+def _period_end(filename: str, year: int) -> date:
+    match = _FILENAME_DATE_RE.search(filename)
+    if match:
+        try:
+            return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            pass
+    return date(year, 12, 31)
+
+
+def _doc_format(filename: str) -> str | None:
+    _, _, ext = filename.rpartition(".")
+    return ext.lower() if ext and ext != filename else None

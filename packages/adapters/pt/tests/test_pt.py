@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.pt import PTAdapter
 from packages.adapters.pt.adapter import _nipc_checksum_ok, _normalize_nipc
 from packages.shared.models import IdentifierType
@@ -40,10 +37,20 @@ def test_nipc_checksum_rejects_one_off():
 
 
 @pytest.mark.asyncio
-async def test_search_by_name_raises_not_implemented():
+async def test_search_by_name_rejects_empty_term():
     adapter = PTAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("Galp")
+    with pytest.raises(InvalidIdentifierError):
+        await adapter.search_by_name("   ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_search_by_name_finds_listed_issuer():
+    adapter = PTAdapter()
+    matches = await adapter.search_by_name("Galp Energia", limit=5)
+    assert matches
+    assert any("galp" in m.name.lower() for m in matches)
+    assert all(m.country == "PT" for m in matches)
 
 
 @pytest.mark.asyncio
@@ -77,15 +84,17 @@ async def test_vies_lookup_galp_via_vat():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_fetch_financials_listed_returns_pointers():
+async def test_fetch_financials_listed_returns_esef_reports():
     adapter = PTAdapter()
     filings = await adapter.fetch_financials("500697256", years=3)
-    # EDP is CMVM-listed: filings should be non-empty unless CMVM blocks
-    # our probe. Either case is acceptable, but non-empty entries must
-    # link back to CMVM.
+    # EDP is a listed ESEF filer: filings must be real per-company report
+    # documents hosted on filings.xbrl.org, not a generic landing page.
+    assert filings
     for f in filings:
-        assert f.source_url is not None and "cmvm.pt" in f.source_url
         assert f.currency == "EUR"
+        assert f.document_url is not None and "filings.xbrl.org" in f.document_url
+        assert f.document_url.endswith(".xhtml")
+        assert f.document_format == "xbrl"
 
 
 @pytest.mark.asyncio
@@ -95,4 +104,5 @@ async def test_health_check_reports_ok():
     health = await adapter.health_check()
     assert health.country_code == "PT"
     assert health.capabilities["lookup"] is True
-    assert health.capabilities["search"] is False
+    assert health.capabilities["search"] is True
+    assert health.capabilities["financials"] is True

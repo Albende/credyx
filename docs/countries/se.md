@@ -1,4 +1,4 @@
-# 🇸🇪 Sweden — VIES + Nasdaq Stockholm
+# 🇸🇪 Sweden — Bolagsverket open data + GLEIF/ESEF filings
 
 ## Identifier
 
@@ -9,54 +9,75 @@
 
 ## Sources
 
+- **Bolagsverket open data via mackan.eu proxy**
+  (https://mackan.eu/tools/bolagsverket/) — a free, key-free, CC-BY-4.0
+  JSON proxy over Bolagsverket's official *valuable datasets* (värdefulla
+  datamängder) API. Data is Bolagsverket's / SCB's own base register, not
+  a scrape of a ToS-restricted aggregator.
+  - `GET /search_name.php?q=` — full-text name search over ~1.2M
+    registered companies → `search_by_name`.
+  - `GET /get_data.php?orgnr=` — authoritative base record (name, legal
+    form, status, registered address, SNI codes, registration date,
+    business description) → `lookup_by_identifier`.
+- **GLEIF** (https://api.gleif.org/api/v1/lei-records) — maps an
+  Organisationsnummer to the company's LEI, key-free. Note GLEIF stores
+  `registeredAs` inconsistently (hyphenated for some records, plain for
+  others), so the adapter tries both forms.
+- **filings.xbrl.org** (https://filings.xbrl.org, XBRL International) —
+  free, key-free public repository of every EU-listed company's ESEF /
+  iXBRL annual financial report. Queried by LEI → real per-company,
+  downloadable iXBRL report packages → `fetch_financials`.
 - **VIES** (https://ec.europa.eu/taxation_customs/vies/services/checkVatService)
-  — EU VAT Information Exchange SOAP service. Free, no key, no contract.
-  Validates a Swedish VAT and returns the registered name + address.
-- **Nasdaq Stockholm**
-  (https://www.nasdaq.com/market-activity/stocks) — free per-issuer
-  financials pages for listed companies. Used for `fetch_financials`
-  pointers; per-document URLs require scraper-pool work.
-- **Bolagsverket Näringslivsregistret** (https://bolagsverket.se/) — the
-  authoritative Swedish business register. The full-extract API is
-  **paid by contract** and therefore not used in the free MVP (rule #2).
-  The small open-data slice at `/ofr/` does not expose per-company
-  lookup.
+  — kept only as a VAT-validation fallback for `lookup_by_identifier`
+  when the Bolagsverket proxy is unreachable.
+- **Bolagsverket official gateway** (https://api.bolagsverket.se/) — the
+  *valuable datasets* and annual-report APIs are free of charge but the
+  gateway is fronted by **mutual-TLS** (client certificate issued on
+  registration), so it is not usable key-free and is not used directly.
 - **`allabolag.se` / `merinfo.se`** — deliberately *not* used; their ToS
-  forbids automated scraping (rule #2 spirit).
-- **SCB Företagsregister** (https://www.scb.se/oa/) — statistical
-  aggregate data only, no per-company lookup.
+  forbids automated scraping.
 
-**Auth**: None (VIES + Nasdaq).
-**Rate limit**: 30 req/min adapter-side; VIES is unmetered but
-intermittent.
-**robots.txt / ToS**: VIES allows automated checks; Nasdaq.com permits
-the per-issuer pages used here.
+**Auth**: None (all three live sources are key-free).
+**Rate limit**: 30 req/min adapter-side. mackan.eu asks for "reasonable
+use"; GLEIF and filings.xbrl.org are unmetered public APIs.
+**robots.txt / ToS**: mackan.eu publishes the proxy for programmatic use
+(documented `openapi.json`); GLEIF and filings.xbrl.org are open data.
 
 ## Capabilities
 
 | Operation | Status | Notes |
 |-----------|--------|-------|
-| `search_by_name` | ❌ Not implemented | No free authoritative name search. Bolagsverket is paid. |
-| `lookup_by_identifier` (COMPANY_NUMBER) | ✅ | Via VIES (sends Org Nr + `01` as VAT). |
-| `lookup_by_identifier` (VAT) | ✅ | Via VIES directly. |
-| `fetch_financials` | ⚠️ Partial | Nasdaq Stockholm pointers for listed firms; `[]` otherwise. |
-| `health_check` | ✅ | VIES probe against Volvo. |
+| `search_by_name` | ✅ | Bolagsverket full-text search (mackan proxy). |
+| `lookup_by_identifier` (COMPANY_NUMBER) | ✅ | Authoritative base record from Bolagsverket open data. |
+| `lookup_by_identifier` (VAT) | ✅ | VAT → Org Nr, then same lookup (VIES fallback). |
+| `fetch_financials` | ✅ | Real ESEF iXBRL annual reports for listed issuers via GLEIF + filings.xbrl.org; `[]` for entities with no ESEF filing. |
+| `health_check` | ✅ | Bolagsverket proxy probe against Volvo. |
 
 ## Test companies
 
-| Company | Org Nr | VAT |
-|---------|--------|-----|
-| AB Volvo | 556012-5790 | SE556012579001 |
-| Telefonaktiebolaget LM Ericsson | 556016-0680 | SE556016068001 |
-| H&M Hennes & Mauritz AB | 556042-7220 | SE556042722001 |
-| Spotify AB | 559026-0892 | — |
+| Company | Org Nr | VAT | ESEF financials |
+|---------|--------|-----|-----------------|
+| AB Volvo | 556012-5790 | SE556012579001 | ✅ 2021–2024 |
+| Telefonaktiebolaget LM Ericsson | 556016-0680 | SE556016068001 | ✅ 2021–2024 |
+| H&M Hennes & Mauritz AB | 556042-7220 | SE556042722001 | ✅ 2022–2024 (Nov-30 FY) |
+| Spotify AB | 559026-0892 | — | ❌ (parent lists on NYSE, files 20-F not ESEF) |
 
 ## Status
 
-🟢 **Wired (VIES + Nasdaq for listed)** — paid Bolagsverket API and ToS-grey
-aggregators (allabolag, merinfo) intentionally skipped per project rule #2.
+🟢 **Fully wired** — search + lookup from Bolagsverket free open data
+(mackan.eu proxy over the official *valuable datasets* API), financials
+from real ESEF iXBRL annual reports (GLEIF → filings.xbrl.org). All three
+operations return real, live, key-free data. Paid Bolagsverket contract
+tiers and ToS-grey aggregators (allabolag, merinfo) intentionally skipped
+per project rule #2.
 
-**Recommended next step:** Once the scraper pool + ESEF XBRL parser land,
-parse Nasdaq Stockholm issuer pages for per-year annual report PDFs and
-extract structured financials from ESEF iXBRL filings (mandatory for EU
-listed companies since 2021).
+**Notes / next steps:**
+- `fetch_financials` currently returns filing metadata + a downloadable
+  iXBRL package URL. Wire the ESEF XBRL parser (`packages/risk/xbrl_esef.py`
+  per CLAUDE.md) to extract structured facts from the package for the
+  deterministic ratio engine.
+- The mackan.eu proxy is a third-party dependency in front of official
+  Bolagsverket data. If it becomes unavailable, the direct replacement is
+  the official `api.bolagsverket.se` valuable-datasets API — free of
+  charge but requiring a registered mutual-TLS client certificate (a
+  shared-infra change: certificate handling in `_base/http.py`).
