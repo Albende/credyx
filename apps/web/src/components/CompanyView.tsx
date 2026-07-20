@@ -167,7 +167,7 @@ function FinancialsBlock({
               {f.structured_data && (
                 <details className="mt-2 text-xs text-muted">
                   <summary className="cursor-pointer">Structured data</summary>
-                  <pre className="mt-2 overflow-x-auto rounded bg-black/30 p-2">
+                  <pre className="mt-2 overflow-x-auto rounded bg-bg-inset p-2">
                     {JSON.stringify(f.structured_data, null, 2)}
                   </pre>
                 </details>

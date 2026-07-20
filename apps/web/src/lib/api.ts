@@ -1,13 +1,15 @@
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (typeof window === "undefined" ? "http://api:8000" : "http://localhost:8000");
+const API_BASE = "";
 
 const INTERNAL_API =
-  process.env.INTERNAL_API_URL || API_BASE;
+  process.env.INTERNAL_API_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "http://127.0.0.1:8000";
 
-function base(serverSide: boolean) {
-  return serverSide ? INTERNAL_API : API_BASE;
-}
+const PUBLIC_API_PATHS = new Set([
+  "/api/countries",
+  "/api/health",
+  "/api/billing/plans",
+]);
 
 export type Capabilities = { search: boolean; lookup: boolean; financials: boolean };
 
@@ -81,11 +83,39 @@ export type Job<T = unknown> = {
   error?: string | null;
 };
 
-async function http<T>(path: string, init?: RequestInit, serverSide = typeof window === "undefined"): Promise<T> {
-  const res = await fetch(`${base(serverSide)}${path}`, {
+function rewriteForBrowser(path: string): string {
+  if (typeof window === "undefined") return path;
+  if (PUBLIC_API_PATHS.has(path.split("?")[0])) return path;
+  if (path.startsWith("/api/")) return "/api/backend/" + path.slice(5);
+  return path;
+}
+
+async function serverHeaders(): Promise<Record<string, string>> {
+  if (typeof window !== "undefined") return {};
+  try {
+    const mod = await import("next/headers");
+    const store = await mod.cookies();
+    const token = store.get("cl_access")?.value;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const isServer = typeof window === "undefined";
+  const base = isServer ? INTERNAL_API : "";
+  const finalPath = rewriteForBrowser(path);
+  const authHeaders = isServer ? await serverHeaders() : {};
+  const res = await fetch(`${base}${finalPath}`, {
     cache: "no-store",
+    credentials: "include",
     ...init,
-    headers: { Accept: "application/json", ...(init?.headers || {}) },
+    headers: {
+      Accept: "application/json",
+      ...authHeaders,
+      ...(init?.headers || {}),
+    },
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");

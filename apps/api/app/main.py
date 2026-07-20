@@ -8,11 +8,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from apps.api.app.admin_routes import router as admin_router
+from apps.api.app.auth_routes import router as auth_router
+from apps.api.app.billing_routes import router as billing_router
 from apps.api.app.config import get_settings
 from apps.api.app.db import init_db_if_needed
 from apps.api.app.logging_setup import configure_logging
 from apps.api.app.rate_limit import rate_limit_middleware
 from apps.api.app.routes import router
+from apps.api.app.webhook_routes import router as webhook_router
 from packages.adapters._base.browser import close_browser_pool
 
 logger = logging.getLogger(__name__)
@@ -38,7 +42,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="CreditLens API",
+        title="Credyx API",
         version="0.1.0",
         description="B2B credit intelligence — registry data, financial filings, AI risk scoring.",
         lifespan=lifespan,
@@ -46,17 +50,21 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     app.add_middleware(BaseHTTPMiddleware, dispatch=rate_limit_middleware)
     app.include_router(router)
+    app.include_router(auth_router)
+    app.include_router(billing_router)
+    app.include_router(webhook_router)
+    app.include_router(admin_router)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, str]:
         return {
-            "name": "CreditLens API",
+            "name": "Credyx API",
             "version": "0.1.0",
             "docs": "/docs",
             "health": "/api/healthz",

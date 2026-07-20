@@ -2,27 +2,540 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body {
-  background-color: hsl(220 18% 5%);
-  color: hsl(0 0% 96%);
-  min-height: 100%;
+/*
+  Credyx — "Bureau" design system.
+
+  The visual language of security printing: engraved guilloché
+  line-work, bond paper, ledger rules, registration ticks, stamped
+  verdicts. Banker's green + gold leaf + intaglio blue.
+
+  Light = "Bond"  (ivory paper, ink, engraved green)
+  Dark  = "Vault" (green-black ink, jade phosphor, gilt)
+
+  Token names are unchanged from the previous system — every page
+  keeps rendering; only the identity changes.
+*/
+
+@layer base {
+  :root {
+    /* ---- Bond (light): ivory paper + green ink ---- */
+    --color-bg-base: 42 36% 95%;
+    --color-bg-elevated: 45 44% 98%;
+    --color-bg-overlay: 42 30% 92%;
+    --color-bg-inset: 42 26% 90%;
+
+    --color-fg-default: 165 28% 11%;
+    --color-fg-muted: 163 12% 33%;
+    --color-fg-subtle: 160 8% 47%;
+    --color-fg-inverted: 45 44% 97%;
+
+    --color-border-default: 44 16% 83%;
+    --color-border-strong: 44 14% 72%;
+    --color-border-focus: 160 60% 30%;
+
+    --color-brand-primary: 160 62% 26%;
+    --color-brand-primary-fg: 45 60% 97%;
+    --color-brand-primary-soft: 160 62% 26%;
+    --color-brand-secondary: 42 74% 42%;
+    --color-brand-secondary-fg: 165 28% 11%;
+
+    --color-accent: 210 46% 38%;
+    --color-success: 152 58% 30%;
+    --color-warning: 36 88% 42%;
+    --color-danger: 4 68% 44%;
+    --color-info: 210 64% 42%;
+
+    /* ---- Legacy shims (unprefixed) — auto-flip with theme ---- */
+    --bg-base: var(--color-bg-base);
+    --bg-elevated: var(--color-bg-elevated);
+    --bg-overlay: var(--color-bg-overlay);
+    --bg-inset: var(--color-bg-inset);
+
+    --fg-default: var(--color-fg-default);
+    --fg-muted: var(--color-fg-muted);
+    --fg-subtle: var(--color-fg-subtle);
+    --fg-inverted: var(--color-fg-inverted);
+
+    --border-default: var(--color-border-default);
+    --border-strong: var(--color-border-strong);
+    --border-focus: var(--color-border-focus);
+
+    --brand-primary: var(--color-brand-primary);
+    --brand-primary-fg: var(--color-brand-primary-fg);
+    --brand-primary-soft: var(--color-brand-primary-soft);
+    --brand-secondary: var(--color-brand-secondary);
+    --brand-secondary-fg: var(--color-brand-secondary-fg);
+
+    --accent: var(--color-accent);
+    --success: var(--color-success);
+    --warning: var(--color-warning);
+    --danger: var(--color-danger);
+    --info: var(--color-info);
+
+    --color-bg: var(--color-bg-base);
+    --color-surface: var(--color-bg-elevated);
+    --color-text: var(--color-fg-default);
+    --color-muted: var(--color-fg-muted);
+    --color-border: var(--color-border-default);
+    --color-good: var(--color-success);
+    --color-warn: var(--color-warning);
+    --color-bad: var(--color-danger);
+
+    --shadow-color: 160 30% 12%;
+    --shadow-strength: 0.10;
+
+    color-scheme: light;
+  }
+
+  .dark {
+    /* ---- Vault (dark): green-black ink + jade phosphor ---- */
+    --color-bg-base: 168 30% 5%;
+    --color-bg-elevated: 166 24% 8%;
+    --color-bg-overlay: 164 20% 11%;
+    --color-bg-inset: 168 34% 3.5%;
+
+    --color-fg-default: 145 18% 93%;
+    --color-fg-muted: 150 10% 64%;
+    --color-fg-subtle: 152 7% 45%;
+    --color-fg-inverted: 168 30% 5%;
+
+    --color-border-default: 160 15% 16%;
+    --color-border-strong: 158 13% 26%;
+    --color-border-focus: 158 62% 52%;
+
+    --color-brand-primary: 158 62% 50%;
+    --color-brand-primary-fg: 168 32% 6%;
+    --color-brand-primary-soft: 158 62% 50%;
+    --color-brand-secondary: 44 84% 58%;
+    --color-brand-secondary-fg: 168 32% 6%;
+
+    --color-accent: 204 68% 60%;
+    --color-success: 152 66% 48%;
+    --color-warning: 40 90% 58%;
+    --color-danger: 4 80% 62%;
+    --color-info: 208 88% 64%;
+
+    --bg-base: var(--color-bg-base);
+    --bg-elevated: var(--color-bg-elevated);
+    --bg-overlay: var(--color-bg-overlay);
+    --bg-inset: var(--color-bg-inset);
+
+    --fg-default: var(--color-fg-default);
+    --fg-muted: var(--color-fg-muted);
+    --fg-subtle: var(--color-fg-subtle);
+    --fg-inverted: var(--color-fg-inverted);
+
+    --border-default: var(--color-border-default);
+    --border-strong: var(--color-border-strong);
+    --border-focus: var(--color-border-focus);
+
+    --brand-primary: var(--color-brand-primary);
+    --brand-primary-fg: var(--color-brand-primary-fg);
+    --brand-primary-soft: var(--color-brand-primary-soft);
+    --brand-secondary: var(--color-brand-secondary);
+    --brand-secondary-fg: var(--color-brand-secondary-fg);
+
+    --accent: var(--color-accent);
+    --success: var(--color-success);
+    --warning: var(--color-warning);
+    --danger: var(--color-danger);
+    --info: var(--color-info);
+
+    --color-bg: var(--color-bg-base);
+    --color-surface: var(--color-bg-elevated);
+    --color-text: var(--color-fg-default);
+    --color-muted: var(--color-fg-muted);
+    --color-border: var(--color-border-default);
+    --color-good: var(--color-success);
+    --color-warn: var(--color-warning);
+    --color-bad: var(--color-danger);
+
+    --shadow-color: 168 60% 2%;
+    --shadow-strength: 0.5;
+
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  html,
+  body {
+    background-color: hsl(var(--color-bg-base));
+    color: hsl(var(--color-fg-default));
+    min-height: 100%;
+    overflow-x: clip;
+    max-width: 100%;
+  }
+
+  body {
+    font-feature-settings: "cv11", "ss01", "ss03", "cv09";
+    font-variant-ligatures: contextual;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    color: hsl(var(--color-fg-default));
+    @apply font-sans text-body;
+  }
+
+  /* Engraved-certificate display type on headline elements */
+  h1,
+  h2 {
+    font-family: var(--font-display), Georgia, "Times New Roman", serif;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background-color: hsl(var(--color-brand-secondary) / 0.35);
+    color: hsl(var(--color-fg-default));
+  }
+
+  *:focus-visible {
+    outline: 1.5px solid hsl(var(--color-border-focus));
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--color-border-default));
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--color-border-strong));
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--color-border-strong)) transparent;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
+  .tabular,
+  table,
+  .font-mono {
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
 }
 
-.card {
-  @apply rounded-xl border border-border bg-surface p-5;
+@layer components {
+  /* ---- Legacy component classes — preserved, re-cut for Bureau ---- */
+  .card {
+    @apply rounded-lg border border-border-default bg-bg-elevated p-5;
+    box-shadow:
+      0 1px 2px hsl(var(--shadow-color) / calc(var(--shadow-strength) * 0.8)),
+      0 0 0 0.5px hsl(var(--color-border-default) / 0.4);
+  }
+  .panel,
+  .surface-panel {
+    @apply rounded-lg border border-border-default bg-bg-elevated;
+  }
+  .label,
+  .serial {
+    @apply font-mono text-[0.66rem] font-medium uppercase tracking-[0.18em] text-fg-subtle;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border border-border-default bg-bg-elevated px-3.5 py-2 text-sm font-medium text-fg-default transition-colors hover:border-border-strong hover:bg-bg-overlay disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply border-transparent bg-brand-primary text-brand-primary-fg hover:bg-brand-primary/90;
+  }
+  .input {
+    @apply w-full rounded-md border border-border-default bg-bg-inset px-3 py-2 text-sm text-fg-default placeholder:text-fg-subtle focus:outline-none focus:border-border-focus;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded border border-border-default px-1.5 py-0.5 font-mono text-[0.68rem] font-medium uppercase tracking-wide text-fg-muted;
+  }
+  .tag-good {
+    @apply border-success/30 bg-success/10 text-success;
+  }
+  .tag-warn {
+    @apply border-warning/30 bg-warning/10 text-warning;
+  }
+  .tag-bad {
+    @apply border-danger/30 bg-danger/10 text-danger;
+  }
+
+  /* ---- Bureau signatures ---- */
+
+  /* Engraver's plate: card with registration ticks in two corners */
+  .plate {
+    position: relative;
+  }
+  .plate::before,
+  .plate::after {
+    content: "";
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    pointer-events: none;
+    opacity: 0.55;
+  }
+  .plate::before {
+    top: 7px;
+    left: 7px;
+    border-top: 1px solid hsl(var(--color-fg-subtle));
+    border-left: 1px solid hsl(var(--color-fg-subtle));
+  }
+  .plate::after {
+    bottom: 7px;
+    right: 7px;
+    border-bottom: 1px solid hsl(var(--color-fg-subtle));
+    border-right: 1px solid hsl(var(--color-fg-subtle));
+  }
+
+  /* Rubber-stamp verdict. Pair with .stamp-good / .stamp-warn / .stamp-bad */
+  .stamp {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.3em 0.85em;
+    border: 1.5px solid currentColor;
+    border-radius: 4px;
+    outline: 1px solid currentColor;
+    outline-offset: 2.5px;
+    font-family: var(--font-mono), monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    transform: rotate(-2.5deg);
+    -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 220'><filter id='w'><feTurbulence type='fractalNoise' baseFrequency='0.55' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 2.4 -0.45'/></filter><rect width='220' height='220' filter='url(%23w)'/></svg>");
+    mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 220'><filter id='w'><feTurbulence type='fractalNoise' baseFrequency='0.55' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 2.4 -0.45'/></filter><rect width='220' height='220' filter='url(%23w)'/></svg>");
+    -webkit-mask-size: 220px 220px;
+    mask-size: 220px 220px;
+  }
+  .stamp-good {
+    color: hsl(var(--color-success));
+  }
+  .stamp-warn {
+    color: hsl(var(--color-warning));
+  }
+  .stamp-bad {
+    color: hsl(var(--color-danger));
+  }
+
+  /* Certificate divider: ─────◆───── */
+  .rule-ornament {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .rule-ornament::before,
+  .rule-ornament::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(
+      to right,
+      transparent,
+      hsl(var(--color-border-strong)) 30%,
+      hsl(var(--color-border-strong)) 70%,
+      transparent
+    );
+  }
 }
-.btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed transition;
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .text-pretty {
+    text-wrap: pretty;
+  }
+
+  .text-gradient-brand {
+    @apply bg-gradient-to-r from-brand-primary via-accent to-brand-secondary bg-clip-text text-transparent;
+  }
+
+  .bg-tech-grid {
+    background-image:
+      linear-gradient(to right, hsl(var(--color-border-default) / 0.5) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--color-border-default) / 0.5) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+
+  /*
+    Guilloché — engraved banknote line-work. Alpha mask + currentColor,
+    so it tints with any Tailwind text-* class:
+      <div aria-hidden class="texture-guilloche absolute inset-0 text-brand-primary/10" />
+  */
+  .texture-guilloche {
+    background-color: currentColor;
+    -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='160' viewBox='0 0 320 160'><g fill='none' stroke='white' stroke-width='1'><path d='M0 80 Q40 8 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 152 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 40 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 120 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 64 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 96 80 80 T160 80 T240 80 T320 80'/><g transform='translate(-40 0)'><path d='M0 80 Q40 24 80 80 T160 80 T240 80 T320 80 T400 80'/><path d='M0 80 Q40 136 80 80 T160 80 T240 80 T320 80 T400 80'/></g></g></svg>");
+    mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='160' viewBox='0 0 320 160'><g fill='none' stroke='white' stroke-width='1'><path d='M0 80 Q40 8 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 152 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 40 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 120 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 64 80 80 T160 80 T240 80 T320 80'/><path d='M0 80 Q40 96 80 80 T160 80 T240 80 T320 80'/><g transform='translate(-40 0)'><path d='M0 80 Q40 24 80 80 T160 80 T240 80 T320 80 T400 80'/><path d='M0 80 Q40 136 80 80 T160 80 T240 80 T320 80 T400 80'/></g></g></svg>");
+    -webkit-mask-repeat: repeat;
+    mask-repeat: repeat;
+    -webkit-mask-size: 320px 160px;
+    mask-size: 320px 160px;
+  }
+
+  /* Ruled ledger paper */
+  .texture-ledger {
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent,
+      transparent 27px,
+      hsl(var(--color-border-default) / 0.55) 27px,
+      hsl(var(--color-border-default) / 0.55) 28px
+    );
+  }
+
+  /* Film-grain overlay — apply to any positioned parent. */
+  .grain {
+    position: relative;
+  }
+  .grain::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.55 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    opacity: 0.28;
+    pointer-events: none;
+    mix-blend-mode: soft-light;
+  }
 }
-.btn-primary {
-  @apply bg-accent text-black border-transparent hover:opacity-90;
+
+/*
+  ---- Theme shade-pull ----
+  Switching themes pulls the new theme down over the old one like a
+  window shade, with a gilt edge riding the reveal line.
+  Driven by the View Transitions API from lib/use-theme.ts; the
+  `theme-slide` class scopes these rules to theme switches only.
+*/
+
+html.theme-slide::view-transition-old(root),
+html.theme-slide::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
 }
-.input {
-  @apply w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/60;
+html.theme-slide::view-transition-old(root) {
+  z-index: 1;
 }
-.badge {
-  @apply inline-flex items-center rounded-md border border-border px-2 py-0.5 text-xs;
+html.theme-slide::view-transition-new(root) {
+  z-index: 2;
+  animation: theme-shade-down 620ms cubic-bezier(0.72, 0, 0.24, 1) both;
 }
-.tag-good { @apply bg-good/15 text-good border-good/30; }
-.tag-warn { @apply bg-warn/15 text-warn border-warn/30; }
-.tag-bad  { @apply bg-bad/15 text-bad border-bad/30; }
+
+@keyframes theme-shade-down {
+  from {
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+.theme-shade-edge {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: -6px;
+  height: 2px;
+  z-index: 2147483647;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    hsl(var(--color-brand-secondary)) 25%,
+    hsl(var(--color-brand-primary)) 75%,
+    transparent
+  );
+  box-shadow:
+    0 0 18px 2px hsl(var(--color-brand-secondary) / 0.5),
+    0 0 44px 6px hsl(var(--color-brand-primary) / 0.3);
+  animation: theme-shade-edge 620ms cubic-bezier(0.72, 0, 0.24, 1) both;
+}
+
+@keyframes theme-shade-edge {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  to {
+    transform: translateY(calc(100vh + 12px));
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-slide::view-transition-new(root) {
+    animation: none;
+  }
+  .theme-shade-edge {
+    display: none;
+  }
+}
+
+/*
+  Keyframes — duplicated outside @layer so they're always emitted
+  even if PurgeCSS skips the tailwind config animation entries.
+*/
+
+@keyframes aurora {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(2%, -1%, 0) rotate(180deg);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(360deg);
+  }
+}
+
+@keyframes gradient-x {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes scan {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}

@@ -1,0 +1,87 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Note: Playwright E2E tests (apps/web/e2e) are intentionally NOT run in CI
+# in this wave. Orchestrating the full stack (Postgres + Redis + API + Next.js
+# SSR + browser) reliably in GitHub Actions is finicky and flaky — we'll
+# add a dedicated e2e job in a later wave once the server-startup script
+# is hardened. Run them locally with: cd apps/web && npx playwright test
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: creditlens
+          POSTGRES_PASSWORD: creditlens
+          POSTGRES_DB: creditlens
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U creditlens -d creditlens"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://creditlens:creditlens@127.0.0.1:5432/creditlens
+      PYTHONPATH: .
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt
+
+      - name: Run Alembic migrations
+        run: alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Run backend tests (unit only)
+        run: pytest apps/api/tests packages/llm packages/risk -m "not integration" --tb=short
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test

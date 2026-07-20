@@ -1,4 +1,4 @@
-"""HTTP routes for CreditLens API."""
+"""HTTP routes for Credyx API."""
 from __future__ import annotations
 
 import asyncio
@@ -26,11 +26,14 @@ from apps.api.app.db import Company as CompanyRow
 from apps.api.app.db import IngestionJob
 from apps.api.app.db import PDFTextCache
 from apps.api.app.db import RiskAssessment as RiskAssessmentRow
-from apps.api.app.db import get_session
+from apps.api.app.auth import current_user
+from apps.api.app.db import UsageWindow, User, get_session
+from apps.api.app.feature_gate import consume_quota, plan_features, requires_feature
 from packages.adapters._base.errors import (
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
+from packages.adapters._global.gleif import GLEIFClient
 from packages.adapters._global.opensanctions import (
     OpenSanctionsClient,
     SanctionHit,
@@ -119,19 +122,57 @@ async def search_companies(
     country: str = Query(..., min_length=2, max_length=2),
     name: str = Query(..., min_length=2),
     limit: int = Query(10, ge=1, le=50),
+    fallback: bool = Query(True, description="Fall back to GLEIF if national adapter has no name search"),
+    _quota: None = Depends(consume_quota("searches", UsageWindow.day)),
 ) -> dict[str, Any]:
     adapter = get_adapter(country)
     if not adapter:
         raise HTTPException(status_code=404, detail=f"No adapter for country {country}")
+
+    results = []
+    adapter_unavailable_reason: str | None = None
+    source = "adapter"
     try:
         results = await adapter.search_by_name(name, limit=limit)
     except AdapterNotImplementedError as exc:
-        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
+        adapter_unavailable_reason = str(exc)
     except InvalidIdentifierError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if not results and fallback:
+        try:
+            gleif = GLEIFClient()
+            results = await gleif.search_by_name(name=name, country=country.upper(), limit=limit)
+            if results:
+                source = "gleif"
+        except Exception as exc:
+            logger.warning("GLEIF fallback failed: %s", exc)
+
+    if not results and adapter_unavailable_reason:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=adapter_unavailable_reason,
+        )
+
     return {
         "country": country.upper(),
         "query": name,
+        "source": source,
+        "results": [r.model_dump(mode="json") for r in results],
+    }
+
+
+@router.get("/search/global")
+async def search_global(
+    name: str = Query(..., min_length=2),
+    limit: int = Query(10, ge=1, le=50),
+) -> dict[str, Any]:
+    """Search GLEIF globally without country filter — covers ~2M+ entities worldwide."""
+    gleif = GLEIFClient()
+    results = await gleif.search_by_name(name=name, limit=limit)
+    return {
+        "query": name,
+        "source": "gleif",
         "results": [r.model_dump(mode="json") for r in results],
     }
 
@@ -142,6 +183,9 @@ class CompanyResponse(BaseModel):
     details: CompanyDetails
 
 
+_LEI_RE = __import__("re").compile(r"^[A-Z0-9]{18}\d{2}$")
+
+
 @router.get("/companies/{country}/{identifier}", response_model=CompanyResponse)
 async def get_company(
     country: str,
@@ -149,6 +193,7 @@ async def get_company(
     id_type: str | None = Query(None, description="Override identifier type (defaults to adapter primary)"),
     force_refresh: bool = Query(False),
     session: AsyncSession = Depends(get_session),
+    _quota: None = Depends(consume_quota("company_lookups", UsageWindow.day)),
 ) -> CompanyResponse:
     adapter = get_adapter(country)
     if not adapter:
@@ -161,6 +206,13 @@ async def get_company(
             last_fetched_at=cached_row.last_fetched_at,
             details=CompanyDetails.model_validate(cached_row.registry_data),
         )
+
+    if _LEI_RE.match(identifier):
+        details = await GLEIFClient().lookup_by_lei(identifier)
+        if not details:
+            raise HTTPException(status_code=404, detail=f"LEI {identifier} not found in GLEIF")
+        await upsert_company(session, details)
+        return CompanyResponse(cached=False, last_fetched_at=datetime.now(timezone.utc), details=details)
 
     id_type_enum = _resolve_id_type(adapter, id_type)
     try:
@@ -190,7 +242,19 @@ async def get_company_financials(
         ),
     ),
     session: AsyncSession = Depends(get_session),
+    _user: User = Depends(current_user),
+    _quota: None = Depends(consume_quota("financial_lookups", UsageWindow.month)),
 ) -> dict[str, Any]:
+    if with_text:
+        if not plan_features(_user).get("pdf_extraction", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "feature_unavailable",
+                    "feature": "pdf_extraction",
+                    "upgrade_url": "/pricing",
+                },
+            )
     adapter = get_adapter(country)
     if not adapter:
         raise HTTPException(status_code=404, detail=f"No adapter for country {country}")
@@ -316,6 +380,8 @@ async def start_risk_analysis(
     country: str,
     identifier: str,
     session: AsyncSession = Depends(get_session),
+    _feature: None = Depends(requires_feature("risk_analysis")),
+    _quota: None = Depends(consume_quota("risk_analyses", UsageWindow.month)),
 ) -> RiskAnalysisStartResponse:
     adapter = get_adapter(country)
     if not adapter:
@@ -392,6 +458,91 @@ async def screen_entity(body: ScreenRequest) -> list[SanctionHit]:
         identifiers=body.identifiers,
         schema=body.schema_,
         limit=body.limit,
+    )
+
+
+@router.get("/pl/msig/slice/{msig_id}")
+async def pl_msig_slice(
+    msig_id: int,
+    krs: str = Query(..., min_length=10, max_length=10),
+    user: User = Depends(current_user),
+):
+    """Extract just the company-specific pages from an MSiG gazette PDF.
+
+    The Polish Monitor Sądowy i Gospodarczy bundles 200-page issues containing
+    hundreds of company announcements. We pull the entry's `numberOfNotice`
+    + start page from MSiG Detalis, download the full gazette PDF, then carve
+    out only the pages between this notice's "Poz. <N>." header and the next
+    "Poz. <N+1>." (the typical company announcement is 1-5 pages).
+
+    Returns a slim PDF named for the company's KRS + monitor issue.
+    """
+    import httpx
+    import re
+    from io import BytesIO
+    from fastapi.responses import StreamingResponse
+
+    detail_url = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Detalis"
+    download_url = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Download"
+    async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
+        try:
+            det = (await client.get(detail_url, params={"Id": msig_id})).json()
+        except Exception as exc:
+            raise HTTPException(502, f"MSiG detail fetch failed: {exc}") from exc
+        if not det or det.get("krs") != krs:
+            raise HTTPException(404, "MSiG entry not found or KRS mismatch")
+        notice = str(det.get("numberOfNotice") or "")
+        start_page = int(det.get("page") or 1)
+        monitor = str(det.get("monitorNumber") or "")
+        pdf_resp = await client.get(download_url, params={"id": msig_id})
+        if pdf_resp.status_code != 200:
+            raise HTTPException(502, f"MSiG PDF download returned {pdf_resp.status_code}")
+        pdf_bytes = pdf_resp.content
+
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    total = len(reader.pages)
+    # Page index: MSiG `page` is 1-based and refers to the page WHERE the
+    # notice STARTS. The PDF's first page is usually a TOC; the printed page
+    # number normally equals the PDF page number for these gazettes.
+    idx = max(0, min(start_page - 1, total - 1))
+    # Scan forward for the next "Poz. <N+1>." to find the end of this notice.
+    end_idx = idx
+    try:
+        next_notice_num = int(notice) + 1 if notice.isdigit() else None
+    except (TypeError, ValueError):
+        next_notice_num = None
+    next_marker = re.compile(rf"\bPoz\.\s*{next_notice_num}\b") if next_notice_num else None
+    for i in range(idx, min(idx + 8, total)):  # at most 8 pages per notice
+        if i == idx:
+            end_idx = i
+            continue
+        try:
+            text = reader.pages[i].extract_text() or ""
+        except Exception:
+            text = ""
+        if next_marker and next_marker.search(text):
+            break
+        end_idx = i
+
+    writer = PdfWriter()
+    for i in range(idx, end_idx + 1):
+        writer.add_page(reader.pages[i])
+    out = BytesIO()
+    writer.write(out)
+    out.seek(0)
+
+    safe_monitor = re.sub(r"[^A-Za-z0-9._-]", "_", monitor) or str(msig_id)
+    filename = f"krs_{krs}_msig_{safe_monitor}_poz_{notice or msig_id}.pdf"
+
+    return StreamingResponse(
+        out,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, max-age=86400",
+        },
     )
 
 

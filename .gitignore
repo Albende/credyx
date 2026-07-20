@@ -49,3 +49,8 @@ logs/
 *.cov
 coverage.xml
 docs/VALIDATION_REPORT.md.tmp
+
+# --- Local tooling artifacts ---
+.playwright-mcp/
+/*.png
+/*.jpeg

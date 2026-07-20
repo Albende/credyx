@@ -95,13 +95,13 @@ export default function SearchPanel({ countries }: { countries: CountryHealth[] 
         <div className="ml-auto flex rounded-lg border border-border overflow-hidden">
           <button
             onClick={() => setMode("name")}
-            className={`px-3 py-1.5 text-sm ${mode === "name" ? "bg-accent text-black" : "hover:bg-white/5"}`}
+            className={`px-3 py-1.5 text-sm ${mode === "name" ? "bg-accent text-black" : "hover:bg-bg-overlay"}`}
           >
             Search by name
           </button>
           <button
             onClick={() => setMode("identifier")}
-            className={`px-3 py-1.5 text-sm ${mode === "identifier" ? "bg-accent text-black" : "hover:bg-white/5"}`}
+            className={`px-3 py-1.5 text-sm ${mode === "identifier" ? "bg-accent text-black" : "hover:bg-bg-overlay"}`}
           >
             Lookup by {labels.primary}
           </button>
@@ -125,7 +125,7 @@ export default function SearchPanel({ countries }: { countries: CountryHealth[] 
       {results.length > 0 && (
         <ul className="divide-y divide-border rounded-lg border border-border">
           {results.map((r) => (
-            <li key={r.id} className="px-4 py-3 hover:bg-white/5">
+            <li key={r.id} className="px-4 py-3 hover:bg-bg-overlay">
               <a
                 href={`/company/${country}/${encodeURIComponent(r.id)}`}
                 className="flex items-start justify-between gap-4"

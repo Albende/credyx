@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Credyx seal: banker's-green plate, engraved ivory rosette, gold X monogram -->
+  <circle cx="32" cy="32" r="30" fill="#196B50"/>
+  <circle cx="32" cy="32" r="30" fill="none" stroke="#0E4534" stroke-width="1.5"/>
+  <circle cx="32" cy="32" r="25" fill="none" stroke="#F6F2E7" stroke-width="1.4" opacity="0.85"/>
+  <circle cx="32" cy="32" r="17" fill="none" stroke="#F6F2E7" stroke-width="1.4" opacity="0.85"/>
+  <g stroke="#F6F2E7" stroke-width="1.3" opacity="0.6">
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(0 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(30 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(60 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(90 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(120 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(150 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(180 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(210 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(240 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(270 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(300 32 32)"/>
+    <line x1="49" y1="32" x2="57" y2="32" transform="rotate(330 32 32)"/>
+  </g>
+  <g stroke="#D9A521" stroke-width="5.5" stroke-linecap="round">
+    <line x1="25" y1="25" x2="39" y2="39"/>
+    <line x1="39" y1="25" x2="25" y2="39"/>
+  </g>
+</svg>

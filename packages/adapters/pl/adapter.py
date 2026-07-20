@@ -33,9 +33,12 @@ Limitations (see docs/countries/pl.md):
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
@@ -49,6 +52,7 @@ from packages.shared.models import (
     CompanyDetails,
     CompanyMatch,
     Director,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -103,6 +107,7 @@ class PLAdapter(CountryAdapter):
 
     KRS_BASE_URL = "https://api-krs.ms.gov.pl/api/krs"
     WL_BASE_URL = "https://wl-api.mf.gov.pl/api"
+    MSIG_BASE_URL = "https://wyszukiwarka-msig.ms.gov.pl/api"
 
     async def health_check(self) -> AdapterHealth:
         try:
@@ -135,11 +140,75 @@ class PLAdapter(CountryAdapter):
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "KRS does not expose a public name-search API; the web search at "
-            "wyszukiwarka-krs.ms.gov.pl is bot-protected. Use KRS, NIP, VAT, "
-            "or REGON lookup instead."
-        )
+        from packages.adapters._base.browser import get_browser_pool
+
+        pool = get_browser_pool()
+        async with pool.acquire() as ctx:
+            page = await ctx.new_page()
+            try:
+                await page.goto(
+                    "https://wyszukiwarka-krs.ms.gov.pl/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await page.get_by_role("textbox", name="Nazwa / Firma").fill(name)
+                await page.get_by_role("button", name="Wyszukaj").first.click()
+                # Wait for either "Brak danych" (no results) or rows containing a 10-digit KRS.
+                await page.wait_for_function(
+                    """() => {
+                        const txt = document.body.innerText;
+                        if (txt.includes('Brak danych')) return true;
+                        return /\\b0\\d{9}\\b/.test(txt);
+                    }""",
+                    timeout=25000,
+                )
+                rows_data = await page.evaluate(
+                    """() => {
+                        const out = [];
+                        for (const tr of document.querySelectorAll('table tbody tr')) {
+                            const cells = {};
+                            for (const td of tr.querySelectorAll('td')) {
+                                const title = td.querySelector('.ds-column-title');
+                                const value = td.querySelector('.ds-column-value');
+                                if (title && value) {
+                                    cells[title.innerText.trim()] = value.innerText.trim();
+                                }
+                            }
+                            if (cells['Numer KRS'] && cells['Nazwa / Firma']) {
+                                out.push({
+                                    krs: cells['Numer KRS'],
+                                    name: cells['Nazwa / Firma'],
+                                    city: cells['Miejscowość'] || null,
+                                });
+                            }
+                        }
+                        return out;
+                    }"""
+                )
+            finally:
+                await page.close()
+
+        matches: list[CompanyMatch] = []
+        for row in rows_data[:limit]:
+            krs = (row.get("krs") or "").strip().zfill(10)
+            if not krs.isdigit() or len(krs) != 10:
+                continue
+            matches.append(
+                CompanyMatch(
+                    id=krs,
+                    name=row["name"].strip(),
+                    country=self.country_code,
+                    identifiers=[
+                        RegistryIdentifier(
+                            type=IdentifierType.KRS, value=krs, label="KRS number"
+                        )
+                    ],
+                    address=row.get("city") or None,
+                    status=None,
+                    source_url=f"https://wyszukiwarka-krs.ms.gov.pl/podmiot/{krs}",
+                )
+            )
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -168,10 +237,29 @@ class PLAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # ekrs.ms.gov.pl publishes RDF (Repozytorium Dokumentów Finansowych)
-        # entries per KRS but the host is fronted by Incapsula and rejects
-        # automated clients. Returning [] preserves the no-mock-data rule.
-        return []
+        krs = _normalize_krs(company_id)
+        async with build_http_client(base_url=self.KRS_BASE_URL) as client:
+            resp = await get_with_retry(
+                client,
+                f"/OdpisPelny/{krs}",
+                params={"rejestr": "P", "format": "json"},
+            )
+            if resp.status_code == 404:
+                resp = await get_with_retry(
+                    client,
+                    f"/OdpisPelny/{krs}",
+                    params={"rejestr": "S", "format": "json"},
+                )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        filings = _extract_filings(krs, payload, years=years)
+        try:
+            await _enrich_with_msig(filings, krs)
+        except Exception as exc:
+            logger.warning("MSiG enrichment failed for KRS %s: %s", krs, exc)
+        return filings
 
     async def _lookup_krs(self, krs: str) -> CompanyDetails | None:
         async with build_http_client(base_url=self.KRS_BASE_URL) as client:
@@ -221,9 +309,18 @@ def _details_from_odpis(krs: str, payload: dict[str, Any]) -> CompanyDetails:
     dzial3 = dane.get("dzial3") or {}
     dzial6 = dane.get("dzial6") or {}
 
-    podmiot = dzial1.get("danePodmiotu") or {}
+    podmiot = (
+        dzial1.get("danePodmiotu")
+        or dzial1.get("danePodmiotuZagranicznego")
+        or {}
+    )
     identyfikatory = podmiot.get("identyfikatory") or {}
-    siedziba_blok = dzial1.get("siedzibaIAdres") or {}
+    siedziba_blok = (
+        dzial1.get("siedzibaIAdres")
+        or dzial1.get("siedzibaIAdresPodmiotuZagranicznego")
+        or dzial1.get("siedzibaIAdresOddzialu")
+        or {}
+    )
     kapital = dzial1.get("kapital") or {}
     przedmiot = dzial3.get("przedmiotDzialalnosci") or {}
 
@@ -277,6 +374,87 @@ def _details_from_odpis(krs: str, payload: dict[str, Any]) -> CompanyDetails:
             f"&typ={'P' if rejestr == 'RejP' else 'S'}"
         ),
     )
+
+
+_YEAR_RE = re.compile(r"(\d{4})\s*R")
+
+
+def _extract_filings(krs: str, payload: dict[str, Any], *, years: int = 5) -> list[FinancialFiling]:
+    """Parse `dzial3.wzmiankiOZlozonychDokumentach` from OdpisPelny.
+
+    The Polish registry doesn't expose the actual statement files through a
+    bot-friendly endpoint, but it does record — in `OdpisPelny` — every
+    filing mention with period, submission date, and entry id. We turn each
+    mention into a `FinancialFiling` and deep-link the document portal so
+    the user can pull the raw PDF manually.
+    """
+    odpis = payload.get("odpis") or {}
+    dzial3 = (odpis.get("dane") or {}).get("dzial3") or {}
+    wzmianki = dzial3.get("wzmiankiOZlozonychDokumentach") or {}
+
+    filings: dict[tuple[int | None, str], FinancialFiling] = {}
+    rdf_deep_link = f"https://ekrs.ms.gov.pl/rdf/pd/search_df?nr_krs={krs}"
+
+    KINDS: list[tuple[str, FilingType, str]] = [
+        ("wzmiankaOZlozeniuRocznegoSprawozdaniaFinansowego", FilingType.ANNUAL_REPORT, "Annual financial statement"),
+        ("wzmiankaOZlozeniuOpinii", FilingType.AUDIT_REPORT, "Auditor opinion"),
+        ("wzmiankaOZlozeniuOpiniiBieglegoRewidenta", FilingType.AUDIT_REPORT, "Auditor opinion"),
+        ("wzmiankaOZlozeniuUchwalyZatwierdzajacejRocznySf", FilingType.DIRECTORS_REPORT, "Approval resolution"),
+        ("wzmiankaOZlozeniuSprawozdaniaZDzialalnosci", FilingType.DIRECTORS_REPORT, "Management report"),
+        ("wzmiankaOZlozeniuSkonsolidowanegoSprawozdaniaFinansowego", FilingType.ANNUAL_REPORT, "Consolidated financial statement"),
+    ]
+
+    for key, filing_type, label in KINDS:
+        entries = wzmianki.get(key) or []
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            positions = entry.get("pozycja") if isinstance(entry, dict) else None
+            if not isinstance(positions, list):
+                continue
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                period = pos.get("zaOkresOdDo") or pos.get("za_okres_od_do")
+                submitted = _parse_pl_date(pos.get("dataZlozenia"))
+                year: int | None = None
+                if isinstance(period, str):
+                    matches = _YEAR_RE.findall(period)
+                    if matches:
+                        try:
+                            year = max(int(m) for m in matches)
+                        except ValueError:
+                            year = None
+                if year is None and submitted is not None:
+                    year = submitted.year - 1
+                if year is None:
+                    continue
+                bucket = (year, label)
+                if bucket in filings:
+                    continue
+                filings[bucket] = FinancialFiling(
+                    company_id=krs,
+                    year=year,
+                    type=filing_type,
+                    period_end=None,
+                    currency="PLN",
+                    structured_data={
+                        "period": period,
+                        "submitted_on": submitted.isoformat() if submitted else None,
+                        "entry_number": pos.get("nrWpisuWprow"),
+                        "label": label,
+                        "registry_source": "KRS OdpisPelny mention",
+                    },
+                    document_url=None,
+                    document_format="pdf",
+                    source_url=rdf_deep_link,
+                )
+
+    rows = sorted(filings.values(), key=lambda f: (f.year, f.type), reverse=True)
+    if years and years > 0:
+        unique_years = sorted({f.year for f in rows}, reverse=True)[:years]
+        rows = [f for f in rows if f.year in unique_years]
+    return rows
 
 
 def _parse_pl_date(value: str | None) -> date | None:
@@ -371,3 +549,165 @@ def _format_address(siedziba_blok: dict[str, Any]) -> str | None:
     ]
     joined = ", ".join(str(p).strip() for p in parts if p and str(p).strip())
     return joined or None
+
+
+_MSIG_SEARCH_URL = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Search"
+_MSIG_DETALIS_URL = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Detalis"
+_MSIG_DOWNLOAD_URL = "https://wyszukiwarka-msig.ms.gov.pl/api/Monitor/Download"
+_FINANCIAL_KEYWORDS = (
+    "sprawozdani",
+    "bilans",
+    "rachunek zysk",
+    "wzmianka",
+    "wzmianki",
+    "rdf/",
+    "wpisy w dziale 3",
+    "dz. 3.",
+    "rub. 2. wzmianki",
+)
+
+
+async def _enrich_with_msig(filings: list[FinancialFiling], krs: str) -> None:
+    """Backfill `document_url` on each filing using MSiG search.
+
+    MSiG (Monitor Sądowy i Gospodarczy) publishes mandatory KRS announcements
+    as PDFs that are downloadable WITHOUT going through the Incapsula-protected
+    RDF portal. We search MSiG for the company, identify announcements that
+    relate to financial-statement filings, and attach the gazette-issue PDF
+    URL + the page within it where the company's record appears.
+    """
+    if not filings:
+        return
+    import httpx
+    from datetime import date as _date
+
+    today = _date.today()
+    earliest_year = min(f.year for f in filings)
+    earliest = f"{earliest_year - 1}-1-1"
+    latest = f"{today.year}-{today.month}-{today.day}"
+
+    candidates: list[dict[str, Any]] = []
+    timeout = httpx.Timeout(15.0, connect=8.0)
+    async with httpx.AsyncClient(timeout=timeout, headers={"Accept": "application/json"}) as client:
+        for page_num in range(1, 11):  # cap to 10 pages so we don't hammer
+            params = {
+                "entityName": "",
+                "krs": krs,
+                "nip": "",
+                "textInPosition": "",
+                "textInBody": "",
+                "signatureType": "B",
+                "signatureOfCase": "",
+                "signatureKRS": "",
+                "court": "",
+                "from": earliest,
+                "to": latest,
+                "page": str(page_num),
+            }
+            r = await client.get(_MSIG_SEARCH_URL, params=params)
+            if r.status_code != 200:
+                break
+            try:
+                data = r.json()
+            except ValueError:
+                break
+            items = data.get("list") or []
+            if not items:
+                break
+            candidates.extend(items)
+            if page_num >= int(data.get("countPages") or 1):
+                break
+
+        # Fetch details for each candidate and keep those with financial-filing
+        # keywords. The full gazette PDF is the same for many candidates from
+        # the same monitor issue — we dedupe by monitor number.
+        seen_monitors: dict[str, dict[str, Any]] = {}
+        for cand in candidates[:60]:
+            try:
+                detail_r = await client.get(_MSIG_DETALIS_URL, params={"Id": cand["id"]})
+                if detail_r.status_code != 200:
+                    continue
+                detail = detail_r.json()
+            except (httpx.HTTPError, ValueError):
+                continue
+            body = (detail.get("textInBody") or "").lower()
+            position = (detail.get("textInPosition") or "").lower()
+            full = body + " " + position
+            if not any(kw in full for kw in _FINANCIAL_KEYWORDS):
+                continue
+            monitor = detail.get("monitorNumber") or ""
+            if not monitor:
+                continue
+            pub = detail.get("dateOfPublication") or ""
+            year_match = re.search(r"(\d{4})", pub)
+            pub_year = int(year_match.group(1)) if year_match else None
+            # Extract fiscal-period end year from the body text. Polish entries
+            # write the period as "okres OD 01.08.2023 DO 31.07.2024" — the DO
+            # date's year is the fiscal year.
+            period_end_year: int | None = None
+            period_match = re.search(
+                r"OD\s+\d{2}[.\s]?\d{2}[.\s]?\d{4}\s+DO\s+\d{2}[.\s]?\d{2}[.\s]?(\d{4})",
+                detail.get("textInBody") or "",
+                re.IGNORECASE,
+            )
+            if period_match:
+                period_end_year = int(period_match.group(1))
+            entry = {
+                "monitor": monitor,
+                "page": detail.get("page"),
+                "id": cand["id"],
+                "pub_year": pub_year,
+                "period_end_year": period_end_year,
+                "text": detail.get("textInBody") or "",
+            }
+            key = f"{monitor}-{period_end_year}" if period_end_year else monitor
+            if key not in seen_monitors or (entry["pub_year"] or 0) > (seen_monitors[key]["pub_year"] or 0):
+                seen_monitors[key] = entry
+
+    if not seen_monitors:
+        return
+
+    monitor_entries = sorted(
+        seen_monitors.values(),
+        key=lambda e: (e["pub_year"] or 0),
+        reverse=True,
+    )
+
+    # Index by filing year — match a filing to the earliest monitor entry that
+    # mentions a statement for that fiscal year.
+    for filing in filings:
+        match = _best_msig_match(filing.year, monitor_entries)
+        if match is None:
+            continue
+        # Slice endpoint extracts just the company's pages from the full
+        # MSiG gazette; full PDF is kept under `source_url` for context.
+        filing.document_url = f"/api/pl/msig/slice/{match['id']}?krs={krs}"
+        filing.source_url = f"{_MSIG_DOWNLOAD_URL}?id={match['id']}"
+        filing.document_format = "pdf"
+        existing = filing.structured_data or {}
+        existing.update(
+            {
+                "msig_number": match["monitor"],
+                "msig_page": match["page"],
+                "msig_published_year": match["pub_year"],
+                "msig_excerpt": (match["text"] or "")[:280],
+                "msig_id": match["id"],
+            }
+        )
+        filing.structured_data = existing
+
+
+def _best_msig_match(filing_year: int, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    # First try exact fiscal-period-year match — MSiG entries with the same
+    # period-end year as the filing's fiscal year are the definitive match.
+    exact = [e for e in entries if e.get("period_end_year") == filing_year]
+    if exact:
+        exact.sort(key=lambda e: e.get("pub_year") or 0, reverse=True)
+        return exact[0]
+    # Fall back to publication-year proximity (filings are registered shortly
+    # after the fiscal year closes).
+    eligible = [e for e in entries if (e["pub_year"] or 0) >= filing_year - 1]
+    if not eligible:
+        return entries[0] if entries else None
+    eligible.sort(key=lambda e: abs((e["pub_year"] or 0) - filing_year))
+    return eligible[0]

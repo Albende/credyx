@@ -29,7 +29,11 @@ celery_app = Celery(
     "creditlens_ingestion",
     broker=BROKER_URL,
     backend=RESULT_URL,
-    include=["packages.ingestion.tasks"],
+    include=[
+        "packages.ingestion.tasks",
+        "packages.email.tasks",
+        "packages.billing.tasks",
+    ],
 )
 
 celery_app.conf.update(
