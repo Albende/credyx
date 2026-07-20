@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronsUpDown, Search } from "lucide-react";
 import { FLAGS } from "@/lib/countries";
 import { cn } from "@/lib/utils";
@@ -20,11 +21,22 @@ const STATUS_BADGES: Record<string, { label: string; cls: string }> = {
   error: { label: "error", cls: "bg-danger/15 text-danger" },
 };
 
+interface PanelRect {
+  left: number;
+  top: number;
+  width: number;
+  openUp: boolean;
+  maxHeight: number;
+}
+
 export function CountryCombobox({ countries, value, onChange, className }: CountryComboboxProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const ref = useRef<HTMLDivElement>(null);
+  const [mounted, setMounted] = useState(false);
+  const [rect, setRect] = useState<PanelRect | null>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const selected = countries.find((c) => c.country_code === value);
@@ -46,18 +58,49 @@ export function CountryCombobox({ countries, value, onChange, className }: Count
   }, [countries, query]);
 
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
     setActiveIndex(0);
   }, [query]);
 
+  // Position the portal panel against the trigger, flipping up when the
+  // viewport bottom is close. Runs on open and on scroll/resize so the
+  // fixed-position panel tracks the trigger.
+  useLayoutEffect(() => {
+    if (!open) return;
+    function reposition() {
+      const el = triggerRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const gap = 4;
+      const desired = 340;
+      const below = window.innerHeight - r.bottom - gap;
+      const above = r.top - gap;
+      const openUp = below < Math.min(desired, 240) && above > below;
+      const maxHeight = Math.max(180, Math.min(desired, openUp ? above : below));
+      setRect({ left: r.left, top: openUp ? r.top - gap : r.bottom + gap, width: r.width, openUp, maxHeight });
+    }
+    reposition();
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
-    function onClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+    function onPointerDown(e: MouseEvent) {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t)) return;
+      if (panelRef.current?.contains(t)) return;
+      setOpen(false);
     }
-    document.addEventListener("mousedown", onClickOutside);
-    return () => document.removeEventListener("mousedown", onClickOutside);
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
   }, [open]);
 
   useEffect(() => {
@@ -86,31 +129,19 @@ export function CountryCombobox({ countries, value, onChange, className }: Count
     }
   }
 
-  return (
-    <div ref={ref} className={cn("relative", className)}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 rounded-lg border border-border-default bg-bg-elevated px-3 py-2.5 text-left text-sm transition hover:border-border-strong focus:outline-none focus:ring-2 focus:ring-brand-primary/40"
-      >
-        <span className="flex min-w-0 items-center gap-2.5">
-          <span className="text-lg leading-none">{FLAGS[selected?.country_code ?? ""] ?? "🌍"}</span>
-          <span className="truncate">
-            {selected ? (
-              <>
-                <span className="font-medium">{selected.country_code}</span>
-                <span className="text-fg-muted"> — {selected.name}</span>
-              </>
-            ) : (
-              <span className="text-fg-muted">Select country…</span>
-            )}
-          </span>
-        </span>
-        <ChevronsUpDown className="h-4 w-4 text-fg-subtle" />
-      </button>
-
-      {open && (
-        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-lg border border-border-default bg-bg-elevated shadow-elev-2">
+  const panel = open && mounted && rect
+    ? createPortal(
+        <div
+          ref={panelRef}
+          style={{
+            position: "fixed",
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            transform: rect.openUp ? "translateY(-100%)" : undefined,
+          }}
+          className="z-[1000] overflow-hidden rounded-lg border border-border-default bg-bg-elevated shadow-elev-3"
+        >
           <div className="flex items-center gap-2 border-b border-border-default px-3 py-2">
             <Search className="h-4 w-4 text-fg-subtle" />
             <input
@@ -122,13 +153,13 @@ export function CountryCombobox({ countries, value, onChange, className }: Count
               className="w-full bg-transparent text-sm placeholder:text-fg-subtle focus:outline-none"
             />
           </div>
-          <ul className="max-h-72 overflow-y-auto py-1">
+          <ul className="overflow-y-auto py-1" style={{ maxHeight: rect.maxHeight - 46 }}>
             {filtered.length === 0 ? (
               <li className="px-3 py-6 text-center text-sm text-fg-subtle">No countries match.</li>
             ) : (
               filtered.map((c, idx) => {
                 const badge = STATUS_BADGES[c.status] ?? STATUS_BADGES.error;
-                const selected = c.country_code === value;
+                const isSelected = c.country_code === value;
                 const active = idx === activeIndex;
                 return (
                   <li key={c.country_code}>
@@ -149,15 +180,43 @@ export function CountryCombobox({ countries, value, onChange, className }: Count
                       <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider", badge.cls)}>
                         {badge.label}
                       </span>
-                      {selected && <Check className="ml-1 h-3.5 w-3.5 text-brand-primary" />}
+                      {isSelected && <Check className="ml-1 h-3.5 w-3.5 text-brand-primary" />}
                     </button>
                   </li>
                 );
               })
             )}
           </ul>
-        </div>
-      )}
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <div ref={triggerRef} className={cn("relative", className)}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 rounded-lg border border-border-default bg-bg-elevated px-3 py-2.5 text-left text-sm transition hover:border-border-strong focus:outline-none focus:ring-2 focus:ring-brand-primary/40"
+      >
+        <span className="flex min-w-0 items-center gap-2.5">
+          <span className="text-lg leading-none">{FLAGS[selected?.country_code ?? ""] ?? "🌍"}</span>
+          <span className="truncate">
+            {selected ? (
+              <>
+                <span className="font-medium">{selected.country_code}</span>
+                <span className="text-fg-muted"> — {selected.name}</span>
+              </>
+            ) : (
+              <span className="text-fg-muted">Select country…</span>
+            )}
+          </span>
+        </span>
+        <ChevronsUpDown className="h-4 w-4 text-fg-subtle" />
+      </button>
+      {panel}
     </div>
   );
 }
