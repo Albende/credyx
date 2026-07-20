@@ -14,7 +14,8 @@ pypdf>=4.3
 playwright>=1.40
 
 # Auth + billing (added by W2)
-passlib[bcrypt]==1.7.4
+passlib==1.7.4
+bcrypt==4.0.1  # passlib 1.7.4 crashes at import with bcrypt >= 4.1
 python-jose[cryptography]==3.3.0
 stripe>=9.0.0
 python-multipart>=0.0.9
