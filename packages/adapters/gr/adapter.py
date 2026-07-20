@@ -5,7 +5,15 @@ Two complementary free sources:
 - GEMI (Geniko Emporiko Mitroo, General Commercial Registry) is the
   official corporate registry. Its public-disclosure portal at
   https://publicity.businessportal.gr/ serves a JSON-backed search and
-  detail surface (paths may shift; we tolerate response-shape drift).
+  detail surface (verified 2026-07-20):
+  - ``POST /api/searchCompany`` with the full ``dataToBeSent`` envelope the
+    Next.js UI sends (``inputField`` carries the query; omitting the other
+    keys returns a 500) → ``{"total": ..., "hits": [...]}``.
+  - ``POST /api/company/details`` with ``{"query": {"arGEMI": gemi},
+    "token": null, "language": "en"}`` → ``{"companyInfo": {"payload":
+    {"company": {...}, "capital": [...], ...}}}``; 404 for unknown GEMI.
+  The backend accepts ``token: null`` (the browser UI sends a reCAPTCHA
+  token, but it is not enforced server-side today).
 - VIES (EU VAT Information Exchange) covers ΑΦΜ lookups under the EL
   country prefix and returns the registered legal name + address.
 
@@ -35,7 +43,7 @@ from typing import Any
 import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import InvalidIdentifierError
+from packages.adapters._base.errors import InvalidIdentifierError, RateLimitError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -163,17 +171,23 @@ class GRAdapter(CountryAdapter):
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        # GEMI publicity portal exposes a JSON search backing the public UI;
-        # the response shape has evolved over time, so we tolerate both an
-        # `items`/`companies`/`results` envelope and a top-level list.
         async with build_http_client(base_url=self.GEMI_BASE_URL, timeout=20.0) as client:
-            resp = await get_with_retry(
-                client,
-                "/api/companies",
-                params={"searchTerm": name, "page": 1, "pageSize": min(limit, 50)},
+            resp = await client.post(
+                "/api/searchCompany",
+                json={
+                    "dataToBeSent": _search_data(name, page=1),
+                    "token": None,
+                    "language": "en",
+                },
+                headers={"Accept": "application/json"},
             )
             if resp.status_code == 404:
                 return []
+            if resp.status_code == 429:
+                raise RateLimitError(
+                    "GEMI publicity portal rate-limited the search (429) — "
+                    "back off before retrying."
+                )
             resp.raise_for_status()
             try:
                 payload = resp.json()
@@ -185,18 +199,17 @@ class GRAdapter(CountryAdapter):
         for item in items[:limit]:
             gemi = _str_or_none(
                 item.get("gemiNumber")
+                or item.get("id")
                 or item.get("gemi")
-                or item.get("arGEMH")
-                or item.get("registryNumber")
+                or item.get("arGEMI")
             )
             if not gemi:
                 continue
             afm = _str_or_none(item.get("afm") or item.get("vatNumber") or item.get("taxId"))
-            display_name = (
-                item.get("companyName")
-                or item.get("name")
-                or item.get("title")
-                or ""
+            display_name = _first_str(
+                item.get("name"),
+                item.get("companyName"),
+                _first_of_list(item.get("title")),
             )
             ids: list[RegistryIdentifier] = [
                 RegistryIdentifier(
@@ -212,14 +225,10 @@ class GRAdapter(CountryAdapter):
             out.append(
                 CompanyMatch(
                     id=gemi,
-                    name=str(display_name).strip(),
+                    name=display_name or gemi,
                     country=self.country_code,
                     identifiers=ids,
-                    address=_first_str(
-                        item.get("address"),
-                        item.get("registeredAddress"),
-                        item.get("headquarters"),
-                    ),
+                    address=_str_or_none(item.get("addressCity")),
                     status=_str_or_none(item.get("status") or item.get("companyStatus")),
                     source_url=f"{self.GEMI_BASE_URL}/company/{gemi}",
                 )
@@ -247,19 +256,30 @@ class GRAdapter(CountryAdapter):
 
     async def _lookup_by_gemi(self, gemi: str) -> CompanyDetails | None:
         async with build_http_client(base_url=self.GEMI_BASE_URL, timeout=20.0) as client:
-            resp = await get_with_retry(client, f"/api/companies/{gemi}/details")
+            resp = await client.post(
+                "/api/company/details",
+                json={"query": {"arGEMI": gemi}, "token": None, "language": "en"},
+                headers={"Accept": "application/json"},
+            )
             if resp.status_code == 404:
                 return None
+            if resp.status_code == 429:
+                raise RateLimitError(
+                    "GEMI publicity portal rate-limited the lookup (429) — "
+                    "back off before retrying."
+                )
             resp.raise_for_status()
             try:
                 data = resp.json()
             except ValueError:
                 return None
 
-        if not isinstance(data, dict) or not data:
+        payload = ((data or {}).get("companyInfo") or {}).get("payload") or {}
+        company = payload.get("company") or {}
+        if not company:
             return None
 
-        afm = _str_or_none(data.get("afm") or data.get("vatNumber") or data.get("taxId"))
+        afm = _str_or_none(company.get("afm"))
         identifiers: list[RegistryIdentifier] = [
             RegistryIdentifier(
                 type=IdentifierType.COMPANY_NUMBER, value=gemi, label="GEMI"
@@ -272,43 +292,44 @@ class GRAdapter(CountryAdapter):
                 )
             )
 
-        capital = _to_float(data.get("capital") or data.get("shareCapital"))
+        capital_entries = payload.get("capital") or []
+        first_capital = capital_entries[0] if capital_entries else {}
+        capital = _to_float(first_capital.get("amount"))
+
+        legal_type = company.get("legalType")
+        status_obj = company.get("companyStatus")
 
         return CompanyDetails(
             id=gemi,
-            name=_first_str(
-                data.get("companyName"),
-                data.get("name"),
-                data.get("title"),
-            )
-            or gemi,
+            name=_first_str(company.get("name"), company.get("namei18n")) or gemi,
             country="GR",
-            legal_form=_first_str(
-                data.get("legalForm"), data.get("companyType"), data.get("type")
+            legal_form=(
+                _str_or_none(legal_type.get("desc"))
+                if isinstance(legal_type, dict)
+                else _str_or_none(legal_type)
             ),
-            status=_first_str(data.get("status"), data.get("companyStatus")),
+            status=(
+                _str_or_none(status_obj.get("status"))
+                if isinstance(status_obj, dict)
+                else _str_or_none(status_obj)
+            ),
             incorporation_date=_parse_date(
                 _first_str(
-                    data.get("incorporationDate"),
-                    data.get("establishmentDate"),
-                    data.get("registrationDate"),
+                    company.get("dateStart"), company.get("dateGemiRegistered")
                 )
             ),
-            dissolution_date=_parse_date(
-                _first_str(data.get("dissolutionDate"), data.get("ceaseDate"))
-            ),
             registered_address=_first_str(
-                data.get("address"),
-                data.get("registeredAddress"),
-                data.get("headquarters"),
+                company.get("company_address"), company.get("company_address_map")
             ),
             capital_amount=capital,
-            capital_currency="EUR" if capital is not None else None,
+            capital_currency=(
+                _str_or_none(first_capital.get("currency")) or "EUR"
+                if capital is not None
+                else None
+            ),
             identifiers=identifiers,
-            website=_first_str(data.get("website"), data.get("url")),
-            phone=_first_str(data.get("phone"), data.get("telephone")),
-            email=_first_str(data.get("email")),
-            raw=data,
+            website=_str_or_none(company.get("companyWebsite")),
+            raw={"company": company, "capital": capital_entries},
             source_url=f"{self.GEMI_BASE_URL}/company/{gemi}",
         )
 
@@ -374,12 +395,47 @@ def _parse_vies_response(xml_text: str) -> dict[str, Any] | None:
     return {"valid": valid, "name": name, "address": address}
 
 
+def _search_data(input_field: str, page: int) -> dict[str, Any]:
+    """Full ``dataToBeSent`` envelope; the backend 500s if keys are missing."""
+    return {
+        "inputField": input_field,
+        "city": None,
+        "postcode": None,
+        "legalType": [],
+        "status": [],
+        "suspension": [],
+        "category": [],
+        "specialCharacteristics": [],
+        "employeeNumber": [],
+        "armodiaGEMI": [],
+        "kad": [],
+        "recommendationDateFrom": None,
+        "recommendationDateTo": None,
+        "closingDateFrom": None,
+        "closingDateTo": None,
+        "alterationDateFrom": None,
+        "alterationDateTo": None,
+        "person": [],
+        "personrecommendationDateFrom": None,
+        "personrecommendationDateTo": None,
+        "radioValue": "all",
+        "places": [],
+        "page": page,
+    }
+
+
+def _first_of_list(value: Any) -> str | None:
+    if isinstance(value, list) and value:
+        return _str_or_none(value[0])
+    return None
+
+
 def _extract_items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
     if not isinstance(payload, dict):
         return []
-    for key in ("items", "companies", "results", "data", "content"):
+    for key in ("hits", "items", "companies", "results", "data", "content"):
         candidate = payload.get(key)
         if isinstance(candidate, list):
             return [x for x in candidate if isinstance(x, dict)]
@@ -413,7 +469,14 @@ def _to_float(value: Any) -> float | None:
 def _parse_date(s: str | None) -> date | None:
     if not s:
         return None
+    text = s[:10]
     try:
-        return date.fromisoformat(s[:10])
+        return date.fromisoformat(text)
     except ValueError:
+        pass
+    # GEMI serves dates as DD/MM/YYYY.
+    try:
+        d, m, y = text.split("/")
+        return date(int(y), int(m), int(d))
+    except (ValueError, IndexError):
         return None

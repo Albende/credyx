@@ -484,6 +484,40 @@ function externalFilingsUrl(country: string, identifier: string): string | null 
       return `https://www.boe.es/diario_borme/`;
     case "SE":
       return `https://www.allabolag.se`;
+    case "EE":
+      return `https://ariregister.rik.ee/eng/company/${id}`;
+    case "FI":
+      return `https://tietopalvelu.ytj.fi/yritys/${id}`;
+    case "NO":
+      return `https://virksomhet.brreg.no/nb/oppslag/enheter/${id}`;
+    case "AT":
+      return `https://www.firmenbuch.at`;
+    case "BE":
+      return `https://kbopub.economie.fgov.be/kbopub/toonondernemingps.html?ondernemingsnummer=${id}`;
+    case "CH":
+      return `https://www.zefix.ch/en/search/entity/list?name=${id}`;
+    case "DK":
+      return `https://datacvr.virk.dk/enhed/virksomhed/${id}`;
+    case "IE":
+      return `https://core.cro.ie/search`;
+    case "PT":
+      return `https://publicacoes.mj.pt/Pesquisa.aspx`;
+    case "LT":
+      return `https://www.registrucentras.lt/jar/p/index.php?kod=${id}`;
+    case "LV":
+      return `https://info.ur.gov.lv/#/data-search`;
+    case "TR":
+      return `https://www.kap.org.tr/en/bist-sirketler`;
+    case "JP":
+      return `https://disclosure2.edinet-fsa.go.jp/`;
+    case "KR":
+      return `https://dart.fss.or.kr/`;
+    case "BR":
+      return `https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp`;
+    case "CA":
+      return `https://www.sedarplus.ca/`;
+    case "AU":
+      return `https://abr.business.gov.au/ABN/View?abn=${id}`;
     default:
       return null;
   }

@@ -24,3 +24,4 @@ python-multipart>=0.0.9
 fakeredis>=2.20
 pytest-cov>=4.1
 aiosqlite>=0.19
+truststore>=0.9

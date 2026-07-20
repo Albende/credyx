@@ -11,10 +11,22 @@
 ## Sources
 
 - **GEMI publicity portal** — https://publicity.businessportal.gr/
-  - Search: `GET /api/companies?searchTerm={name}&page=1&pageSize={n}`
-  - Detail: `GET /api/companies/{gemi}/details`
-  - Free, no auth. Response shape may drift — adapter tolerates
-    `items` / `companies` / `results` / `data` envelopes plus raw lists.
+  (endpoints re-verified 2026-07-20; the old `GET /api/companies?searchTerm=`
+  and `GET /api/companies/{gemi}/details` paths now 404)
+  - Search: `POST /api/searchCompany` with body
+    `{"dataToBeSent": {...full envelope, "inputField": "<query>", "radioValue": "all", "page": 1}, "token": null, "language": "en"}`.
+    The backend returns **500** unless the full `dataToBeSent` envelope the
+    Next.js UI sends is present. Response: `{"total": {...}, "hits": [{id,
+    gemiNumber, afm, name, title[], addressCity, legalType, status,
+    isSuspended}]}`.
+  - Detail: `POST /api/company/details` with body
+    `{"query": {"arGEMI": "<gemi>"}, "token": null, "language": "en"}`.
+    Response: `{"companyInfo": {"payload": {"company": {...}, "capital":
+    [...], "decisions": [...], ...}}}`; 404 for unknown GEMI. Dates are
+    DD/MM/YYYY.
+  - Free, no auth — the browser sends a reCAPTCHA token but `token: null`
+    is accepted today; if that ever changes the adapter will start failing
+    and the token flow needs wiring.
 - **VIES** SOAP — https://ec.europa.eu/taxation_customs/vies/services/checkVatService
   - `countryCode=EL`, returns name + address for valid ΑΦΜ.
 - **ATHEX** (listed companies only) — https://www.athexgroup.gr/web/guest/companies-financial-data
@@ -24,10 +36,14 @@
 
 | Name | GEMI | ΑΦΜ |
 |---|---|---|
-| OPAP S.A. | 3823201000 | EL090027346 |
 | Hellenic Telecommunications Organization (OTE) | 1037501000 | EL094019245 |
+| Coca-Cola 3E Ελλάδος (Hellenic bottling ops) | 677301000 | EL094277965 |
+| OPAP S.A. | 3823201000 | EL090027346 |
 | National Bank of Greece | 6062511000 | EL094014201 |
-| Coca-Cola HBC AG (Hellenic ops) | — | EL094277965 |
+
+OTE (`1037501000`, status Active) and Coca-Cola 3E (`677301000`, status
+Active, capital EUR 173,788,380) were re-verified against the live
+`searchCompany` / `company/details` endpoints on 2026-07-20.
 
 ## Capabilities
 

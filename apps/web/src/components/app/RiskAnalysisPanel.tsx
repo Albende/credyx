@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { AlertTriangle, CheckCircle2, Play, RefreshCcw, Sparkles, TrendingUp } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, Play, RefreshCcw, Sparkles, TrendingUp } from "lucide-react";
 import { api, type RiskAssessment } from "@/lib/api";
 import { MeshGradient } from "@/components/ui/mesh-gradient";
 import { RiskScoreGauge } from "./RiskScoreGauge";
@@ -90,7 +90,13 @@ export function RiskAnalysisPanel({ country, identifier, companyName }: Props) {
       )}
 
       {status === "done" && result && (
-        <RiskResult result={result} onRerun={run} />
+        <RiskResult
+          result={result}
+          onRerun={run}
+          companyName={companyName}
+          country={country}
+          identifier={identifier}
+        />
       )}
     </section>
   );
@@ -173,7 +179,36 @@ function DotTrailLoader() {
   );
 }
 
-function RiskResult({ result, onRerun }: { result: RiskAssessment; onRerun: () => void }) {
+/* Print-to-PDF: strip dark theme so the report prints ink-on-paper, scope
+   the printable area via html.print-report rules in globals.css. */
+function printReport() {
+  const root = document.documentElement;
+  const wasDark = root.classList.contains("dark");
+  if (wasDark) root.classList.remove("dark");
+  root.classList.add("print-report");
+  const restore = () => {
+    root.classList.remove("print-report");
+    if (wasDark) root.classList.add("dark");
+    window.removeEventListener("afterprint", restore);
+  };
+  window.addEventListener("afterprint", restore);
+  window.print();
+  window.setTimeout(restore, 2000);
+}
+
+function RiskResult({
+  result,
+  onRerun,
+  companyName,
+  country,
+  identifier,
+}: {
+  result: RiskAssessment;
+  onRerun: () => void;
+  companyName: string;
+  country: string;
+  identifier: string;
+}) {
   const tone =
     result.recommendation === "APPROVE"
       ? "border-success/30 bg-success/5"
@@ -182,7 +217,20 @@ function RiskResult({ result, onRerun }: { result: RiskAssessment; onRerun: () =
         : "border-danger/30 bg-danger/5";
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-print-report>
+      {/* Certificate header — print only */}
+      <div className="print-only border-b border-border-strong pb-4">
+        <div className="flex items-baseline justify-between">
+          <div className="font-display text-2xl font-semibold">Credyx — Credit Assessment</div>
+          <div className="font-mono text-xs tracking-[0.18em]">
+            N° CX-{new Date().getFullYear()}-{identifier}
+          </div>
+        </div>
+        <div className="mt-2 text-sm">
+          {companyName} · {country} · {identifier} · generated{" "}
+          {new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}
+        </div>
+      </div>
       <div className={`grid gap-5 rounded-lg border ${tone} p-6 md:grid-cols-[260px_1fr]`}>
         <div className="flex flex-col items-center justify-center border-b border-border-default pb-4 md:border-b-0 md:border-r md:pb-0 md:pr-6">
           <RiskScoreGauge
@@ -201,12 +249,20 @@ function RiskResult({ result, onRerun }: { result: RiskAssessment; onRerun: () =
               </div>
               <div className="mt-1 text-xs text-fg-muted">Calculated against deterministic ratios + filing context</div>
             </div>
-            <button
-              onClick={onRerun}
-              className="rounded-md border border-border-default px-2.5 py-1.5 text-xs font-medium text-fg-muted transition hover:bg-bg-overlay"
-            >
-              <RefreshCcw className="mr-1 inline h-3 w-3" /> Rerun
-            </button>
+            <div className="flex items-center gap-2 print:hidden">
+              <button
+                onClick={printReport}
+                className="inline-flex items-center gap-1.5 rounded-md bg-brand-primary px-2.5 py-1.5 text-xs font-semibold text-brand-primary-fg transition hover:bg-brand-primary/90"
+              >
+                <Download className="h-3 w-3" /> Download PDF
+              </button>
+              <button
+                onClick={onRerun}
+                className="rounded-md border border-border-default px-2.5 py-1.5 text-xs font-medium text-fg-muted transition hover:bg-bg-overlay"
+              >
+                <RefreshCcw className="mr-1 inline h-3 w-3" /> Rerun
+              </button>
+            </div>
           </div>
 
           <div>
@@ -239,6 +295,12 @@ function RiskResult({ result, onRerun }: { result: RiskAssessment; onRerun: () =
 
       <div className="text-[11px] text-fg-subtle">
         Model: <span className="font-mono">{result.model_used ?? "unknown"}</span>
+      </div>
+
+      {/* Certificate footer — print only */}
+      <div className="print-only border-t border-border-strong pt-3 text-xs">
+        Sourced from official government registries. Ratios computed deterministically in-engine.
+        Generated by Credyx — credyx.ai
       </div>
     </div>
   );

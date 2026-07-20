@@ -10,7 +10,7 @@
 - **Registry**: Israel Corporations Authority (Rasham Ha-Hevarot), Ministry of Justice.
 - **Open data**: https://data.gov.il/dataset/ica_companies
 - **CKAN API**: `https://data.gov.il/api/3/action/datastore_search?resource_id={resource_id}&q={query}`
-- **Default resource id**: `f004176c-b85f-4542-8901-7b3176f9a054` (override with env `IL_ICA_RESOURCE_ID` if the publisher rotates it).
+- **Default resource id**: `f004176c-b85f-4542-8901-7b3176f9a054` (verified current 2026-07-20; override with env `IL_ICA_RESOURCE_ID` if the publisher rotates it — discover the current id via `/api/3/action/package_show?id=ica_companies`).
 - **Auth**: No — free public CKAN.
 - **Rate limit**: Soft, throttled client-side to 60 req/min.
 - **robots.txt / ToS**: Open data, attribution requested.
@@ -37,7 +37,8 @@
 ## Notes
 
 - Hebrew text is returned as UTF-8 by CKAN; the adapter preserves the original Hebrew name and surfaces an English alias when present (`"<English> / <Hebrew>"`).
-- The dataset publishes column names in mixed casing across snapshots (e.g. `Company_Number` vs `company_number`) — the adapter tolerates both.
+- **The datastore columns are Hebrew names with spaces** (as of 2026-07): `מספר חברה` (company number, numeric), `שם חברה`, `שם באנגלית`, `סוג תאגיד`, `סטטוס חברה`, `תאריך התאגדות` (DD/MM/YYYY), `שם עיר`, `שם רחוב`, `מספר בית`, `מיקוד`. The adapter filters on `מספר חברה` and keeps the legacy English/underscore names as read-side fallbacks.
+- **409 Conflict semantics**: CKAN returns 409 for ValidationError — filtering on an unknown column (schema drift) or a stale resource id — and data.gov.il also uses it when rate-limiting. The adapter raises a clear `AdapterError` explaining both causes; a rejected filter column automatically falls back to full-text `q` search.
 - For sole proprietors / partnerships not in the corporate register, use the Tax Authority Osek lookup (not free as a structured API, out of scope).
 
 **Recommended next step**: parse Maya disclosure HTML for the top ~600 TASE-listed Israeli companies to extract annual report PDF URLs and link them in `fetch_financials`.

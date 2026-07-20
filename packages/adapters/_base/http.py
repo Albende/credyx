@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import ssl
 from typing import Any
 
 import httpx
@@ -14,9 +15,23 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_UA = (
-    "CreditLens/0.1 (+https://github.com/creditlens; respectful crawler) "
+    "Credyx/0.1 (+https://credyx.ai; respectful crawler) "
     "httpx/{ver}"
 ).format(ver=httpx.__version__)
+
+
+def _default_ssl_context() -> ssl.SSLContext | bool:
+    """OS trust store when available — several registries (RS, TW, ZA) serve
+    chains that certifi rejects but the platform store accepts."""
+    try:
+        import truststore
+
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except ImportError:
+        return True
+
+
+_SSL_CONTEXT = _default_ssl_context()
 
 
 def build_http_client(
@@ -36,6 +51,7 @@ def build_http_client(
         timeout=httpx.Timeout(timeout),
         headers=final_headers,
         auth=auth,
+        verify=_SSL_CONTEXT,
         follow_redirects=follow_redirects,
     )
 

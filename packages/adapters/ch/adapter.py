@@ -1,7 +1,9 @@
 """Switzerland adapter — Zefix (Central Business Names Index).
 
-Free public REST API: https://www.zefix.ch/ZefixPublicREST/
-- No auth, JSON in/out.
+Free REST API: https://www.zefix.admin.ch/ZefixPublicREST/
+- JSON in/out. Since 2026 the PublicREST API requires (free) registration:
+  request HTTP Basic credentials by emailing zefix@bj.admin.ch, then set
+  ``CH_ZEFIX_USERNAME`` / ``CH_ZEFIX_PASSWORD``.
 - Covers every Swiss legal entity in the federal commercial register.
 - Identifiers: UID (Unique Identification, format CHE-XXX.XXX.XXX) and the
   optional VAT suffix (e.g. ``CHE-105.927.350 MWST``). The UID and the
@@ -14,12 +16,13 @@ the SIX hint is surfaced in ``health_check.notes``.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import date
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import InvalidIdentifierError
+from packages.adapters._base.errors import AdapterError, InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -52,25 +55,57 @@ def _format_uid(core: str) -> str:
     return f"CHE-{core[0:3]}.{core[3:6]}.{core[6:9]}"
 
 
+_REGISTRATION_HINT = (
+    "Zefix PublicREST requires free registration since 2026: request HTTP "
+    "Basic credentials from zefix@bj.admin.ch (see "
+    "https://www.zefix.admin.ch/ZefixPublicREST/swagger-ui/index.html), then "
+    "set CH_ZEFIX_USERNAME and CH_ZEFIX_PASSWORD."
+)
+
+
 class CHAdapter(CountryAdapter):
     country_code = "CH"
     country_name = "Switzerland"
     identifier_types = [IdentifierType.VAT, IdentifierType.COMPANY_NUMBER]
     primary_identifier = IdentifierType.COMPANY_NUMBER
-    requires_api_key = False
-    api_key_env = None
+    requires_api_key = True
+    api_key_env = "CH_ZEFIX_USERNAME"
     rate_limit_per_minute = 60
 
-    BASE_URL = "https://www.zefix.ch/ZefixPublicREST"
+    BASE_URL = "https://www.zefix.admin.ch/ZefixPublicREST"
+
+    def _basic_auth(self) -> tuple[str, str]:
+        username = os.getenv("CH_ZEFIX_USERNAME")
+        password = os.getenv("CH_ZEFIX_PASSWORD")
+        if not username or not password:
+            raise AdapterError(f"Missing Zefix credentials. {_REGISTRATION_HINT}")
+        return (username, password)
 
     async def health_check(self) -> AdapterHealth:
+        if not (os.getenv("CH_ZEFIX_USERNAME") and os.getenv("CH_ZEFIX_PASSWORD")):
+            return AdapterHealth(
+                country_code=self.country_code,
+                name=self.country_name,
+                status=AdapterStatus.DEGRADED,
+                capabilities={"search": False, "lookup": False, "financials": False},
+                requires_api_key=True,
+                api_key_present=False,
+                rate_limit_per_minute=self.rate_limit_per_minute,
+                notes=_REGISTRATION_HINT,
+            )
         try:
-            async with build_http_client(base_url=self.BASE_URL) as client:
+            async with build_http_client(
+                base_url=self.BASE_URL, auth=self._basic_auth()
+            ) as client:
                 resp = await client.post(
                     "/api/v1/company/search",
                     json={"name": "Nestle", "languageKey": "en"},
                     headers={"Accept": "application/json"},
                 )
+                if resp.status_code == 401:
+                    raise AdapterError(
+                        f"Zefix rejected the credentials (401). {_REGISTRATION_HINT}"
+                    )
                 resp.raise_for_status()
         except Exception as exc:
             return AdapterHealth(
@@ -78,6 +113,8 @@ class CHAdapter(CountryAdapter):
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
                 capabilities={"search": False, "lookup": False, "financials": False},
+                requires_api_key=True,
+                api_key_present=True,
                 notes=str(exc)[:200],
             )
         return AdapterHealth(
@@ -85,17 +122,25 @@ class CHAdapter(CountryAdapter):
             name=self.country_name,
             status=AdapterStatus.OK,
             capabilities={"search": True, "lookup": True, "financials": False},
+            requires_api_key=True,
+            api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes="Filed accounts only public for SIX-listed issuers; non-listed returns [].",
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        async with build_http_client(base_url=self.BASE_URL) as client:
+        async with build_http_client(
+            base_url=self.BASE_URL, auth=self._basic_auth()
+        ) as client:
             resp = await client.post(
                 "/api/v1/company/search",
                 json={"name": name, "languageKey": "en"},
                 headers={"Accept": "application/json"},
             )
+            if resp.status_code == 401:
+                raise AdapterError(
+                    f"Zefix rejected the credentials (401). {_REGISTRATION_HINT}"
+                )
             resp.raise_for_status()
             data = resp.json()
 
@@ -127,7 +172,9 @@ class CHAdapter(CountryAdapter):
             )
         core = _normalize_uid(value)
         formatted = _format_uid(core)
-        async with build_http_client(base_url=self.BASE_URL) as client:
+        async with build_http_client(
+            base_url=self.BASE_URL, auth=self._basic_auth()
+        ) as client:
             resp = await get_with_retry(
                 client,
                 f"/api/v1/company/uid/{formatted}",
@@ -135,6 +182,10 @@ class CHAdapter(CountryAdapter):
             )
             if resp.status_code == 404:
                 return None
+            if resp.status_code == 401:
+                raise AdapterError(
+                    f"Zefix rejected the credentials (401). {_REGISTRATION_HINT}"
+                )
             resp.raise_for_status()
             payload = resp.json()
 

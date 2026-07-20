@@ -8,6 +8,12 @@ Authority (Rasham Ha-Hevarot). For Israeli companies the 9-digit "Company
 Number" doubles as the VAT registration number, so VAT lookups are routed
 through the same field.
 
+The datastore columns are Hebrew names *with spaces* (e.g. ``מספר חברה``,
+``שם חברה``, ``שם באנגלית``) — filtering on an unknown column makes CKAN
+return **409 Conflict** (ValidationError), which data.gov.il also uses when
+rate-limiting. The adapter filters on the Hebrew column and keeps the legacy
+English/underscore names as read-side fallbacks for older snapshots.
+
 Listed-company financials live on TASE / Maya (https://maya.tase.co.il/) but
 the disclosure portal does not expose a stable open JSON feed, so
 `fetch_financials` returns an empty list for the MVP — the caller can still
@@ -22,7 +28,7 @@ from datetime import date
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import InvalidIdentifierError
+from packages.adapters._base.errors import AdapterError, InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
@@ -39,8 +45,16 @@ _COMPANY_NUMBER_RE = re.compile(r"^\d{9}$")
 # CKAN resource id for the ICA companies dataset. The dataset slug
 # (`ica_companies`) is stable but the underlying resource id occasionally
 # rotates when the publisher republishes the file; override via env to avoid a
-# code change in that case.
+# code change in that case. Discover the current id via
+# https://data.gov.il/api/3/action/package_show?id=ica_companies
+# (verified current 2026-07-20).
 _DEFAULT_RESOURCE_ID = "f004176c-b85f-4542-8901-7b3176f9a054"
+
+_COMPANY_NUMBER_FIELD = "מספר חברה"
+
+
+class _FilterRejected(AdapterError):
+    """CKAN rejected the filter column name — dataset schema drift."""
 
 
 def _normalize_company_number(value: str) -> str:
@@ -132,12 +146,15 @@ class ILAdapter(CountryAdapter):
                 f"IL supports COMPANY_NUMBER or VAT, got {id_type}"
             )
         cn = _normalize_company_number(value)
-        records = await self._ckan_search(
-            filters={"Company_Number": cn}, limit=1
-        )
+        try:
+            records = await self._ckan_search(
+                filters={_COMPANY_NUMBER_FIELD: int(cn)}, limit=1
+            )
+        except _FilterRejected:
+            records = []
         if not records:
-            # Some snapshots of the dataset publish the column under a
-            # different casing — retry with a broad `q` so we still hit it.
+            # Older snapshots published the column under English names — a
+            # broad full-text `q` still hits those.
             records = await self._ckan_search(q=cn, limit=5)
             records = [r for r in records if _record_company_number(r) == cn]
             if not records:
@@ -147,12 +164,15 @@ class ILAdapter(CountryAdapter):
             id=cn,
             name=_record_name(rec),
             country=self.country_code,
-            legal_form=_first(rec, ["Company_Type", "company_type", "סוג_תאגיד"]),
+            legal_form=_first(
+                rec, ["סוג תאגיד", "Company_Type", "company_type", "סוג_תאגיד"]
+            ),
             status=_record_status(rec),
             incorporation_date=_parse_date(
                 _first(
                     rec,
                     [
+                        "תאריך התאגדות",
                         "Company_Registration_Date",
                         "company_registration_date",
                         "תאריך_התאגדות",
@@ -179,7 +199,7 @@ class ILAdapter(CountryAdapter):
         self,
         *,
         q: str | None = None,
-        filters: dict[str, str] | None = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
@@ -192,6 +212,20 @@ class ILAdapter(CountryAdapter):
             params["filters"] = json.dumps(filters, ensure_ascii=False)
         async with build_http_client(base_url=self.BASE_URL) as client:
             resp = await get_with_retry(client, "/datastore_search", params=params)
+            if resp.status_code == 409:
+                body = resp.text[:300]
+                if filters and '"filters"' in body:
+                    raise _FilterRejected(
+                        f"data.gov.il rejected filter column "
+                        f"{list(filters)} — dataset schema changed: {body}"
+                    )
+                raise AdapterError(
+                    "data.gov.il returned 409 Conflict. Either the "
+                    "ica_companies resource id rotated (discover the current "
+                    "one via /api/3/action/package_show?id=ica_companies and "
+                    "set IL_ICA_RESOURCE_ID) or the API is rate-limiting — "
+                    f"back off and retry. Response: {body}"
+                )
             resp.raise_for_status()
             payload = resp.json()
         if not payload.get("success"):
@@ -209,7 +243,14 @@ def _first(rec: dict[str, Any], keys: list[str]) -> Any:
 
 def _record_company_number(rec: dict[str, Any]) -> str | None:
     raw = _first(
-        rec, ["Company_Number", "company_number", "מספר_חברה", "Company_ID"]
+        rec,
+        [
+            "מספר חברה",
+            "Company_Number",
+            "company_number",
+            "מספר_חברה",
+            "Company_ID",
+        ],
     )
     if raw is None:
         return None
@@ -218,24 +259,31 @@ def _record_company_number(rec: dict[str, Any]) -> str | None:
 
 
 def _record_name(rec: dict[str, Any]) -> str:
-    name_en = _first(rec, ["Company_Name_Eng", "company_name_eng", "Name_Eng"])
-    name_he = _first(rec, ["Company_Name", "company_name", "שם_חברה"])
+    name_en = _first(
+        rec, ["שם באנגלית", "Company_Name_Eng", "company_name_eng", "Name_Eng"]
+    )
+    name_he = _first(rec, ["שם חברה", "Company_Name", "company_name", "שם_חברה"])
     if name_en and name_he and name_en != name_he:
         return f"{name_en} / {name_he}"
     return str(name_en or name_he or "")
 
 
 def _record_status(rec: dict[str, Any]) -> str | None:
-    status = _first(rec, ["Company_Status", "company_status", "סטטוס_חברה"])
+    status = _first(
+        rec, ["סטטוס חברה", "Company_Status", "company_status", "סטטוס_חברה"]
+    )
     return str(status) if status is not None else None
 
 
 def _record_address(rec: dict[str, Any]) -> str | None:
     parts = [
-        _first(rec, ["Company_Street", "company_street", "שם_רחוב"]),
-        _first(rec, ["Company_House_Number", "company_house_number", "מספר_בית"]),
-        _first(rec, ["Company_City", "company_city", "שם_עיר"]),
-        _first(rec, ["Company_Zip", "company_zip", "מיקוד"]),
+        _first(rec, ["שם רחוב", "Company_Street", "company_street", "שם_רחוב"]),
+        _first(
+            rec,
+            ["מספר בית", "Company_House_Number", "company_house_number", "מספר_בית"],
+        ),
+        _first(rec, ["שם עיר", "Company_City", "company_city", "שם_עיר"]),
+        _first(rec, ["מיקוד", "Company_Zip", "company_zip"]),
     ]
     parts = [str(p) for p in parts if p not in (None, "")]
     return ", ".join(parts) or None

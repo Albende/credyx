@@ -2,36 +2,49 @@
 
 Source coverage:
 
-* KAP (Kamuyu Aydınlatma Platformu) — free public JSON feeds covering
-  every BIST-listed company. Provides registry-level identifiers (MKK
-  sicil, MERSIS, VKN where exposed) and the full disclosure stream
-  including annual reports (yıllık) and XBRL filings.
-* MERSIS public web is not exposed as a clean JSON API. Without a
-  reverse-engineered AngularJS XHR contract we cannot scrape it
-  reliably for the MVP, so non-listed companies surface as
-  `AdapterNotImplementedError` rather than fabricated data.
-* e-Devlet endpoints require a Turkish e-ID (e-Devlet Kapısı) — out of
-  scope for the free pipeline.
+* KAP (Kamuyu Aydınlatma Platformu) rebuilt its site on Next.js in 2025 and
+  removed the old open JSON feeds (`/en/api/memberList`,
+  `/en/api/disclosure-list/{oid}`). The current free surfaces are:
+
+  - ``POST /en/api/search/combined`` — company/fund full-text search
+    (name and ticker only; tax numbers are NOT indexed).
+  - ``GET /en/sirket-bilgileri/ozet/{mkkMemberOid}`` — company summary page
+    whose server-rendered RSC payload embeds a ``memberDetail`` JSON object
+    (title, VKN/taxNo, trade registry number, paid capital, city, ticker).
+  - ``POST /en/api/disclosure/members/byCriteria`` — disclosure query
+    (max 1-year date window per request); ``disclosureClass="FR"`` with
+    ``ruleType="Annual"`` marks annual financial reports.
+
+* Because the rebuilt platform publishes tax numbers only on per-company
+  pages, VKN/MERSIS → company resolution is no longer possible without
+  scanning every member. Search results therefore carry the MKK member OID
+  as the company id, and lookups by raw VKN/MERSIS raise
+  ``AdapterNotImplementedError`` unless KAP's search happens to resolve
+  them. Details fetched by OID still include the VKN.
+* MERSIS public web is not exposed as a clean JSON API; e-Devlet endpoints
+  require a Turkish e-ID — both out of scope for the free pipeline.
 
 Identifiers:
 - VAT     → VKN (Vergi Kimlik Numarası), 10 digits.
-- MERSIS  → 16 digits, sometimes printed as `0710001297-00099`. We
-            strip dashes and accept either the 10-digit prefix that
-            matches the VKN or the full 16-digit form.
+- MERSIS  → 16 digits, sometimes printed as `0710001297-00099`.
+- KAP member OID → 32-char hex, returned by search and accepted by
+  lookup/financials regardless of declared identifier type.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
+    AdapterError,
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
-from packages.adapters._base.http import build_http_client, get_with_retry
+from packages.adapters._base.http import build_http_client, fetch_with_bot_bypass
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
@@ -47,7 +60,10 @@ logger = logging.getLogger(__name__)
 
 _VKN_RE = re.compile(r"^\d{10}$")
 _MERSIS_RE = re.compile(r"^\d{16}$")
-_ANNUAL_HINTS = ("yıllık", "yillik", "annual", "yıl sonu", "yil sonu")
+_MEMBER_OID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+# KAP's /en search endpoint only matches ASCII-folded text.
+_TURKISH_FOLD = str.maketrans("çÇğĞıİöÖşŞüÜ", "cCgGiIoOsSuU")
 
 
 def _normalize_vkn(value: str) -> str:
@@ -70,25 +86,6 @@ def _normalize_mersis(value: str) -> str:
     return cleaned
 
 
-def _parse_kap_date(s: str | None) -> date | None:
-    """KAP serialises dates as ISO `YYYY-MM-DD` or `DD.MM.YYYY`."""
-    if not s:
-        return None
-    s = s.strip()
-    try:
-        return date.fromisoformat(s[:10])
-    except ValueError:
-        pass
-    m = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})", s)
-    if m:
-        day, month, year = (int(g) for g in m.groups())
-        try:
-            return date(year, month, day)
-        except ValueError:
-            return None
-    return None
-
-
 class TRAdapter(CountryAdapter):
     country_code = "TR"
     country_name = "Türkiye"
@@ -98,46 +95,91 @@ class TRAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 60
 
-    KAP_BASE = "https://www.kap.org.tr/en/api"
-    KAP_PUBLIC = "https://www.kap.org.tr"
+    KAP_BASE = "https://www.kap.org.tr"
 
-    async def _kap_member_list(self) -> list[dict[str, Any]]:
+    async def _kap_search(self, keyword: str) -> list[dict[str, Any]]:
         async with build_http_client(base_url=self.KAP_BASE) as client:
-            resp = await get_with_retry(client, "/memberList")
-            resp.raise_for_status()
-            payload = resp.json()
-        if isinstance(payload, list):
-            return payload
-        if isinstance(payload, dict):
-            for key in ("members", "data", "items", "result"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return value
-        return []
-
-    async def _kap_disclosures(self, member_oid: str) -> list[dict[str, Any]]:
-        async with build_http_client(base_url=self.KAP_BASE) as client:
-            resp = await get_with_retry(
-                client, f"/disclosure-list/{member_oid}"
+            resp = await client.post(
+                "/en/api/search/combined",
+                json={
+                    "keyword": keyword.translate(_TURKISH_FOLD),
+                    "discClass": "ALL",
+                    "lang": "en",
+                    "channel": "WEB",
+                },
             )
-            if resp.status_code == 404:
-                return []
             resp.raise_for_status()
             payload = resp.json()
-        if isinstance(payload, list):
-            return payload
-        if isinstance(payload, dict):
-            for key in ("disclosures", "data", "items", "result"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return value
+        for category in payload if isinstance(payload, list) else []:
+            if category.get("category") != "companyOrFunds":
+                continue
+            results = category.get("results") or []
+            return [
+                r
+                for r in results
+                if isinstance(r, dict)
+                and r.get("searchType") == "C"
+                and r.get("memberOrFundOid")
+            ]
         return []
+
+    async def _member_detail(self, member_oid: str) -> dict[str, Any] | None:
+        page, status, _source = await fetch_with_bot_bypass(
+            f"{self.KAP_BASE}/en/sirket-bilgileri/ozet/{member_oid}",
+            timeout=30.0,
+        )
+        if status == 404:
+            return None
+        if status >= 400:
+            raise AdapterError(f"KAP company page HTTP {status} for {member_oid}")
+        detail = _extract_member_detail(page)
+        if detail is None:
+            raise AdapterError(
+                f"KAP company page for {member_oid} no longer embeds memberDetail "
+                "— page format changed."
+            )
+        return detail
+
+    async def _disclosures(
+        self, member_oid: str, from_date: date, to_date: date
+    ) -> list[dict[str, Any]]:
+        async with build_http_client(base_url=self.KAP_BASE) as client:
+            resp = await client.post(
+                "/en/api/disclosure/members/byCriteria",
+                json={
+                    "fromDate": from_date.isoformat(),
+                    "toDate": to_date.isoformat(),
+                    "memberType": "IGS",
+                    "mkkMemberOidList": [member_oid],
+                    "inactiveMkkMemberOidList": [],
+                    "disclosureClass": "FR",
+                    "subjectList": [],
+                    "isLate": "",
+                    "mainSector": "",
+                    "sector": "",
+                    "subSector": "",
+                    "marketOid": "",
+                    "index": "",
+                    "bdkReview": "",
+                    "bdkMemberOidList": [],
+                    "year": "",
+                    "term": "",
+                    "ruleType": "",
+                    "period": "",
+                    "fromSrc": False,
+                    "srcCategory": "",
+                    "disclosureIndexList": [],
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        return [d for d in payload if isinstance(d, dict)] if isinstance(payload, list) else []
 
     async def health_check(self) -> AdapterHealth:
         try:
-            async with build_http_client(base_url=self.KAP_BASE) as client:
-                resp = await get_with_retry(client, "/memberList")
-                resp.raise_for_status()
+            results = await self._kap_search("türk")
+            if not results:
+                raise RuntimeError("KAP combined search returned no companies")
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -156,324 +198,227 @@ class TRAdapter(CountryAdapter):
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
-            notes="Coverage limited to BIST-listed companies via KAP; "
-            "non-listed entities require MERSIS scrape (not implemented).",
+            notes="Coverage limited to KAP members (BIST-listed companies); "
+            "lookups key on the KAP member OID — raw VKN/MERSIS are not "
+            "searchable on the rebuilt platform.",
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        needle = name.strip().lower()
+        needle = name.strip()
         if not needle:
             return []
-        members = await self._kap_member_list()
+        results = await self._kap_search(needle)
         matches: list[CompanyMatch] = []
-        for m in members:
-            title = (_member_title(m) or "").lower()
-            ticker = (_member_ticker(m) or "").lower()
-            if needle in title or needle in ticker:
-                matches.append(_member_to_match(m))
-                if len(matches) >= limit:
-                    break
+        for r in results[:limit]:
+            member_oid = str(r["memberOrFundOid"])
+            title = (r.get("searchValue") or "").strip()
+            ticker = (r.get("cmpOrFundCode") or "").strip().upper()
+            if not title:
+                continue
+            identifiers: list[RegistryIdentifier] = []
+            if ticker:
+                identifiers.append(
+                    RegistryIdentifier(
+                        type=IdentifierType.OTHER, value=ticker, label="BIST ticker"
+                    )
+                )
+            matches.append(
+                CompanyMatch(
+                    id=member_oid,
+                    name=title,
+                    country="TR",
+                    identifiers=identifiers,
+                    address=None,
+                    status="active",
+                    source_url=f"{self.KAP_BASE}/en/sirket-bilgileri/ozet/{member_oid}",
+                )
+            )
         return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
-        if id_type == IdentifierType.VAT:
-            vkn = _normalize_vkn(value)
-            return await self._lookup_listed(vkn=vkn)
-        if id_type == IdentifierType.MERSIS:
-            mersis = _normalize_mersis(value)
-            # MERSIS often embeds the VKN as its leading 10 digits; KAP only
-            # publishes VKN, so we match on that prefix as a best-effort.
-            return await self._lookup_listed(
-                mersis=mersis, vkn_hint=mersis[:10]
+        if id_type not in (IdentifierType.VAT, IdentifierType.MERSIS):
+            raise InvalidIdentifierError(
+                f"Türkiye adapter only supports VAT (VKN) or MERSIS, got {id_type}"
             )
-        raise InvalidIdentifierError(
-            f"Türkiye adapter only supports VAT (VKN) or MERSIS, got {id_type}"
+        cleaned = re.sub(r"[\s\-]", "", value.strip())
+        if _MEMBER_OID_RE.match(cleaned):
+            return await self._details_by_oid(cleaned)
+        if id_type == IdentifierType.VAT:
+            number = _normalize_vkn(value)
+        else:
+            number = _normalize_mersis(value)
+        # KAP's search only indexes titles/tickers, but numbers occasionally
+        # resolve (e.g. pasted into a title); try once before giving up.
+        results = await self._kap_search(number)
+        if results:
+            return await self._details_by_oid(str(results[0]["memberOrFundOid"]))
+        raise AdapterNotImplementedError(
+            f"KAP's rebuilt platform does not index tax numbers, so "
+            f"{id_type.value} {number} cannot be resolved directly. Resolve "
+            "the company via search_by_name and use the returned KAP member "
+            "OID; company details fetched that way include the VKN."
         )
 
-    async def _lookup_listed(
-        self,
-        *,
-        vkn: str | None = None,
-        mersis: str | None = None,
-        vkn_hint: str | None = None,
-    ) -> CompanyDetails | None:
-        members = await self._kap_member_list()
-        target_vkn = vkn or vkn_hint
-        for m in members:
-            member_vkn = _member_vkn(m)
-            member_mersis = _member_mersis(m)
-            if target_vkn and member_vkn and member_vkn == target_vkn:
-                return _member_to_details(m, override_mersis=mersis)
-            if mersis and member_mersis and member_mersis == mersis:
-                return _member_to_details(m, override_mersis=mersis)
-        if vkn is not None:
-            raise AdapterNotImplementedError(
-                f"VKN {vkn} not found among KAP-listed companies. "
-                "Non-listed Türkiye registry lookups require MERSIS scraping, "
-                "which is not implemented."
-            )
-        if mersis is not None:
-            raise AdapterNotImplementedError(
-                f"MERSIS {mersis} not found among KAP-listed companies. "
-                "MERSIS scraping is not implemented."
-            )
-        return None
+    async def _details_by_oid(self, member_oid: str) -> CompanyDetails | None:
+        detail = await self._member_detail(member_oid)
+        if detail is None:
+            return None
+        return _member_detail_to_details(detail, member_oid, self.KAP_BASE)
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         cleaned = re.sub(r"[\s\-]", "", company_id.strip())
-        if cleaned.upper().startswith("TR"):
-            cleaned = cleaned[2:]
-        if _VKN_RE.match(cleaned):
-            vkn = cleaned
-        elif _MERSIS_RE.match(cleaned):
-            vkn = cleaned[:10]
+        if _MEMBER_OID_RE.match(cleaned):
+            member_oid = cleaned
+            vkn: str | None = None
         else:
-            raise InvalidIdentifierError(
-                f"Türkiye company_id must be VKN (10 digits) or MERSIS (16), got: {company_id}"
+            details = await self.lookup_by_identifier(
+                IdentifierType.VAT if not _MERSIS_RE.match(cleaned) else IdentifierType.MERSIS,
+                cleaned,
             )
+            if details is None:
+                return []
+            member_oid = details.raw.get("mkkMemberOid") or details.id
+            vkn = _detail_vkn(details.raw)
 
-        members = await self._kap_member_list()
-        member = next(
-            (m for m in members if _member_vkn(m) == vkn),
-            None,
-        )
-        if member is None:
-            raise AdapterNotImplementedError(
-                f"VKN {vkn} not listed on KAP; non-listed financials require "
-                "MERSIS / Trade Registry scraping, which is not implemented."
-            )
-
-        member_oid = _member_oid(member)
-        if not member_oid:
-            return []
-
-        disclosures = await self._kap_disclosures(member_oid)
-        cutoff_year = datetime.utcnow().year - years
-        seen: set[str] = set()
+        today = datetime.utcnow().date()
         filings: list[FinancialFiling] = []
-
-        for d in disclosures:
-            if not _is_annual_report(d):
-                continue
-            period_end = _disclosure_period_end(d)
-            if period_end is None:
-                continue
-            if period_end.year < cutoff_year:
-                continue
-            disclosure_oid = str(
-                d.get("disclosureIndex")
-                or d.get("oid")
-                or d.get("disclosureOid")
-                or d.get("id")
-                or ""
-            )
-            if not disclosure_oid or disclosure_oid in seen:
-                continue
-            seen.add(disclosure_oid)
-            filings.append(
-                FinancialFiling(
-                    company_id=vkn,
-                    year=period_end.year,
-                    type=FilingType.ANNUAL_REPORT,
-                    period_end=period_end,
-                    currency="TRY",
-                    structured_data=None,
-                    document_url=(
-                        f"{self.KAP_PUBLIC}/en/Bildirim/{disclosure_oid}"
-                    ),
-                    document_format="xbrl",
-                    source_url=(
-                        f"{self.KAP_PUBLIC}/en/sirket-bilgileri/ozet/{member_oid}"
-                    ),
+        seen: set[int] = set()
+        window_end = today
+        # The disclosure API rejects date spans over one year, so page
+        # backwards in yearly windows. One extra window catches annual
+        # reports published the year after their fiscal year.
+        for _ in range(years + 1):
+            window_start = window_end - timedelta(days=364)
+            disclosures = await self._disclosures(member_oid, window_start, window_end)
+            for d in disclosures:
+                if (d.get("ruleType") or "").strip().lower() != "annual":
+                    continue
+                if not (d.get("subject") or "").strip().lower().startswith("financial report"):
+                    continue
+                fiscal_year = d.get("year")
+                index = d.get("disclosureIndex")
+                if not isinstance(fiscal_year, int) or not isinstance(index, int):
+                    continue
+                if index in seen or fiscal_year < today.year - years:
+                    continue
+                seen.add(index)
+                filings.append(
+                    FinancialFiling(
+                        company_id=vkn or member_oid,
+                        year=fiscal_year,
+                        type=FilingType.ANNUAL_REPORT,
+                        period_end=date(fiscal_year, 12, 31),
+                        currency="TRY",
+                        structured_data=None,
+                        document_url=f"{self.KAP_BASE}/en/Bildirim/{index}",
+                        document_format="xbrl",
+                        source_url=f"{self.KAP_BASE}/en/sirket-bilgileri/ozet/{member_oid}",
+                    )
                 )
-            )
+            window_end = window_start - timedelta(days=1)
 
         filings.sort(key=lambda f: f.period_end or date.min, reverse=True)
         return filings
 
 
-def _member_title(m: dict[str, Any]) -> str:
-    for key in ("title", "name", "companyName", "memberName", "longName"):
-        v = m.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+def _extract_member_detail(page: str) -> dict[str, Any] | None:
+    """Pull the escaped ``memberDetail`` JSON object out of the RSC payload.
 
-
-def _member_ticker(m: dict[str, Any]) -> str:
-    for key in ("ticker", "stockCode", "symbol", "code"):
-        v = m.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
-
-
-def _member_oid(m: dict[str, Any]) -> str:
-    for key in ("memberOid", "oid", "id", "memberId"):
-        v = m.get(key)
-        if v is None:
-            continue
-        s = str(v).strip()
-        if s:
-            return s
-    return ""
-
-
-def _member_vkn(m: dict[str, Any]) -> str | None:
-    for key in ("vkn", "taxId", "taxNumber", "vergiNo", "vergi"):
-        v = m.get(key)
-        if v is None:
-            continue
-        cleaned = re.sub(r"\D", "", str(v))
-        if _VKN_RE.match(cleaned):
-            return cleaned
+    The Next.js flight data embeds it inside a JS string literal, so quotes
+    arrive as ``\\"``; we brace-match the escaped text and JSON-decode twice.
+    """
+    marker = page.find('memberDetail\\":')
+    if marker < 0:
+        return None
+    start = page.find("{", marker)
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, min(len(page), start + 20000)):
+        ch = page[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                escaped = page[start : i + 1]
+                try:
+                    unescaped = json.loads('"' + escaped + '"')
+                    parsed = json.loads(unescaped)
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
     return None
 
 
-def _member_mersis(m: dict[str, Any]) -> str | None:
-    for key in ("mersis", "mersisNo", "mersisNumber"):
-        v = m.get(key)
-        if v is None:
-            continue
-        cleaned = re.sub(r"\D", "", str(v))
-        if _MERSIS_RE.match(cleaned):
-            return cleaned
-    return None
+def _detail_vkn(detail: dict[str, Any]) -> str | None:
+    raw = re.sub(r"\D", "", str(detail.get("taxNo") or ""))
+    return raw if _VKN_RE.match(raw) else None
 
 
-def _member_to_match(m: dict[str, Any]) -> CompanyMatch:
-    title = _member_title(m)
-    ticker = _member_ticker(m)
-    vkn = _member_vkn(m)
-    mersis = _member_mersis(m)
-    member_oid = _member_oid(m)
-
-    identifiers: list[RegistryIdentifier] = []
-    if vkn:
-        identifiers.append(
-            RegistryIdentifier(type=IdentifierType.VAT, value=vkn, label="VKN")
-        )
-    if mersis:
-        identifiers.append(
-            RegistryIdentifier(
-                type=IdentifierType.MERSIS, value=mersis, label="MERSIS"
-            )
-        )
-
-    return CompanyMatch(
-        id=vkn or member_oid or ticker or title,
-        name=title or ticker,
-        country="TR",
-        identifiers=identifiers,
-        address=None,
-        status="active",
-        source_url=(
-            f"https://www.kap.org.tr/en/sirket-bilgileri/ozet/{member_oid}"
-            if member_oid
-            else None
-        ),
-    )
-
-
-def _member_to_details(
-    m: dict[str, Any],
-    *,
-    override_mersis: str | None = None,
+def _member_detail_to_details(
+    detail: dict[str, Any], member_oid: str, base: str
 ) -> CompanyDetails:
-    title = _member_title(m)
-    vkn = _member_vkn(m)
-    mersis = _member_mersis(m) or override_mersis
-    member_oid = _member_oid(m)
+    title = (detail.get("kapMemberTitle") or "").strip()
+    vkn = _detail_vkn(detail)
+    ticker = (detail.get("stockCode") or "").strip()
 
     identifiers: list[RegistryIdentifier] = []
     if vkn:
         identifiers.append(
             RegistryIdentifier(type=IdentifierType.VAT, value=vkn, label="VKN")
         )
-    if mersis:
+    trade_reg = (detail.get("tradeRegNo") or "").strip()
+    if trade_reg:
         identifiers.append(
             RegistryIdentifier(
-                type=IdentifierType.MERSIS, value=mersis, label="MERSIS"
+                type=IdentifierType.OTHER, value=trade_reg, label="Trade registry no"
+            )
+        )
+    if ticker:
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.OTHER, value=ticker, label="BIST ticker"
             )
         )
 
-    address = None
-    for key in ("address", "headquartersAddress", "registeredAddress"):
-        v = m.get(key)
-        if isinstance(v, str) and v.strip():
-            address = v.strip()
-            break
+    address_bits = [
+        (detail.get("tradeRegOffice") or "").strip(),
+        (detail.get("cityName") or "").strip(),
+    ]
+    address = ", ".join(dict.fromkeys(b for b in address_bits if b)) or None
 
-    website = None
-    for key in ("website", "homepage", "webAddress"):
-        v = m.get(key)
-        if isinstance(v, str) and v.strip():
-            website = v.strip()
-            break
-
-    sector_codes: list[str] = []
-    for key in ("sectorCode", "industryCode", "nace"):
-        v = m.get(key)
-        if v:
-            sector_codes.append(str(v))
+    capital = detail.get("paidCapital")
 
     return CompanyDetails(
-        id=vkn or member_oid or title,
+        id=member_oid,
         name=title,
         country="TR",
-        legal_form=m.get("companyType") or m.get("memberType"),
-        status="active",
+        legal_form=detail.get("kapMemberType"),
+        status="active" if (detail.get("kapMemberState") or "A") == "A" else "inactive",
+        incorporation_date=_parse_trade_reg_date(detail.get("tradeRegDate")),
         registered_address=address,
-        capital_amount=None,
+        capital_amount=float(capital) if isinstance(capital, (int, float)) else None,
         capital_currency="TRY",
-        nace_codes=sector_codes,
+        nace_codes=[],
         identifiers=identifiers,
-        website=website,
-        raw=m,
-        source_url=(
-            f"https://www.kap.org.tr/en/sirket-bilgileri/ozet/{member_oid}"
-            if member_oid
-            else None
-        ),
+        raw=detail,
+        source_url=f"{base}/en/sirket-bilgileri/ozet/{member_oid}",
     )
 
 
-def _is_annual_report(d: dict[str, Any]) -> bool:
-    parts: list[str] = []
-    for key in (
-        "subject",
-        "title",
-        "disclosureClass",
-        "ruleTypeName",
-        "templateName",
-        "summary",
-    ):
-        v = d.get(key)
-        if isinstance(v, str):
-            parts.append(v.lower())
-    blob = " ".join(parts)
-    if not blob:
-        return False
-    return any(hint in blob for hint in _ANNUAL_HINTS)
-
-
-def _disclosure_period_end(d: dict[str, Any]) -> date | None:
-    for key in (
-        "periodEnd",
-        "endDate",
-        "financialPeriodEnd",
-        "fiscalPeriodEnd",
-        "publishDate",
-        "disclosureDate",
-        "kapPublishDate",
-    ):
-        v = d.get(key)
-        if isinstance(v, str):
-            parsed = _parse_kap_date(v)
-            if parsed:
-                return parsed
-    return None
+def _parse_trade_reg_date(value: Any) -> date | None:
+    if not value:
+        return None
+    m = re.match(r"^(\d{2})/(\d{2})/(\d{4})", str(value).strip())
+    if not m:
+        return None
+    day, month, year = (int(g) for g in m.groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None

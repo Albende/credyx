@@ -13,7 +13,7 @@ const SECTIONS: { title: string; links: FooterLink[] }[] = [
       { href: "/#how-it-works", label: "How it works" },
       { href: "/pricing", label: "Pricing" },
       { href: "/app/coverage", label: "Coverage map" },
-      { href: "/app", label: "Live search" },
+      { href: "/app/search", label: "Live search" },
     ],
   },
   {
@@ -22,15 +22,15 @@ const SECTIONS: { title: string; links: FooterLink[] }[] = [
       { href: "/about", label: "About" },
       { href: "/blog", label: "Blog" },
       { href: "/contact", label: "Contact" },
-      { href: "/contact?type=careers", label: "Careers" },
+      { href: "/careers", label: "Careers" },
     ],
   },
   {
     title: "Resources",
     links: [
-      { href: "http://localhost:8000/docs", label: "API reference", external: true },
+      { href: "/api-reference", label: "API reference" },
       { href: "/app/account/api-keys", label: "API keys" },
-      { href: "/blog", label: "Changelog" },
+      { href: "/changelog", label: "Changelog" },
       { href: "/app", label: "Dashboard" },
     ],
   },
@@ -40,7 +40,7 @@ const SECTIONS: { title: string; links: FooterLink[] }[] = [
       { href: "/privacy", label: "Privacy" },
       { href: "/terms", label: "Terms" },
       { href: "/security", label: "Security" },
-      { href: "/contact?type=dpa", label: "DPA" },
+      { href: "/dpa", label: "DPA" },
     ],
   },
 ];

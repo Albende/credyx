@@ -1,16 +1,30 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from packages.adapters._base.errors import InvalidIdentifierError
+from packages.adapters._base.errors import (
+    AdapterError,
+    AdapterNotImplementedError,
+    InvalidIdentifierError,
+)
 from packages.adapters.hr import HRAdapter
 from packages.adapters.hr.adapter import (
     _normalize_mbs,
     _normalize_oib,
     _oib_checksum_valid,
-    _parse_fina_years,
 )
-from packages.shared.models import IdentifierType
+from packages.shared.models import AdapterStatus, IdentifierType
+
+_HAS_CREDENTIALS = bool(
+    os.getenv("HR_SUDREG_CLIENT_ID") and os.getenv("HR_SUDREG_CLIENT_SECRET")
+)
+requires_credentials = pytest.mark.skipif(
+    not _HAS_CREDENTIALS,
+    reason="sudreg-data.gov.hr OAuth credentials not configured "
+    "(HR_SUDREG_CLIENT_ID / HR_SUDREG_CLIENT_SECRET)",
+)
 
 
 def test_oib_checksum_known_valid():
@@ -37,14 +51,34 @@ def test_normalize_mbs_zero_pads():
     assert _normalize_mbs("080000604") == "080000604"
 
 
-def test_parse_fina_years_extracts_distinct():
-    sample = "<table><tr><td>INA d.d.</td><td>2023</td></tr><tr><td>INA d.d.</td><td>2022</td></tr></table>"
-    years = _parse_fina_years(sample)
-    assert 2022 in years and 2023 in years
+@pytest.mark.asyncio
+async def test_missing_credentials_raise_clear_error():
+    if _HAS_CREDENTIALS:
+        pytest.skip("credentials configured")
+    adapter = HRAdapter()
+    with pytest.raises(AdapterError, match="HR_SUDREG_CLIENT_ID"):
+        await adapter.search_by_name("INA", limit=5)
+
+
+@pytest.mark.asyncio
+async def test_health_reports_blocked_without_credentials():
+    if _HAS_CREDENTIALS:
+        pytest.skip("credentials configured")
+    health = await HRAdapter().health_check()
+    assert health.status == AdapterStatus.BLOCKED
+    assert health.requires_api_key and not health.api_key_present
+
+
+@pytest.mark.asyncio
+async def test_fetch_financials_not_implemented():
+    adapter = HRAdapter()
+    with pytest.raises(AdapterNotImplementedError):
+        await adapter.fetch_financials("27759560625", years=10)
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@requires_credentials
 async def test_search_finds_ina():
     adapter = HRAdapter()
     matches = await adapter.search_by_name("INA", limit=5)
@@ -54,6 +88,7 @@ async def test_search_finds_ina():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@requires_credentials
 async def test_lookup_ina_by_oib():
     adapter = HRAdapter()
     details = await adapter.lookup_by_identifier(IdentifierType.VAT, "27759560625")
@@ -64,6 +99,7 @@ async def test_lookup_ina_by_oib():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@requires_credentials
 async def test_lookup_ina_by_mbs():
     adapter = HRAdapter()
     details = await adapter.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "080000604")
@@ -73,16 +109,7 @@ async def test_lookup_ina_by_mbs():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_fetch_financials_ina():
-    adapter = HRAdapter()
-    filings = await adapter.fetch_financials("27759560625", years=10)
-    # FINA RGFI hosts INA annual reports back to 2008 — we expect at least one.
-    assert isinstance(filings, list)
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_health_check_ok():
+async def test_health_check_reports_country():
     adapter = HRAdapter()
     health = await adapter.health_check()
     assert health.country_code == "HR"

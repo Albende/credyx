@@ -10,14 +10,18 @@
 
 ### ANAF — VAT validator (LIVE)
 
-- URL: `https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva`
+- URL: `https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva`
+  (v9, July 2026 — the old `PlatitorTvaRest/api/v8/ws/tva` path family 404s;
+  the path segments swapped to `api/PlatitorTvaRest/{version}/tva`).
 - Method: `POST`, JSON body `[{"cui": <int>, "data": "YYYY-MM-DD"}]`.
 - Auth: none.
 - Rate limit: generous (documented at ~1 req/sec sustained, batched up to
-  500 CUIs per call).
-- Returns: legal name, registered address, ONRC registration number, fiscal
-  status (active / inactive), VAT registration flags, NACE code, phone,
-  incorporation date.
+  100 CUIs per call in v9).
+- Returns: `{"found": [...], "notFound": [...]}` — v9 dropped the old
+  `cod`/`message` envelope, and answers HTTP 404 (with the same JSON body)
+  when no queried CUI is registered. Records still carry legal name, registered
+  address, ONRC registration number, fiscal status (active / inactive),
+  VAT registration flags, NACE code, phone, incorporation date.
 - robots.txt / ToS: public free service, attribution requested.
 
 ### ONRC (RECOM)

@@ -1,34 +1,45 @@
-"""Croatia adapter — Sudski registar (Court Registry) + FINA RGFI.
+"""Croatia adapter — Sudski registar (Court Registry) open-data API.
 
-Sources (all free, no auth):
+Sources:
 
-- Sudski registar via the public OData feed at https://sudreg-data.gov.hr/api/javni
-  Free, public, no API key. Search/filter by OIB (tax/VAT, 11 digits) or
-  MBS (court registration number, 9 digits). Returns Pydantic-friendly JSON.
-- FINA RGFI (Registar godišnjih financijskih izvještaja) public lookup at
-  https://rgfi.fina.hr/IzvjestajiRGFI.action — annual reports (PDF) filed
-  by every Croatian company since 2008, free. We discover the per-OIB
-  filing-list page and parse the year/document table.
+- Sudski registar open-data REST API at https://sudreg-data.gov.hr/api/javni.
+  Since the 2024 portal revamp the API requires OAuth2 client-credentials:
+  register (free) at https://sudreg-data.gov.hr/, then set
+  ``HR_SUDREG_CLIENT_ID`` and ``HR_SUDREG_CLIENT_SECRET``. Tokens come from
+  ``POST /api/oauth/token`` (HTTP basic auth, ``grant_type=client_credentials``)
+  and are valid for 6 hours.
+  Endpoints used: ``/javni/subjekti?tvrtka_naziv=…`` (name search) and
+  ``/javni/detalji_subjekta?tip_identifikatora=oib|mbs&identifikator=…``.
+- FINA RGFI (annual reports) retired its anonymous public lookup
+  (``rgfi.fina.hr/IzvjestajiRGFI.action`` now 404s; JavnaObjava-web requires
+  an interactive login). The sudreg ``/javni/gfi`` endpoint only exposes GFI
+  document metadata as bulk snapshots, not per-company queries, so
+  ``fetch_financials`` raises ``AdapterNotImplementedError`` instead of
+  fabricating filings.
 
 OIB validation uses ISO 7064 MOD 11,10 (the official Croatian checksum)
 so we reject malformed identifiers locally before round-tripping.
 """
 from __future__ import annotations
 
-import html
+import os
 import re
-from datetime import date
+import time
+from datetime import date, datetime
 from typing import Any
 
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import InvalidIdentifierError
+from packages.adapters._base.errors import (
+    AdapterError,
+    AdapterNotImplementedError,
+    InvalidIdentifierError,
+)
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
-    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -36,8 +47,9 @@ from packages.shared.models import (
 
 _OIB_RE = re.compile(r"^\d{11}$")
 _MBS_RE = re.compile(r"^\d{1,9}$")
-_TAG_STRIP_RE = re.compile(r"<[^>]+>")
-_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+_CLIENT_ID_ENV = "HR_SUDREG_CLIENT_ID"
+_CLIENT_SECRET_ENV = "HR_SUDREG_CLIENT_SECRET"
 
 
 def _normalize_oib(value: str) -> str:
@@ -68,37 +80,119 @@ def _normalize_mbs(value: str) -> str:
     return cleaned.zfill(9)
 
 
-def _strip_tags(text: str) -> str:
-    # Replace tags with a space so adjacent <td>2023</td><td>2022</td> doesn't
-    # collapse into "20232022" — that would defeat the year boundary scan.
-    return html.unescape(_TAG_STRIP_RE.sub(" ", text)).strip()
-
-
 class HRAdapter(CountryAdapter):
     country_code = "HR"
     country_name = "Croatia"
     identifier_types = [IdentifierType.VAT, IdentifierType.COMPANY_NUMBER]
     primary_identifier = IdentifierType.VAT
-    requires_api_key = False
-    api_key_env = None
+    requires_api_key = True
+    api_key_env = _CLIENT_ID_ENV
     rate_limit_per_minute = 30
 
-    SUDREG_BASE = "https://sudreg-data.gov.hr/api/javni"
-    FINA_BASE = "https://rgfi.fina.hr"
+    SUDREG_BASE = "https://sudreg-data.gov.hr/api"
     SUDREG_HTML_BASE = "https://sudreg.pravosudje.hr"
 
+    def __init__(
+        self,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+    ) -> None:
+        self.client_id = client_id or os.getenv(_CLIENT_ID_ENV)
+        self.client_secret = client_secret or os.getenv(_CLIENT_SECRET_ENV)
+        self._token: str | None = None
+        self._token_expires_at: float = 0.0
+
+    def _require_credentials(self) -> None:
+        if not self.client_id or not self.client_secret:
+            raise AdapterError(
+                "Croatian sudreg open-data API requires OAuth2 client "
+                "credentials since the 2024 portal revamp. Register (free) at "
+                "https://sudreg-data.gov.hr/ and set "
+                f"{_CLIENT_ID_ENV} / {_CLIENT_SECRET_ENV}."
+            )
+
+    async def _get_token(self) -> str:
+        self._require_credentials()
+        if self._token and time.monotonic() < self._token_expires_at:
+            return self._token
+        async with build_http_client(base_url=self.SUDREG_BASE) as client:
+            resp = await client.post(
+                "/oauth/token",
+                auth=(self.client_id, self.client_secret),
+                data={"grant_type": "client_credentials"},
+            )
+        if resp.status_code == 401:
+            raise AdapterError(
+                "sudreg-data.gov.hr rejected the OAuth client credentials "
+                f"({_CLIENT_ID_ENV} / {_CLIENT_SECRET_ENV})."
+            )
+        resp.raise_for_status()
+        payload = resp.json()
+        token = payload.get("access_token")
+        if not token:
+            raise AdapterError(
+                f"sudreg-data.gov.hr token response missing access_token: {payload}"
+            )
+        expires_in = float(payload.get("expires_in") or 21600)
+        self._token = token
+        self._token_expires_at = time.monotonic() + expires_in - 60
+        return token
+
+    async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
+        token = await self._get_token()
+        async with build_http_client(
+            base_url=self.SUDREG_BASE,
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            resp = await get_with_retry(client, path, params=params)
+            if resp.status_code == 404:
+                return None
+            if resp.status_code == 401:
+                # Token may have been revoked server-side; refetch once.
+                self._token = None
+                token = await self._get_token()
+                resp = await get_with_retry(
+                    client,
+                    path,
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code == 404:
+                    return None
+            resp.raise_for_status()
+            return resp.json()
+
     async def health_check(self) -> AdapterHealth:
+        key_present = bool(self.client_id and self.client_secret)
+        if not key_present:
+            return AdapterHealth(
+                country_code=self.country_code,
+                name=self.country_name,
+                status=AdapterStatus.BLOCKED,
+                capabilities={"search": False, "lookup": False, "financials": False},
+                requires_api_key=True,
+                api_key_present=False,
+                rate_limit_per_minute=self.rate_limit_per_minute,
+                notes=(
+                    "sudreg-data.gov.hr requires free OAuth2 registration; set "
+                    f"{_CLIENT_ID_ENV} / {_CLIENT_SECRET_ENV}."
+                ),
+            )
         try:
-            async with build_http_client(base_url=self.SUDREG_BASE) as client:
-                resp = await get_with_retry(client, "/subjekt_detalji", params={"tip_identifikatora": "oib", "identifikator": "27759560625"})
-                if resp.status_code >= 500:
-                    raise RuntimeError(f"HTTP {resp.status_code}")
+            data = await self._get_json(
+                "/javni/detalji_subjekta",
+                {"tip_identifikatora": "oib", "identifikator": "27759560625"},
+            )
+            if data is None:
+                raise RuntimeError("probe OIB not found")
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
                 capabilities={"search": False, "lookup": False, "financials": False},
+                requires_api_key=True,
+                api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
@@ -106,20 +200,26 @@ class HRAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": True},
+            capabilities={"search": True, "lookup": True, "financials": False},
+            requires_api_key=True,
+            api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
-            notes="Sudski registar OData (registry) + FINA RGFI (annual reports, PDF).",
+            notes=(
+                "Sudski registar open-data API (OAuth2). FINA RGFI public "
+                "lookup retired — no per-company financials."
+            ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        async with build_http_client(base_url=self.SUDREG_BASE) as client:
-            resp = await get_with_retry(
-                client,
-                "/subjekt_naziv",
-                params={"naziv": name, "samo_valjani": "false", "offset": 0, "limit": limit},
-            )
-            resp.raise_for_status()
-            payload = resp.json()
+        payload = await self._get_json(
+            "/javni/subjekti",
+            {
+                "tvrtka_naziv": name,
+                "only_active": "false",
+                "offset": 0,
+                "limit": limit,
+            },
+        )
         items = _extract_list(payload)
         out: list[CompanyMatch] = []
         for item in items[:limit]:
@@ -163,14 +263,9 @@ class HRAdapter(CountryAdapter):
             params = {"tip_identifikatora": "mbs", "identifikator": mbs}
         else:
             raise InvalidIdentifierError(f"HR only supports VAT (OIB) or COMPANY_NUMBER (MBS), got {id_type}")
+        params["expand_relations"] = "true"
 
-        async with build_http_client(base_url=self.SUDREG_BASE) as client:
-            resp = await get_with_retry(client, "/subjekt_detalji", params=params)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            data = resp.json()
-
+        data = await self._get_json("/javni/detalji_subjekta", params)
         if not data:
             return None
         if isinstance(data, list):
@@ -201,7 +296,7 @@ class HRAdapter(CountryAdapter):
             incorporation_date=_parse_date(data.get("datum_osnivanja") or data.get("datum_upisa")),
             dissolution_date=_parse_date(data.get("datum_brisanja") or data.get("datum_prestanka")),
             registered_address=_address_from_subject(data),
-            capital_amount=_coerce_float(data.get("temeljni_kapital") or data.get("iznos_temeljnog_kapitala")),
+            capital_amount=_capital_amount(data),
             capital_currency=_capital_currency(data),
             nace_codes=_nace_codes(data),
             identifiers=idents,
@@ -212,49 +307,13 @@ class HRAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        oib = _normalize_oib(company_id)
-        async with build_http_client(base_url=self.FINA_BASE, timeout=30.0) as client:
-            resp = await get_with_retry(
-                client,
-                "/IzvjestajiRGFI-web/izvjestajiSubjekta.do",
-                params={"oib": oib},
-            )
-            if resp.status_code in (302, 404):
-                fallback = await get_with_retry(
-                    client,
-                    "/IzvjestajiRGFI.action",
-                    params={"oib": oib},
-                )
-                if fallback.status_code == 404:
-                    return []
-                fallback.raise_for_status()
-                page_text = fallback.text
-                listing_url = str(fallback.url)
-            else:
-                resp.raise_for_status()
-                page_text = resp.text
-                listing_url = str(resp.url)
-
-        years_found = _parse_fina_years(page_text)
-        cutoff = max(years_found, default=0) - years if years_found else 0
-        filings: list[FinancialFiling] = []
-        for year in sorted(years_found, reverse=True):
-            if year < cutoff:
-                continue
-            filings.append(
-                FinancialFiling(
-                    company_id=oib,
-                    year=year,
-                    type=FilingType.ANNUAL_REPORT,
-                    period_end=date(year, 12, 31),
-                    currency="EUR" if year >= 2023 else "HRK",
-                    structured_data=None,
-                    document_url=None,
-                    document_format="pdf",
-                    source_url=listing_url,
-                )
-            )
-        return filings
+        _normalize_oib(company_id)
+        raise AdapterNotImplementedError(
+            "Croatian annual reports are no longer freely queryable per "
+            "company: FINA retired the anonymous RGFI lookup and the sudreg "
+            "open-data /javni/gfi endpoint only serves bulk snapshots of GFI "
+            "document metadata."
+        )
 
     def _html_search_url(self, identifier: str | None) -> str:
         if not identifier:
@@ -293,20 +352,20 @@ def _coerce_float(v: Any) -> float | None:
 
 
 def _first_name(item: dict[str, Any]) -> str:
-    for key in ("skraceni_naziv", "naziv", "tvrtka", "ime"):
+    for key in ("skracena_tvrtka", "tvrtka", "skraceni_naziv", "naziv", "ime"):
         v = item.get(key)
         if isinstance(v, str) and v.strip():
             return v.strip()
         if isinstance(v, list):
             for entry in v:
                 if isinstance(entry, dict):
-                    inner = entry.get("naziv") or entry.get("ime")
+                    inner = entry.get("ime") or entry.get("naziv")
                     if isinstance(inner, str) and inner.strip():
                         return inner.strip()
                 elif isinstance(entry, str) and entry.strip():
                     return entry.strip()
         if isinstance(v, dict):
-            inner = v.get("naziv") or v.get("ime")
+            inner = v.get("ime") or v.get("naziv")
             if isinstance(inner, str) and inner.strip():
                 return inner.strip()
     return ""
@@ -315,13 +374,17 @@ def _first_name(item: dict[str, Any]) -> str:
 def _legal_form(item: dict[str, Any]) -> str | None:
     v = item.get("pravni_oblik") or item.get("oblik")
     if isinstance(v, dict):
-        return _coerce_str(v.get("naziv") or v.get("opis"))
+        return _coerce_str(v.get("naziv") or v.get("opis") or v.get("vrsta"))
     return _coerce_str(v)
 
 
 def _status_from_subject(item: dict[str, Any]) -> str | None:
     if item.get("datum_brisanja") or item.get("datum_prestanka"):
         return "ceased"
+    for key in ("postupak", "status"):
+        v = item.get(key)
+        if isinstance(v, str) and "brisan" in v.lower():
+            return "ceased"
     valjan = item.get("valjan")
     if isinstance(valjan, bool):
         return "active" if valjan else "ceased"
@@ -337,20 +400,26 @@ def _address_from_subject(item: dict[str, Any]) -> str | None:
     parts = [
         _coerce_str(sjediste.get("ulica")),
         _coerce_str(sjediste.get("kucni_broj")),
+        _coerce_str(sjediste.get("kucni_podbroj")),
         _coerce_str(sjediste.get("postanski_broj") or sjediste.get("postni_broj")),
-        _coerce_str(sjediste.get("naselje") or sjediste.get("mjesto")),
+        _coerce_str(sjediste.get("naziv_naselja") or sjediste.get("naselje") or sjediste.get("mjesto")),
     ]
     joined = " ".join(p for p in parts if p)
     return joined or None
 
 
 def _nace_codes(item: dict[str, Any]) -> list[str]:
-    raw = item.get("nkd") or item.get("djelatnosti") or item.get("sifra_djelatnosti")
+    raw = (
+        item.get("pretezite_djelatnosti")
+        or item.get("nkd")
+        or item.get("djelatnosti")
+        or item.get("sifra_djelatnosti")
+    )
     out: list[str] = []
     if isinstance(raw, list):
         for entry in raw:
             if isinstance(entry, dict):
-                code = entry.get("sifra") or entry.get("nkd_sifra")
+                code = entry.get("sifra") or entry.get("nkd_sifra") or entry.get("djelatnost_sifra")
                 if code:
                     out.append(str(code))
             elif entry:
@@ -364,7 +433,26 @@ def _nace_codes(item: dict[str, Any]) -> list[str]:
     return out
 
 
+def _capital_block(item: dict[str, Any]) -> Any:
+    raw = item.get("temeljni_kapitali") or item.get("temeljni_kapital") or item.get("iznos_temeljnog_kapitala")
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    return raw
+
+
+def _capital_amount(item: dict[str, Any]) -> float | None:
+    return _coerce_float(_capital_block(item))
+
+
 def _capital_currency(item: dict[str, Any]) -> str | None:
+    block = _capital_block(item)
+    if isinstance(block, dict):
+        raw = block.get("valuta")
+        if isinstance(raw, dict):
+            raw = raw.get("oznaka") or raw.get("sifra")
+        code = _coerce_str(raw)
+        if code:
+            return code.upper()
     raw = item.get("valuta_temeljnog_kapitala") or item.get("valuta")
     if isinstance(raw, dict):
         return _coerce_str(raw.get("oznaka") or raw.get("sifra"))
@@ -390,25 +478,7 @@ def _parse_date(s: Any) -> date | None:
         pass
     for fmt in ("%d.%m.%Y", "%d/%m/%Y"):
         try:
-            from datetime import datetime as _dt
-            return _dt.strptime(text[:10], fmt).date()
+            return datetime.strptime(text[:10], fmt).date()
         except ValueError:
             continue
     return None
-
-
-def _parse_fina_years(html_text: str) -> list[int]:
-    """Extract distinct reporting years from a FINA RGFI listing page.
-
-    The listing renders a table of filings with the reporting year in one of
-    the columns. We don't parse the table structure — we just collect every
-    four-digit year between 1998 and now+1 inside table cells.
-    """
-    stripped = _strip_tags(html_text)
-    years: set[int] = set()
-    current_year = date.today().year
-    for match in _YEAR_RE.finditer(stripped):
-        y = int(match.group(0))
-        if 1998 <= y <= current_year:
-            years.add(y)
-    return sorted(years)

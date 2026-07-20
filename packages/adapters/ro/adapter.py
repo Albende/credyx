@@ -6,11 +6,13 @@ registration state, and fiscal flags for any Romanian CUI (Cod Unic de
 structured data without a paid contract or scrape — ONRC's RECOM portal
 needs a commercial subscription for anything beyond a manual page view.
 
-- Endpoint: https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva
+- Endpoint: https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva
 - Method:   POST
-- Body:     `[{"cui": <int>, "data": "YYYY-MM-DD"}]` (batched, max 500/req)
+- Body:     `[{"cui": <int>, "data": "YYYY-MM-DD"}]` (batched, max 100/req)
 - Auth:     None.
 - Cost:     Free.
+- Response: `{"found": [...], "notFound": [...]}` — v9 dropped the old
+  `cod`/`message` envelope.
 
 Financials are not exposed by ANAF. Listed companies file annual reports on
 the Bucharest Stock Exchange (BVB) but only as per-company PDF/HTML, so we
@@ -68,7 +70,7 @@ class ROAdapter(CountryAdapter):
     rate_limit_per_minute = 60
 
     ANAF_URL = (
-        "https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva"
+        "https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva"
     )
 
     async def health_check(self) -> AdapterHealth:
@@ -78,8 +80,8 @@ class ROAdapter(CountryAdapter):
                 resp = await client.post(self.ANAF_URL, json=payload)
                 resp.raise_for_status()
                 body = resp.json()
-            if body.get("cod") not in (200, "200"):
-                raise AdapterError(f"ANAF returned cod={body.get('cod')}")
+            if "found" not in body:
+                raise AdapterError(f"ANAF returned unexpected shape: {list(body)}")
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -118,13 +120,11 @@ class ROAdapter(CountryAdapter):
 
         async with build_http_client() as client:
             resp = await client.post(self.ANAF_URL, json=payload)
-            resp.raise_for_status()
+            # v9 answers HTTP 404 (with a valid JSON body) when the CUI is
+            # not registered — only treat other errors as failures.
+            if resp.status_code != 404:
+                resp.raise_for_status()
             body = resp.json()
-
-        if body.get("cod") not in (200, "200"):
-            # ANAF returns cod 500/501 etc when CUI is not registered;
-            # treat as "not found" rather than an error.
-            return None
 
         found = body.get("found") or []
         if not found:
@@ -212,7 +212,7 @@ def _details_from_anaf(record: dict[str, Any], cui: int) -> CompanyDetails:
         phone=phone,
         raw=record,
         source_url=(
-            "https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva"
+            "https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva"
         ),
     )
 

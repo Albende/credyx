@@ -3,11 +3,14 @@
 The official YeDR (Yedyny derzhavnyy reyestr pidpryyemstv ta orhanizatsiy
 Ukrayiny) is published as XML/JSON dumps on data.gov.ua and as a captcha-
 protected HTML form at https://usr.minjust.gov.ua. Neither is a queryable
-live API. Clarity Project re-publishes the same open data with a free,
-unauthenticated JSON API:
+live API. Clarity Project re-publishes the same open data; its former
+unauthenticated JSON API (`/api/search`, `/api/edrpou/{code}`) was removed
+in 2026 and the whole site now sits behind a Cloudflare challenge, so we
+parse the server-rendered HTML through `fetch_with_bot_bypass`
+(httpx first, FlareSolverr fallback):
 
-    Search: https://clarity-project.info/api/search?q={query}&format=json
-    Detail: https://clarity-project.info/api/edrpou/{code}?format=json
+    Search: https://clarity-project.info/edrs?query={query}
+    Detail: https://clarity-project.info/edr/{code}
 
 Identifier: EDRPOU — 8 digits. Ukrainian VAT numbers are 12 digits;
 practical lookups against the registry still hinge on EDRPOU, so VAT is
@@ -20,13 +23,14 @@ list. No mock numbers.
 """
 from __future__ import annotations
 
+import html as html_lib
 import re
-from datetime import date
-from typing import Any
+from datetime import date, datetime
+from urllib.parse import quote
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import InvalidIdentifierError
-from packages.adapters._base.http import build_http_client, get_with_retry
+from packages.adapters._base.http import build_http_client, fetch_with_bot_bypass, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
@@ -40,8 +44,16 @@ from packages.shared.models import (
 
 _EDRPOU_RE = re.compile(r"^\d{1,10}$")
 _VAT_RE = re.compile(r"^\d{10,12}$")
+_TAG_RE = re.compile(r"<[^>]+>")
 
 _PROBE_EDRPOU = "20077720"  # Naftogaz of Ukraine — used for health probes.
+
+_SEARCH_CARD_RE = re.compile(
+    r'<a[^>]+href="/edr/(\d{6,10})"[^>]*>(.*?)</a>.*?'
+    r'ЄДРПОУ:\s*\1</div>\s*'
+    r'(?:<div[^>]*class="address[^"]*"[^>]*>(.*?)</div>)?',
+    re.S,
+)
 
 
 def _normalize_edrpou(value: str) -> str:
@@ -69,6 +81,14 @@ def _normalize_vat_to_edrpou(value: str) -> str:
     return _normalize_edrpou(cleaned[:8] if len(cleaned) >= 8 else cleaned)
 
 
+def _strip_tags(fragment: str) -> str:
+    return html_lib.unescape(_TAG_RE.sub(" ", fragment)).strip()
+
+
+def _squash_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip(" ,|")
+
+
 class UAAdapter(CountryAdapter):
     country_code = "UA"
     country_name = "Ukraine"
@@ -81,16 +101,17 @@ class UAAdapter(CountryAdapter):
     BASE_URL = "https://clarity-project.info"
     SMIDA_URL = "https://smida.gov.ua/db/emitent/{code}"
 
+    async def _fetch_page(self, path: str) -> tuple[str, int]:
+        text, status, _source = await fetch_with_bot_bypass(
+            f"{self.BASE_URL}{path}", timeout=30.0
+        )
+        return text, status
+
     async def health_check(self) -> AdapterHealth:
         try:
-            async with build_http_client(base_url=self.BASE_URL) as client:
-                resp = await get_with_retry(
-                    client,
-                    f"/api/edrpou/{_PROBE_EDRPOU}",
-                    params={"format": "json"},
-                )
-                if resp.status_code >= 500:
-                    raise RuntimeError(f"Clarity Project HTTP {resp.status_code}")
+            page, status = await self._fetch_page(f"/edr/{_PROBE_EDRPOU}")
+            if status >= 500 or _PROBE_EDRPOU not in page:
+                raise RuntimeError(f"Clarity Project HTTP {status}")
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -106,49 +127,49 @@ class UAAdapter(CountryAdapter):
             capabilities={"search": True, "lookup": True, "financials": False},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Registry via Clarity Project (open data mirror of YeDR). "
+                "Registry via Clarity Project HTML (open data mirror of YeDR), "
+                "Cloudflare-walled — FlareSolverr fallback required. "
                 "Financials limited to SMIDA links for listed companies."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        async with build_http_client(base_url=self.BASE_URL) as client:
-            resp = await get_with_retry(
-                client,
-                "/api/search",
-                params={"q": name, "format": "json"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        items = _coerce_list(data, ("results", "items", "edrs", "edrpous", "data"))
+        page, status = await self._fetch_page(f"/edrs?query={quote(name)}")
+        if status == 404:
+            return []
         matches: list[CompanyMatch] = []
-        for item in items[:limit]:
-            edrpou = _first_str(item, ("edrpou", "code", "id", "EDRPOU"))
-            company_name = _first_str(item, ("name", "title", "fullName", "shortName"))
-            if not edrpou or not company_name:
-                continue
+        seen: set[str] = set()
+        for m in _SEARCH_CARD_RE.finditer(page):
+            code, name_html, address_html = m.group(1), m.group(2), m.group(3)
             try:
-                edrpou_n = _normalize_edrpou(str(edrpou))
+                edrpou = _normalize_edrpou(code)
             except InvalidIdentifierError:
                 continue
+            if edrpou in seen:
+                continue
+            company_name = _squash_spaces(_strip_tags(name_html))
+            if not company_name:
+                continue
+            seen.add(edrpou)
             matches.append(
                 CompanyMatch(
-                    id=edrpou_n,
+                    id=edrpou,
                     name=company_name,
                     country=self.country_code,
                     identifiers=[
                         RegistryIdentifier(
                             type=IdentifierType.COMPANY_NUMBER,
-                            value=edrpou_n,
+                            value=edrpou,
                             label="EDRPOU",
                         )
                     ],
-                    address=_first_str(item, ("address", "location", "registered_address")),
-                    status=_first_str(item, ("status", "state")),
-                    source_url=f"{self.BASE_URL}/edr/{edrpou_n}",
+                    address=_squash_spaces(_strip_tags(address_html)) if address_html else None,
+                    status=None,
+                    source_url=f"{self.BASE_URL}/edr/{edrpou}",
                 )
             )
+            if len(matches) >= limit:
+                break
         return matches
 
     async def lookup_by_identifier(
@@ -163,76 +184,35 @@ class UAAdapter(CountryAdapter):
                 f"UA only supports COMPANY_NUMBER (EDRPOU) or VAT, got {id_type}"
             )
 
-        async with build_http_client(base_url=self.BASE_URL) as client:
-            resp = await get_with_retry(
-                client,
-                f"/api/edrpou/{edrpou}",
-                params={"format": "json"},
-            )
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            payload = resp.json()
-
-        record = _unwrap_record(payload)
-        if not record:
+        page, status = await self._fetch_page(f"/edr/{edrpou}")
+        if status == 404:
             return None
 
-        name = _first_str(record, ("name", "fullName", "shortName", "title"))
+        fields = _parse_edr_info(page)
+        name = (
+            fields.get("Назва")
+            or fields.get("Назва англійською мовою")
+            or _h1_text(page)
+        )
         if not name:
             return None
 
-        directors_raw = (
-            record.get("officers")
-            or record.get("directors")
-            or record.get("management")
-            or []
+        director_name = fields.get("Керівник")
+        directors = (
+            [Director(name=director_name, role="керівник")] if director_name else []
         )
-        directors: list[Director] = []
-        if isinstance(directors_raw, list):
-            for d in directors_raw:
-                if not isinstance(d, dict):
-                    continue
-                dname = _first_str(d, ("name", "fullName", "title"))
-                if not dname:
-                    continue
-                directors.append(
-                    Director(
-                        name=dname.strip(),
-                        role=_first_str(d, ("role", "position", "title_role")),
-                    )
-                )
-
-        nace_raw = record.get("kved") or record.get("nace") or record.get("activity")
-        nace_codes: list[str] = []
-        if isinstance(nace_raw, list):
-            for code in nace_raw:
-                if isinstance(code, dict):
-                    c = _first_str(code, ("code", "id"))
-                    if c:
-                        nace_codes.append(c)
-                elif isinstance(code, str):
-                    nace_codes.append(code)
-        elif isinstance(nace_raw, str):
-            nace_codes.append(nace_raw)
 
         return CompanyDetails(
             id=edrpou,
             name=name,
             country=self.country_code,
-            legal_form=_first_str(record, ("legalForm", "legal_form", "form")),
-            status=_first_str(record, ("status", "state")),
-            incorporation_date=_parse_date(
-                _first_str(record, ("registrationDate", "registration_date", "founded"))
-            ),
-            registered_address=_first_str(
-                record, ("address", "location", "registered_address")
-            ),
-            capital_amount=_coerce_float(
-                record.get("capital") or record.get("authorizedCapital")
-            ),
+            legal_form=fields.get("Організаційна форма"),
+            status=_map_status(fields.get("Стан")),
+            incorporation_date=_parse_date(fields.get("Дата реєстрації")),
+            registered_address=fields.get("Адреса"),
+            capital_amount=_parse_capital(fields.get("Статутний капітал")),
             capital_currency="UAH",
-            nace_codes=nace_codes,
+            nace_codes=[],
             identifiers=[
                 RegistryIdentifier(
                     type=IdentifierType.COMPANY_NUMBER,
@@ -241,7 +221,7 @@ class UAAdapter(CountryAdapter):
                 ),
             ],
             directors=directors,
-            raw=record if isinstance(record, dict) else {},
+            raw={"edr_info": fields},
             source_url=f"{self.BASE_URL}/edr/{edrpou}",
         )
 
@@ -264,50 +244,77 @@ class UAAdapter(CountryAdapter):
         return []
 
 
-def _coerce_list(payload: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
-    if not isinstance(payload, dict):
-        return []
-    for k in keys:
-        v = payload.get(k)
-        if isinstance(v, list):
-            return [x for x in v if isinstance(x, dict)]
-    return []
+def _parse_edr_info(page: str) -> dict[str, str]:
+    """Flatten the first `edr-info` table into a label → value dict.
+
+    Rows render as `<tr><td>Label:</td><td>value ...</td></tr>`; values can
+    contain nested markup, so we strip tags per cell and join the rest.
+    """
+    table_match = re.search(
+        r'<table class="[^"]*edr-info[^"]*".*?</table>', page, re.S
+    )
+    if not table_match:
+        return {}
+    fields: dict[str, str] = {}
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", table_match.group(0), re.S):
+        cells = [
+            _squash_spaces(_strip_tags(c))
+            for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)
+        ]
+        cells = [c for c in cells if c]
+        if len(cells) < 2 or not cells[0].endswith(":"):
+            continue
+        label = cells[0].rstrip(":").strip()
+        value = _squash_spaces(" ".join(cells[1:]))
+        # Clarity masks parts of addresses/names for anonymous sessions and
+        # repeats the raw ЄДР record copy after the display value.
+        value = _squash_spaces(value.replace("*", " ").split("Запис в ЄДР")[0])
+        if label and value and label not in fields:
+            fields[label] = value
+    return fields
 
 
-def _unwrap_record(payload: Any) -> dict[str, Any] | None:
-    if isinstance(payload, dict):
-        for key in ("company", "edr", "data", "result"):
-            inner = payload.get(key)
-            if isinstance(inner, dict):
-                return inner
-        if payload.get("name") or payload.get("fullName"):
-            return payload
-    return None
+def _h1_text(page: str) -> str | None:
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", page, re.S)
+    if not m:
+        return None
+    return _squash_spaces(_strip_tags(m.group(1))) or None
 
 
-def _first_str(obj: dict[str, Any], keys: tuple[str, ...]) -> str | None:
-    for k in keys:
-        v = obj.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
+def _map_status(value: str | None) -> str | None:
+    if not value:
+        return None
+    lowered = value.lower()
+    if "зареєстровано" in lowered:
+        return "active"
+    if "припин" in lowered:
+        return "ceased"
+    return value
+
+
+def _parse_capital(value: str | None) -> float | None:
+    if not value:
+        return None
+    m = re.search(r"[\d\s]+(?:[.,]\d+)?", value)
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(" ", "").replace(",", "."))
+    except ValueError:
+        return None
 
 
 def _parse_date(s: str | None) -> date | None:
     if not s:
         return None
+    text = s.strip()
+    m = re.search(r"\d{2}\.\d{2}\.\d{4}", text)
+    if m:
+        try:
+            return datetime.strptime(m.group(0), "%d.%m.%Y").date()
+        except ValueError:
+            return None
     try:
-        return date.fromisoformat(s[:10])
+        return date.fromisoformat(text[:10])
     except ValueError:
-        return None
-
-
-def _coerce_float(v: Any) -> float | None:
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
         return None

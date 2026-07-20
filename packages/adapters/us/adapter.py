@@ -286,7 +286,8 @@ class USAdapter(CountryAdapter):
         forms = recent.get("form") or []
         accessions = recent.get("accessionNumber") or []
         primary_docs = recent.get("primaryDocument") or []
-        period_of_report = recent.get("periodOfReport") or []
+        # SEC submissions JSON calls the fiscal period column "reportDate"
+        period_of_report = recent.get("reportDate") or []
         for form, acc, doc, period in zip(forms, accessions, primary_docs, period_of_report):
             if form != "10-K":
                 continue

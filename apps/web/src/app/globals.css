@@ -404,6 +404,37 @@
 }
 
 /*
+  ---- Print report (Download PDF on the risk assessment) ----
+  html.print-report is set by RiskAnalysisPanel just before window.print():
+  only the [data-print-report] subtree prints, ink-on-paper.
+*/
+
+.print-only {
+  display: none;
+}
+
+@media print {
+  html.print-report body * {
+    visibility: hidden;
+  }
+  html.print-report [data-print-report],
+  html.print-report [data-print-report] * {
+    visibility: visible;
+  }
+  html.print-report [data-print-report] {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 1.5cm;
+  }
+  html.print-report .print-only {
+    display: block;
+    visibility: visible;
+  }
+}
+
+/*
   ---- Theme shade-pull ----
   Switching themes pulls the new theme down over the old one like a
   window shade, with a gilt edge riding the reveal line.

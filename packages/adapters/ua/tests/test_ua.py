@@ -12,7 +12,10 @@ from packages.shared.models import IdentifierType
 async def test_search_finds_naftogaz():
     adapter = UAAdapter()
     matches = await adapter.search_by_name("Naftogaz", limit=5)
-    assert any("naftogaz" in m.name.lower() for m in matches)
+    # Clarity returns registry names in Ukrainian Cyrillic.
+    assert any(
+        m.id == "20077720" or "нафтогаз" in m.name.lower() for m in matches
+    )
 
 
 @pytest.mark.asyncio
