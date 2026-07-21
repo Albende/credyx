@@ -647,6 +647,30 @@ async def _run_risk_job(job_id: UUID) -> None:
                 if (f.structured_data or {}).get("pdf_text_excerpts")
             }
 
+            # Extract structured figures from each filing's text so the
+            # DETERMINISTIC ratio engine has numbers to work with. The model
+            # only reports figures printed in the document; Python computes
+            # every ratio. Adapters that already ship structured data
+            # (XBRL raw_concepts / balance_sheet) are skipped.
+            from packages.llm.service import get_llm_service
+
+            llm = get_llm_service()
+            for f in filings:
+                sd = dict(f.structured_data or {})
+                text = sd.get("pdf_text_excerpts")
+                has_numbers = bool(
+                    sd.get("balance_sheet") or sd.get("income_statement") or sd.get("raw_concepts")
+                )
+                if not text or has_numbers:
+                    continue
+                extracted = await llm.extract_financials(
+                    details.name, f.year, f.currency, text
+                )
+                if extracted:
+                    sd["balance_sheet"] = extracted.get("balance_sheet") or {}
+                    sd["income_statement"] = extracted.get("income_statement") or {}
+                    f.structured_data = sd
+
             engine = get_risk_engine()
             assessment = await engine.analyze(
                 details, filings, pdf_text_excerpts=pdf_text_excerpts or None

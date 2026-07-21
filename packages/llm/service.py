@@ -104,6 +104,86 @@ class LLMService:
         parsed.model_used = self.provider.name
         return parsed
 
+    async def extract_financials(
+        self, company_name: str, year: int, currency: str | None, text: str
+    ) -> dict[str, Any] | None:
+        """Extract balance-sheet + income-statement figures from a filing's
+        text into the unified schema the ratio engine reads.
+
+        This is pure extraction of numbers already printed in the document —
+        the model reports figures, it never computes ratios. Missing lines
+        must be null; nothing may be invented.
+        """
+        if not text or not text.strip():
+            return None
+        system = (
+            "You are a financial-statement data extractor. From the filing text "
+            "you return ONLY figures that are explicitly stated in it, as raw "
+            "numbers in the reporting currency (no thousands/millions scaling "
+            "words — expand them to full numbers). Never estimate, never "
+            "compute, never invent. Any line not present in the text must be null."
+        )
+        user = (
+            f"Company: {company_name}\nFiscal year: {year}\n"
+            f"Reporting currency: {currency or 'unknown'}\n\n"
+            "Filing text (may be truncated):\n"
+            f"{text[:40000]}\n\n"
+            "Extract into this exact JSON schema (numbers or null):"
+        )
+        try:
+            raw = await self.provider.generate_json(
+                system=system,
+                user=user,
+                schema_hint=_EXTRACT_SCHEMA,
+                temperature=0.0,
+                max_output_tokens=1024,
+            )
+        except Exception as exc:
+            logger.warning("Financial extraction failed for %s %s: %s", company_name, year, exc)
+            return None
+        bs = raw.get("balance_sheet") if isinstance(raw, dict) else None
+        inc = raw.get("income_statement") if isinstance(raw, dict) else None
+        if not isinstance(bs, dict) and not isinstance(inc, dict):
+            return None
+        clean = {
+            "currency": currency,
+            "balance_sheet": {k: v for k, v in (bs or {}).items() if isinstance(v, (int, float))},
+            "income_statement": {k: v for k, v in (inc or {}).items() if isinstance(v, (int, float))},
+        }
+        if not clean["balance_sheet"] and not clean["income_statement"]:
+            return None
+        return clean
+
+
+_EXTRACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "balance_sheet": {
+            "type": "object",
+            "properties": {
+                k: {"type": ["number", "null"]}
+                for k in (
+                    "total_assets", "current_assets", "non_current_assets",
+                    "total_liabilities", "current_liabilities", "non_current_liabilities",
+                    "total_equity", "share_capital", "retained_earnings",
+                    "inventory", "cash",
+                )
+            },
+        },
+        "income_statement": {
+            "type": "object",
+            "properties": {
+                k: {"type": ["number", "null"]}
+                for k in (
+                    "revenue", "gross_profit", "operating_profit", "ebitda",
+                    "net_income", "cost_of_sales", "depreciation_amortization",
+                    "interest_expense",
+                )
+            },
+        },
+    },
+}
+
 
 @lru_cache(maxsize=1)
 def get_llm_service() -> LLMService:

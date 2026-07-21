@@ -47,15 +47,15 @@ const TEAM: Member[] = [
   },
   {
     name: "Tural Jabbarov",
-    role: "Co-Founder & Head of Credit Risk",
+    role: "Co-Founder",
     initials: "TJ",
     location: "Poznań, Poland · Hybrid",
     linkedin: "https://www.linkedin.com/in/tural-jabbarov-phd-c-6b89a211b/",
-    bio: "Tural brings a decade of front-line credit-risk leadership — Credit Risk Manager for EMEA at ADM, Regional AR & Credit Controller at Sony Europe, and Credit Risk Assessment Analyst at Shell. A PhD candidate in the field, he shapes Credyx's scoring methodology, industry ratio benchmarks and the analyst-grade judgment behind every assessment.",
+    bio: "Tural brings a decade of front-line credit-risk leadership across global industrial and consumer businesses — as a Credit Risk Manager for EMEA, a Regional AR & Credit Controller, and a Credit Risk Assessment Analyst. A PhD candidate in the field, he shapes Credyx's scoring methodology, industry ratio benchmarks and the analyst-grade judgment behind every assessment.",
     highlights: [
-      "Credit Risk Manager, EMEA — ADM",
-      "AR & Credit Controller — Sony Europe",
-      "Credit Risk Analyst — Shell",
+      "Credit Risk Manager, EMEA",
+      "AR & Credit Controller",
+      "Credit Risk Assessment Analyst",
     ],
     gradient:
       "linear-gradient(135deg, hsl(var(--color-brand-secondary)) 0%, hsl(var(--color-brand-primary)) 60%, hsl(var(--color-accent)) 100%)",
