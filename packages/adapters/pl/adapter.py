@@ -1,45 +1,53 @@
-"""Poland adapter — KRS (Ministry of Justice) + Biała Lista (Ministry of Finance).
+"""Poland adapter — resolves ANY Polish business, companies *and* sole traders.
 
-Free, no auth, two stitched sources:
+Two registers cover Polish business in full:
 
-- KRS REST `https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs}?rejestr=P|S`
-  returns the full registry extract for a company (name, address, capital,
-  NIP/REGON, NACE/PKD, governing bodies). Personal-data fields (PESEL,
-  surnames of board members) are masked by the registry itself.
+- **KRS** (Krajowy Rejestr Sądowy) — companies / spółki. `api-krs.ms.gov.pl`
+  serves the full registry extract (`OdpisAktualny`) and filing history
+  (`OdpisPelny`) as JSON, key-free.
+- **CEIDG** (Centralna Ewidencja i Informacja o Działalności Gospodarczej) —
+  sole proprietorships (jednoosobowa działalność gospodarcza / JDG). These
+  are *not* in KRS. The authoritative source is the CEIDG v3 REST warehouse
+  at `dane.biznes.gov.pl/api/ceidg/v3`, which is the only free source that
+  supports free-text **name** search over sole traders. It needs a free JWT
+  (env `PL_CEIDG_TOKEN`, see docs/countries/pl.md for the registration
+  steps). When configured it powers sole-trader name search and enriches
+  sole-trader lookups with the full trade name, PKD codes, and contacts.
 
-- Biała Lista (white list of VAT payers)
-  `https://wl-api.mf.gov.pl/api/search/nip/{nip}?date=YYYY-MM-DD` resolves a
-  NIP / VAT number to the matching KRS, plus VAT status and bank accounts.
+Sources stitched here, all free:
+
+- KRS REST `OdpisAktualny/{krs}?rejestr=P|S` — company registry extract.
+- CEIDG v3 `firmy?nazwa=` / `firma?nip=|regon=` — sole traders (+ companies)
+  by name / identifier. Bearer JWT.
+- Biała Lista (white list of VAT payers) `search/nip/{nip}` and
+  `search/regon/{regon}` — keyless. Resolves a NIP **or REGON** to the
+  matching subject: for a company it yields the KRS; for a sole trader it
+  yields real registry identity (legal name, REGON, address, registration
+  date, VAT status, bank accounts) with no KRS. This is the always-on,
+  key-free identifier path that resolves sole traders even without a CEIDG
+  token.
+- GLEIF JSON:API — name → KRS for LEI-registered companies (keyless).
+- MSiG (Monitor Sądowy i Gospodarczy) — downloadable gazette PDFs for KRS
+  financial filings.
 
 Identifiers supported:
-    KRS    — 10-digit court registry number (primary).
-    NIP    — 10-digit tax id; same value as the Polish VAT number with a "PL"
-             prefix. Treated as both NIP and VAT here.
-    REGON  — 9 or 14-digit statistical id; GUS BIR API would be the canonical
-             resolver but requires a free key with manual approval, so we only
-             accept REGON values that we can also pull out of the KRS payload.
-
-Name search (see docs/countries/pl.md):
-
-- The official KRS web search (`wyszukiwarka-krs.ms.gov.pl`) is behind
-  Incapsula and only usable through a browser session. Instead we resolve
-  names through GLEIF's public JSON:API: Polish LEI records carry their KRS
-  number in `entity.registeredAs` under registration authority `RA000484`
-  (Krajowy Rejestr Sądowy), so a name hit yields a KRS this adapter can then
-  look up and file against. Coverage is limited to LEI-registered entities.
+    KRS    — 10-digit court registry number (companies only).
+    NIP    — 10-digit tax id; same value as the Polish VAT (with a "PL"
+             prefix). Every Polish business — company or sole trader — has one.
+    REGON  — 9 or 14-digit statistical id. Resolved key-free via Biała Lista.
 
 Financials:
 
-- The registry doesn't expose statement files over a bot-friendly endpoint,
-  but `OdpisPelny` records every filing mention (period, submission date,
-  entry id). Each becomes a `FinancialFiling`. `document_url` is backfilled
-  from MSiG (Monitor Sądowy i Gospodarczy), whose search API is *not* behind
-  Incapsula: RDF-signature announcements are the financial filings, and
-  `Monitor/Download?id=<id>` serves the real gazette-issue PDF.
+- Companies: `OdpisPelny` records every filing mention (period, submission
+  date, entry id); each becomes a `FinancialFiling`, deep-linked to the real
+  MSiG gazette PDF.
+- Sole traders: JDG file no public financial statements, so `fetch_financials`
+  honestly returns `[]` for them — the registry identity is the win.
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import date, datetime
 from typing import Any
@@ -48,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
+    AdapterError,
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
@@ -68,6 +77,27 @@ _KRS_RE = re.compile(r"^\d{10}$")
 _NIP_RE = re.compile(r"^\d{10}$")
 _REGON_RE = re.compile(r"^\d{9}(?:\d{5})?$")
 _NIP_WEIGHTS = (6, 5, 7, 2, 3, 4, 5, 6, 7)
+
+_CEIDG_TOKEN_ENVS = ("PL_CEIDG_TOKEN", "PL_CEIDG_JWT")
+
+_CEIDG_STATUS_MAP = {
+    "AKTYWNY": "active",
+    "ZAWIESZONY": "suspended",
+    "WYKRESLONY": "ceased",
+    "OCZEKUJE_NA_ROZPOCZECIE_DZIALANOSCI": "pending",
+    "WYLACZNIE_W_FORMIE_SPOLKI": "active",
+}
+
+_SOLE_TRADER_FORM = "Jednoosobowa działalność gospodarcza (sole proprietorship)"
+_BIALA_LISTA_PUBLIC = "https://www.podatki.gov.pl/wykaz-podatnikow-vat-wyszukiwarka"
+
+
+def _ceidg_token() -> str | None:
+    for env in _CEIDG_TOKEN_ENVS:
+        value = os.getenv(env)
+        if value:
+            return value.strip()
+    return None
 
 
 def _normalize_krs(value: str) -> str:
@@ -91,8 +121,20 @@ def _normalize_nip(value: str) -> str:
     return cleaned
 
 
+def _is_valid_nip(value: str) -> bool:
+    cleaned = value.strip().replace(" ", "").replace("-", "").upper()
+    if cleaned.startswith("PL"):
+        cleaned = cleaned[2:]
+    if not _NIP_RE.match(cleaned):
+        return False
+    checksum = sum(int(d) * w for d, w in zip(cleaned[:9], _NIP_WEIGHTS)) % 11
+    return checksum != 10 and checksum == int(cleaned[9])
+
+
 def _normalize_regon(value: str) -> str:
     cleaned = value.strip().replace(" ", "").replace("-", "")
+    if cleaned.isdigit() and len(cleaned) == 8:
+        cleaned = cleaned.zfill(9)
     if not _REGON_RE.match(cleaned):
         raise InvalidIdentifierError(f"REGON must be 9 or 14 digits: {value}")
     return cleaned
@@ -109,12 +151,18 @@ class PLAdapter(CountryAdapter):
     ]
     primary_identifier = IdentifierType.KRS
     requires_api_key = False
+    api_key_env = "PL_CEIDG_TOKEN"
     rate_limit_per_minute = 60
 
     KRS_BASE_URL = "https://api-krs.ms.gov.pl/api/krs"
     WL_BASE_URL = "https://wl-api.mf.gov.pl/api"
+    CEIDG_BASE_URL = "https://dane.biznes.gov.pl/api/ceidg/v3"
     MSIG_BASE_URL = "https://wyszukiwarka-msig.ms.gov.pl/api"
     GLEIF_BASE_URL = "https://api.gleif.org/api/v1"
+
+    # CEIDG throttles hard: a min gap between requests, with a 180 s lockout if
+    # violated. We only ever fire a single CEIDG request per public call.
+    CEIDG_RATE_LIMIT_PER_MINUTE = 16
 
     async def health_check(self) -> AdapterHealth:
         try:
@@ -133,29 +181,114 @@ class PLAdapter(CountryAdapter):
                 capabilities={"search": False, "lookup": False, "financials": False},
                 notes=str(exc)[:200],
             )
+        ceidg = bool(_ceidg_token())
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
             capabilities={"search": True, "lookup": True, "financials": True},
+            requires_api_key=False,
+            api_key_present=ceidg,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup via KRS REST + Biała Lista; name search via GLEIF "
-                "(RA000484 → KRS); filings from KRS OdpisPelny mentions, "
-                "downloadable gazette PDFs backfilled from MSiG."
+                "Companies via KRS REST; sole traders via Biała Lista (NIP/REGON, "
+                "key-free) and CEIDG v3 "
+                + ("(PL_CEIDG_TOKEN set — sole-trader name search on)"
+                   if ceidg else
+                   "(no PL_CEIDG_TOKEN — sole-trader NAME search off; "
+                   "identifier lookup still works)")
+                + "; company name search via GLEIF; KRS filings from OdpisPelny "
+                "+ MSiG gazette PDFs."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        """Resolve a company name to KRS-keyed matches via GLEIF.
+        """Resolve a business name to matches across both Polish registers.
 
-        The official KRS web search (`wyszukiwarka-krs.ms.gov.pl`) is fronted
-        by Incapsula and only usable through a full browser session, so it is
-        not a reliable request-path source. GLEIF's public JSON:API covers the
-        Polish register keyed by name, and — because every Polish LEI record
-        carries its KRS number in `entity.registeredAs` under registration
-        authority `RA000484` (Krajowy Rejestr Sądowy) — a name hit resolves
-        straight to a KRS the rest of this adapter can look up and file against.
+        Layered, best-source-first:
+
+        1. **CEIDG v3** (`PL_CEIDG_TOKEN`) — sole proprietors *and* companies by
+           name. The only free source that indexes JDG by name; skipped
+           silently when no token is configured.
+        2. **GLEIF** — companies keyed by name whose Polish LEI record carries a
+           KRS (`entity.registeredAs` under authority `RA000484`). Key-free.
+
+        Results are de-duplicated by NIP / KRS / LEI and capped at ``limit``.
+        """
+        matches: list[CompanyMatch] = []
+        seen: set[str] = set()
+
+        for source in (self._ceidg_search_by_name, self._gleif_search_by_name):
+            if len(matches) >= limit:
+                break
+            for match in await source(name, limit):
+                key = _match_key(match)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(match)
+                if len(matches) >= limit:
+                    break
+        return matches
+
+    async def lookup_by_identifier(
+        self, id_type: IdentifierType, value: str
+    ) -> CompanyDetails | None:
+        if id_type == IdentifierType.KRS:
+            return await self._lookup_krs(_normalize_krs(value))
+        if id_type in (IdentifierType.NIP, IdentifierType.VAT):
+            return await self._lookup_by_nip(_normalize_nip(value))
+        if id_type == IdentifierType.REGON:
+            return await self._lookup_by_regon(_normalize_regon(value))
+        raise InvalidIdentifierError(
+            f"PL supports KRS / NIP / VAT / REGON, got {id_type}"
+        )
+
+    async def fetch_financials(
+        self, company_id: str, years: int = 5
+    ) -> list[FinancialFiling]:
+        cleaned = (company_id or "").strip().replace(" ", "").replace("-", "")
+        # Sole proprietors (CEIDG / JDG) file no public financial statements.
+        # Their adapter id is their NIP (never zero-padded, unlike a KRS), so a
+        # valid non-zero-leading NIP means "sole trader → nothing to fetch".
+        if not cleaned.startswith("0") and _is_valid_nip(cleaned):
+            return []
+
+        krs = _normalize_krs(company_id)
+        async with build_http_client(base_url=self.KRS_BASE_URL) as client:
+            resp = await get_with_retry(
+                client,
+                f"/OdpisPelny/{krs}",
+                params={"rejestr": "P", "format": "json"},
+            )
+            if resp.status_code == 404:
+                resp = await get_with_retry(
+                    client,
+                    f"/OdpisPelny/{krs}",
+                    params={"rejestr": "S", "format": "json"},
+                )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+        filings = _extract_filings(krs, payload, years=years)
+        try:
+            await _enrich_with_msig(filings, krs)
+        except Exception as exc:
+            logger.warning("MSiG enrichment failed for KRS %s: %s", krs, exc)
+        return filings
+
+    # --- Name search sources ------------------------------------------------
+
+    async def _gleif_search_by_name(
+        self, name: str, limit: int
+    ) -> list[CompanyMatch]:
+        """Companies by name via GLEIF (LEI-registered → KRS). Key-free.
+
+        The official KRS web search (`wyszukiwarka-krs.ms.gov.pl`) is fronted by
+        Incapsula and only usable through a full browser session, so GLEIF's
+        public JSON:API is the request-path name source: every Polish LEI record
+        carries its KRS in `entity.registeredAs` under authority `RA000484`.
         """
         params: dict[str, str | int] = {
             "filter[entity.legalName]": name,
@@ -182,56 +315,50 @@ class PLAdapter(CountryAdapter):
                 break
         return matches
 
-    async def lookup_by_identifier(
-        self, id_type: IdentifierType, value: str
-    ) -> CompanyDetails | None:
-        if id_type == IdentifierType.KRS:
-            krs = _normalize_krs(value)
-            return await self._lookup_krs(krs)
-        if id_type in (IdentifierType.NIP, IdentifierType.VAT):
-            nip = _normalize_nip(value)
-            krs = await self._krs_from_nip(nip)
-            if not krs:
-                return None
-            return await self._lookup_krs(krs)
-        if id_type == IdentifierType.REGON:
-            # GUS BIR API needs a free-but-manually-approved key; without it
-            # we cannot resolve REGON → KRS authoritatively. Surface this
-            # rather than guess, so the caller can fall back to NIP/KRS.
-            raise AdapterNotImplementedError(
-                "REGON lookup requires GUS BIR API key (not configured in MVP). "
-                "Use KRS or NIP instead."
-            )
-        raise InvalidIdentifierError(
-            f"PL supports KRS / NIP / VAT / REGON, got {id_type}"
-        )
+    async def _ceidg_search_by_name(
+        self, name: str, limit: int
+    ) -> list[CompanyMatch]:
+        """Sole proprietors (and companies) by name via CEIDG v3.
 
-    async def fetch_financials(
-        self, company_id: str, years: int = 5
-    ) -> list[FinancialFiling]:
-        krs = _normalize_krs(company_id)
-        async with build_http_client(base_url=self.KRS_BASE_URL) as client:
-            resp = await get_with_retry(
-                client,
-                f"/OdpisPelny/{krs}",
-                params={"rejestr": "P", "format": "json"},
+        This is the only free source that indexes CEIDG / JDG entries by name.
+        Returns `[]` (rather than raising) when no `PL_CEIDG_TOKEN` is set so
+        the GLEIF company layer still runs — a missing token degrades
+        sole-trader name search, it doesn't break the adapter.
+        """
+        token = _ceidg_token()
+        if not token:
+            return []
+        page_limit = max(1, min(int(limit), 50))
+        params = [("nazwa", name), ("limit", str(page_limit)), ("page", "0")]
+        async with build_http_client(
+            base_url=self.CEIDG_BASE_URL,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        ) as client:
+            resp = await get_with_retry(client, "/firmy", params=params)
+        if resp.status_code == 204:
+            return []
+        if resp.status_code in (401, 403):
+            raise AdapterError(
+                "CEIDG v3 rejected PL_CEIDG_TOKEN "
+                f"(HTTP {resp.status_code}); token invalid or expired."
             )
-            if resp.status_code == 404:
-                resp = await get_with_retry(
-                    client,
-                    f"/OdpisPelny/{krs}",
-                    params={"rejestr": "S", "format": "json"},
-                )
-            if resp.status_code == 404:
-                return []
-            resp.raise_for_status()
-            payload = resp.json()
-        filings = _extract_filings(krs, payload, years=years)
-        try:
-            await _enrich_with_msig(filings, krs)
-        except Exception as exc:
-            logger.warning("MSiG enrichment failed for KRS %s: %s", krs, exc)
-        return filings
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        payload = resp.json()
+        matches: list[CompanyMatch] = []
+        for item in payload.get("firmy") or []:
+            match = _ceidg_item_to_match(item)
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    # --- Identifier lookups -------------------------------------------------
 
     async def _lookup_krs(self, krs: str) -> CompanyDetails | None:
         async with build_http_client(base_url=self.KRS_BASE_URL) as client:
@@ -253,23 +380,117 @@ class PLAdapter(CountryAdapter):
             data = resp.json()
         return _details_from_odpis(krs, data)
 
-    async def _krs_from_nip(self, nip: str) -> str | None:
+    async def _lookup_by_nip(self, nip: str) -> CompanyDetails | None:
+        subject = await self._biala_subject(f"/search/nip/{nip}")
+        if subject is None:
+            # Not a VAT payer (some JDG aren't) — CEIDG is the only fallback.
+            return await self._ceidg_details(nip=nip)
+        krs = subject.get("krs")
+        if krs:
+            return await self._lookup_krs(_normalize_krs(krs))
+        details = _sole_trader_details_from_biala(subject)
+        await self._enrich_sole_trader(details, nip=subject.get("nip") or nip)
+        return details
+
+    async def _lookup_by_regon(self, regon: str) -> CompanyDetails | None:
+        subject = await self._biala_subject(f"/search/regon/{regon}")
+        if subject is None:
+            return await self._ceidg_details(regon=regon)
+        krs = subject.get("krs")
+        if krs:
+            return await self._lookup_krs(_normalize_krs(krs))
+        details = _sole_trader_details_from_biala(subject)
+        await self._enrich_sole_trader(
+            details, nip=subject.get("nip"), regon=subject.get("regon") or regon
+        )
+        return details
+
+    async def _biala_subject(self, path: str) -> dict[str, Any] | None:
         today = datetime.utcnow().strftime("%Y-%m-%d")
         async with build_http_client(base_url=self.WL_BASE_URL) as client:
-            resp = await get_with_retry(
-                client,
-                f"/search/nip/{nip}",
-                params={"date": today},
-            )
-            if resp.status_code == 404:
+            resp = await get_with_retry(client, path, params={"date": today})
+            if resp.status_code in (400, 404):
                 return None
             resp.raise_for_status()
             payload = resp.json()
-        subject = ((payload.get("result") or {}).get("subject")) or {}
-        krs = subject.get("krs")
-        if not krs:
+        return ((payload.get("result") or {}).get("subject")) or None
+
+    # --- CEIDG detail (sole-trader enrichment) ------------------------------
+
+    async def _ceidg_firma(
+        self,
+        *,
+        nip: str | None = None,
+        regon: str | None = None,
+    ) -> dict[str, Any] | None:
+        token = _ceidg_token()
+        if not token:
             return None
-        return _normalize_krs(krs)
+        params: dict[str, str] = {}
+        if nip:
+            params["nip"] = nip
+        elif regon:
+            params["regon"] = regon
+        else:
+            return None
+        async with build_http_client(
+            base_url=self.CEIDG_BASE_URL,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        ) as client:
+            resp = await get_with_retry(client, "/firma", params=params)
+        if resp.status_code in (204, 404):
+            return None
+        if resp.status_code in (401, 403):
+            raise AdapterError(
+                "CEIDG v3 rejected PL_CEIDG_TOKEN "
+                f"(HTTP {resp.status_code}); token invalid or expired."
+            )
+        resp.raise_for_status()
+        entries = (resp.json() or {}).get("firma") or []
+        if isinstance(entries, dict):
+            entries = [entries]
+        return entries[0] if entries else None
+
+    async def _ceidg_details(
+        self, *, nip: str | None = None, regon: str | None = None
+    ) -> CompanyDetails | None:
+        """Build a sole-trader record purely from CEIDG (Biała Lista missed)."""
+        if not _ceidg_token():
+            raise AdapterError(
+                "This identifier resolves to a CEIDG sole trader not on the "
+                "VAT white list; set PL_CEIDG_TOKEN to look it up. See "
+                "docs/countries/pl.md for the free-registration steps."
+            )
+        firma = await self._ceidg_firma(nip=nip, regon=regon)
+        if firma is None:
+            return None
+        return _ceidg_firma_to_details(firma)
+
+    async def _enrich_sole_trader(
+        self,
+        details: CompanyDetails,
+        *,
+        nip: str | None = None,
+        regon: str | None = None,
+    ) -> None:
+        """Overlay the CEIDG trade name, PKD codes, and contacts onto a
+        Biała-Lista-derived sole-trader record. No-op without a token."""
+        if not _ceidg_token():
+            return
+        try:
+            firma = await self._ceidg_firma(nip=nip, regon=regon)
+        except AdapterError as exc:
+            logger.warning("CEIDG enrichment skipped: %s", exc)
+            return
+        if firma is None:
+            return
+        _merge_ceidg_into_details(details, firma)
+
+
+# --- KRS (company) parsing --------------------------------------------------
 
 
 def _details_from_odpis(krs: str, payload: dict[str, Any]) -> CompanyDetails:
@@ -348,6 +569,199 @@ def _details_from_odpis(krs: str, payload: dict[str, Any]) -> CompanyDetails:
     )
 
 
+# --- CEIDG (sole-trader) parsing --------------------------------------------
+
+
+def _sole_trader_identifiers(
+    nip: str | None, regon: str | None
+) -> list[RegistryIdentifier]:
+    identifiers: list[RegistryIdentifier] = []
+    if nip:
+        identifiers.append(
+            RegistryIdentifier(type=IdentifierType.NIP, value=nip, label="NIP")
+        )
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.VAT, value=f"PL{nip}", label="VAT"
+            )
+        )
+    if regon:
+        identifiers.append(
+            RegistryIdentifier(
+                type=IdentifierType.REGON, value=regon, label="REGON"
+            )
+        )
+    return identifiers
+
+
+def _sole_trader_details_from_biala(subject: dict[str, Any]) -> CompanyDetails:
+    """A JDG identity from the VAT white list — key-free registry data.
+
+    Biała Lista returns the taxpayer's legal name (owner name), not the full
+    trade name; the full "AKTIV JUSTYNA OSIP"-style trading name comes from
+    CEIDG enrichment when a token is set.
+    """
+    nip = subject.get("nip")
+    regon = subject.get("regon")
+    registration = _parse_pl_date(subject.get("registrationLegalDate"))
+    removal = _parse_pl_date(subject.get("removalDate"))
+    address = subject.get("residenceAddress") or subject.get("workingAddress")
+    accounts = subject.get("accountNumbers") or []
+    return CompanyDetails(
+        id=nip or regon or "",
+        name=subject.get("name", "") or "",
+        country="PL",
+        legal_form=_SOLE_TRADER_FORM,
+        status=("ceased" if removal else "active"),
+        incorporation_date=registration,
+        dissolution_date=removal,
+        registered_address=address,
+        identifiers=_sole_trader_identifiers(nip, regon),
+        raw={
+            "source": "biala_lista",
+            "vat_status": subject.get("statusVat"),
+            "bank_accounts": accounts,
+            "subject": subject,
+        },
+        source_url=_BIALA_LISTA_PUBLIC,
+    )
+
+
+def _ceidg_firma_to_details(firma: dict[str, Any]) -> CompanyDetails:
+    wlasciciel = firma.get("wlasciciel") or {}
+    nip = wlasciciel.get("nip")
+    regon = wlasciciel.get("regon")
+    entry_id = firma.get("id")
+    return CompanyDetails(
+        id=nip or regon or str(entry_id or ""),
+        name=firma.get("nazwa", "") or "",
+        country="PL",
+        legal_form=_SOLE_TRADER_FORM,
+        status=_CEIDG_STATUS_MAP.get(str(firma.get("status") or "").upper()),
+        incorporation_date=_parse_iso_date(firma.get("dataRozpoczecia")),
+        dissolution_date=_parse_iso_date(
+            firma.get("dataZakonczenia") or firma.get("dataWykreslenia")
+        ),
+        registered_address=_format_ceidg_address(firma.get("adresDzialalnosci")),
+        nace_codes=_extract_ceidg_pkd(firma),
+        identifiers=_sole_trader_identifiers(nip, regon),
+        website=(firma.get("www") or None),
+        email=(firma.get("email") or None),
+        phone=(firma.get("telefon") or None),
+        raw={"source": "ceidg_v3", "firma": firma},
+        source_url=_ceidg_public_detail_url(entry_id),
+    )
+
+
+def _merge_ceidg_into_details(
+    details: CompanyDetails, firma: dict[str, Any]
+) -> None:
+    if firma.get("nazwa"):
+        details.name = firma["nazwa"]
+    if not details.legal_form:
+        details.legal_form = _SOLE_TRADER_FORM
+    status = _CEIDG_STATUS_MAP.get(str(firma.get("status") or "").upper())
+    if status:
+        details.status = status
+    started = _parse_iso_date(firma.get("dataRozpoczecia"))
+    if started:
+        details.incorporation_date = started
+    ended = _parse_iso_date(
+        firma.get("dataZakonczenia") or firma.get("dataWykreslenia")
+    )
+    if ended:
+        details.dissolution_date = ended
+    pkd = _extract_ceidg_pkd(firma)
+    if pkd:
+        details.nace_codes = pkd
+    ceidg_address = _format_ceidg_address(firma.get("adresDzialalnosci"))
+    if ceidg_address:
+        details.registered_address = ceidg_address
+    details.website = firma.get("www") or details.website
+    details.email = firma.get("email") or details.email
+    details.phone = firma.get("telefon") or details.phone
+    entry_id = firma.get("id")
+    if entry_id:
+        details.source_url = _ceidg_public_detail_url(entry_id)
+    raw = dict(details.raw or {})
+    raw["ceidg_firma"] = firma
+    details.raw = raw
+
+
+def _ceidg_item_to_match(item: dict[str, Any]) -> CompanyMatch | None:
+    name = item.get("nazwa") or ""
+    if not name:
+        return None
+    wlasciciel = item.get("wlasciciel") or {}
+    nip = wlasciciel.get("nip")
+    regon = wlasciciel.get("regon")
+    entry_id = item.get("id")
+    identifiers = _sole_trader_identifiers(nip, regon)
+    return CompanyMatch(
+        id=nip or regon or str(entry_id or name),
+        name=name,
+        country="PL",
+        identifiers=identifiers,
+        address=_format_ceidg_address(item.get("adresDzialalnosci")),
+        status=_CEIDG_STATUS_MAP.get(str(item.get("status") or "").upper()),
+        source_url=_ceidg_public_detail_url(entry_id),
+    )
+
+
+def _ceidg_public_detail_url(entry_id: Any) -> str:
+    if entry_id:
+        return (
+            "https://aplikacja.ceidg.gov.pl/CEIDG/CEIDG.Public.UI/"
+            f"SearchDetails.aspx?Id={entry_id}"
+        )
+    return "https://aplikacja.ceidg.gov.pl/CEIDG/CEIDG.Public.UI/Search.aspx"
+
+
+def _extract_ceidg_pkd(firma: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    glowny = firma.get("pkdGlowny") or {}
+    for entry in [glowny, *(firma.get("pkd") or [])]:
+        if not isinstance(entry, dict):
+            continue
+        code = _format_pkd(entry.get("kod") or entry.get("symbol"))
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _format_pkd(raw: Any) -> str | None:
+    if not raw:
+        return None
+    cleaned = str(raw).strip().upper().replace(".", "")
+    match = re.match(r"^(\d{2})(\d{2})([A-Z])?$", cleaned)
+    if not match:
+        return cleaned or None
+    dzial, klasa, litera = match.groups()
+    code = f"{dzial}.{klasa}"
+    if litera:
+        code = f"{code}.{litera}"
+    return code
+
+
+def _format_ceidg_address(adr: dict[str, Any] | None) -> str | None:
+    if not adr:
+        return None
+    street = " ".join(
+        str(p).strip() for p in (adr.get("ulica"), adr.get("budynek")) if p
+    )
+    lokal = adr.get("lokal")
+    if lokal:
+        street = f"{street}/{lokal}" if street else str(lokal)
+    city = " ".join(
+        str(p).strip() for p in (adr.get("kod"), adr.get("miasto")) if p
+    )
+    parts = [p for p in (street, city, adr.get("kraj")) if p and str(p).strip()]
+    return ", ".join(str(p).strip() for p in parts) or None
+
+
+# --- GLEIF (company name → KRS) ---------------------------------------------
+
+
 _KRS_REGISTRATION_AUTHORITY = "RA000484"
 
 
@@ -394,6 +808,20 @@ def _gleif_record_to_match(record: dict[str, Any]) -> CompanyMatch | None:
     )
 
 
+def _match_key(match: CompanyMatch) -> str:
+    priority = (
+        IdentifierType.NIP,
+        IdentifierType.KRS,
+        IdentifierType.REGON,
+        IdentifierType.LEI,
+    )
+    by_type = {i.type: i.value for i in match.identifiers}
+    for id_type in priority:
+        if id_type in by_type:
+            return f"{id_type.value}:{by_type[id_type]}"
+    return f"id:{match.id}"
+
+
 def _format_gleif_address(address: dict[str, Any]) -> str | None:
     parts: list[str] = []
     lines = address.get("addressLines")
@@ -405,6 +833,9 @@ def _format_gleif_address(address: dict[str, Any]) -> str | None:
             parts.append(str(val))
     cleaned = [p.strip() for p in parts if p and str(p).strip()]
     return ", ".join(cleaned) if cleaned else None
+
+
+# --- KRS filings + MSiG -----------------------------------------------------
 
 
 _YEAR_RE = re.compile(r"(\d{4})\s*R")
@@ -498,6 +929,15 @@ def _parse_pl_date(value: str | None) -> date | None:
         if "." in value:
             return datetime.strptime(value[:10], "%d.%m.%Y").date()
         return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
     except ValueError:
         return None
 
