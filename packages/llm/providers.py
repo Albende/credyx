@@ -45,8 +45,10 @@ class KieAIGeminiProvider(LLMProvider):
 
     name = "kie.ai/gemini"
 
-    BASE_URL = "https://api.kie.ai/v1"
-    DEFAULT_MODEL = "gemini-2.0-flash"
+    # kie.ai routes chat models per-slug: https://api.kie.ai/{slug}/v1/...
+    BASE_URL = "https://api.kie.ai"
+    DEFAULT_MODEL = "gemini-3.5-flash"
+    DEFAULT_SLUG = "gemini-3-5-flash-openai"
 
     def __init__(
         self,
@@ -58,6 +60,7 @@ class KieAIGeminiProvider(LLMProvider):
     ) -> None:
         self.api_key = api_key or os.getenv("KIE_AI_API_KEY")
         self.model = model or os.getenv("KIE_AI_MODEL") or self.DEFAULT_MODEL
+        self.slug = os.getenv("KIE_AI_MODEL_SLUG") or self.DEFAULT_SLUG
         self.base_url = (base_url or os.getenv("KIE_AI_BASE_URL") or self.BASE_URL).rstrip("/")
         self.timeout = timeout
 
@@ -95,7 +98,7 @@ class KieAIGeminiProvider(LLMProvider):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        url = f"{self.base_url}/chat/completions"
+        url = f"{self.base_url}/{self.slug}/v1/chat/completions"
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
