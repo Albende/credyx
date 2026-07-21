@@ -1,6 +1,6 @@
 # Credyx — Full Validation Matrix
 
-Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 31, 'WORKING': 63, 'PARTIAL': 16, 'NOT_IMPLEMENTED': 1}
+Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 32, 'WORKING': 62, 'PARTIAL': 16, 'NOT_IMPLEMENTED': 1}
 
 | CC | Company | Verdict | Search | Lookup | Financials | DL | DL check | Error |
 |----|---------|---------|--------|--------|------------|----|----------|-------|
@@ -15,7 +15,7 @@ Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 31,
 | BA | Telekom Srpske | **WORKING** | pass | pass | pass(3) |  |  |  |
 | BD | Grameenphone Ltd | **WORKING** | pass | pass | pass(3) |  |  |  |
 | BE | Anheuser-Busch InBev | **WORKING** | pass | pass | pass(12) | ✓ | OK application/octet-str |  |
-| BG | Sopharma | **PARTIAL** | empty | FAIL:AssertionError: | pass(4) | ✓ | OK application/pdf | FAIL:AssertionError: |
+| BG | Sopharma | **PARTIAL** | empty | pass | pass(4) | ✓ | OK application/pdf |  |
 | BH | Bahrain Telecommunicatio | **BROKEN** | not_impl | not_impl | empty |  |  |  |
 | BO | Banco Mercantil | **WORKING** | pass | pass | pass(3) |  |  |  |
 | BR | Petrobras | **WORKING** | pass | pass | pass(3) | ✓ | FAIL ReadError |  |
@@ -30,7 +30,7 @@ Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 31,
 | CO | Alpina | **WORKING** | pass | pass | pass(3) | ✓ | OK application/json |  |
 | CR | **Florida Ice and Farm C | **WORKING** | pass | pass | pass(3) | ✓ | OK application/pdf |  |
 | CY | Logicom | **WORKING** | pass | pass | pass(1) | ✓ | OK application/zip |  |
-| CZ | ČEZ | **WORKING** | pass | pass | pass(3) | ✓ | OK text/html [Veřejný re |  |
+| CZ | ČEZ | **WORKING** | pass | pass | pass(3) |  |  |  |
 | DE | BMW | **NOT_IMPLEMENTED** | not_impl | not_impl | not_impl |  |  |  |
 | DK | A.P. Møller - Mærsk A/S | **BROKEN** | FAIL:AdapterError:Missing en | FAIL:AdapterError:Missing en | FAIL:AdapterError:Missing en |  |  | FAIL:AdapterError:Missing env var DK_VIRK_USERNAME |
 | DO | Banco Popular Dominicano | **PARTIAL** | pass | pass | TIMEOUT |  |  |  |
@@ -45,7 +45,7 @@ Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 31,
 | GB | BP | **BROKEN** | FAIL:AdapterError:Missing en | FAIL:AdapterError:Missing en | FAIL:AdapterError:Missing en |  |  | FAIL:AdapterError:Missing env var UK_COMPANIES_HOUSE_API_KEY |
 | GE | Silknet | **WORKING** | pass | pass | pass(3) |  |  |  |
 | GH | MTN Ghana | **WORKING** | pass | pass | pass(3) | ✓ | OK application/octet-str |  |
-| GR | Hellenic Telecommunicati | **PARTIAL** | pass | FAIL:RateLimitError:GEMI pub | FAIL:RateLimitError:GEMI pub |  |  | FAIL:RateLimitError:GEMI publicity portal rate-limited the lookup (429) — back o |
+| GR | Hellenic Telecommunicati | **PARTIAL** | pass | FAIL:RateLimitError:GEMI pub | FAIL:HTTPStatusError:Server  |  |  | FAIL:RateLimitError:GEMI publicity portal rate-limited the lookup (429) — back o |
 | HK | Tencent Holdings Ltd | **WORKING** | pass | pass | pass(3) | ✓ | OK application/pdf |  |
 | HR | INA d.d | **BROKEN** | FAIL:AdapterError:Croatian s | FAIL:AdapterError:Croatian s | not_impl |  |  | FAIL:AdapterError:Croatian sudreg open-data API requires OAuth2 client credentia |
 | HU | **OTP Bank Nyrt.** | **PARTIAL** | FAIL:HTTPError:e-beszamolo s | pass | pass(6) |  |  | FAIL:HTTPError:e-beszamolo search rejected: A keresés nem járt eredménnyel.
@@ -68,7 +68,7 @@ Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 31,
 | LK | John Keells Holdings PLC | **WORKING** | pass | pass | pass(4) | ✓ | OK application/pdf |  |
 | LT | Telia Lietuva | **WORKING** | pass | pass | pass(3) |  |  |  |
 | LU | ArcelorMittal | **WORKING** | pass | pass | pass(3) | ✓ | OK application/zip |  |
-| LV | Latvenergo | **PARTIAL** | pass | TIMEOUT | TIMEOUT |  |  |  |
+| LV | Latvenergo | **BROKEN** | TIMEOUT | TIMEOUT | TIMEOUT |  |  |  |
 | MA | Maroc Telecom | **PARTIAL** | empty | pass | pass(3) | ✓ | OK application/zip |  |
 | MD | Moldovagaz | **WORKING** | pass | pass | pass(3) | ✓ | OK application/json |  |
 | ME | Crnogorski Telekom | **WORKING** | pass | pass | pass(3) | ✓ | OK application/pdf |  |
@@ -93,7 +93,7 @@ Run: `python scripts/validate_all.py` — 111 countries. Summary: {'BROKEN': 31,
 | PY | CODIPSA | **WORKING** | pass | pass | pass(3) | ✓ | OK application/zip |  |
 | QA | Qatar National Bank | **PARTIAL** | pass | pass | empty |  |  |  |
 | RO | OMV Petrom S.A. | **PARTIAL** | empty | pass | pass(3) | ✓ | OK application/json |  |
-| RS | NIS | **WORKING** | pass | pass | pass(1) |  |  |  |
+| RS | NIS | **PARTIAL** | pass | pass | TIMEOUT |  |  |  |
 | RU | Сбербанк | **WORKING** | pass | pass | pass(3) |  |  |  |
 | SA | Saudi Telecom Company (S | **WORKING** | pass | pass | pass(3) |  |  |  |
 | SC | SACOS Group | **BROKEN** | not_impl | no_id_testdata | no_id_testdata |  |  |  |

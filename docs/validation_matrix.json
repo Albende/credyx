@@ -1,7 +1,7 @@
 {
  "counts": {
-  "BROKEN": 31,
-  "WORKING": 63,
+  "BROKEN": 32,
+  "WORKING": 62,
   "PARTIAL": 16,
   "NOT_IMPLEMENTED": 1
  },
@@ -38,7 +38,7 @@
    "dl_check": "OK application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
    "top_result": "E.R One Albania",
    "error_detail": "",
-   "elapsed": 2.7,
+   "elapsed": 2.1,
    "verdict": "WORKING"
   },
   {
@@ -55,7 +55,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 1.8,
+   "elapsed": 1.9,
    "verdict": "PARTIAL"
   },
   {
@@ -89,7 +89,7 @@
    "dl_check": "OK text/html [Presentaci&#xF3;n #3522337 - YPF S.A. | 30546689979 - Comisi\u00f3n Nacional de Valores]",
    "top_result": "YPF S.A.",
    "error_detail": "",
-   "elapsed": 22.5,
+   "elapsed": 20.8,
    "verdict": "WORKING"
   },
   {
@@ -106,7 +106,7 @@
    "dl_check": "OK application/zip",
    "top_result": "AE Stromvermarktungs GmbH in Liqu.",
    "error_detail": "",
-   "elapsed": 2.6,
+   "elapsed": 2.4,
    "verdict": "WORKING"
   },
   {
@@ -140,7 +140,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "\"SOCAR GPC\" M\u018fHDUD M\u018fSUL\u0130YY\u018fTL\u0130 C\u018fM\u0130YY\u018fT\u0130",
    "error_detail": "",
-   "elapsed": 33.1,
+   "elapsed": 33.0,
    "verdict": "WORKING"
   },
   {
@@ -157,7 +157,7 @@
    "dl_check": "",
    "top_result": "Telekom Srpske a.d. Banja Luka",
    "error_detail": "",
-   "elapsed": 1.8,
+   "elapsed": 1.9,
    "verdict": "WORKING"
   },
   {
@@ -189,7 +189,7 @@
    "filings": 12,
    "has_download": true,
    "dl_check": "OK application/octet-stream",
-   "top_result": "Anheuser Busch InBev India Ltd.",
+   "top_result": "Anheuser-Busch InBev",
    "error_detail": "",
    "elapsed": 3.1,
    "verdict": "WORKING"
@@ -201,14 +201,14 @@
    "identifier": "831902088",
    "id_type": "COMPANY_NUMBER",
    "search": "empty",
-   "lookup": "FAIL:AssertionError:",
+   "lookup": "pass",
    "financials": "pass(4)",
    "filings": 4,
    "has_download": true,
    "dl_check": "OK application/pdf",
    "top_result": "",
-   "error_detail": "FAIL:AssertionError:",
-   "elapsed": 32.2,
+   "error_detail": "",
+   "elapsed": 3.6,
    "verdict": "PARTIAL"
   },
   {
@@ -225,7 +225,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 2.9,
+   "elapsed": 1.0,
    "verdict": "BROKEN"
   },
   {
@@ -242,7 +242,7 @@
    "dl_check": "",
    "top_result": "BANCO MERCANTIL SANTA CRUZ S.A.",
    "error_detail": "",
-   "elapsed": 14.6,
+   "elapsed": 20.1,
    "verdict": "WORKING"
   },
   {
@@ -259,7 +259,7 @@
    "dl_check": "FAIL ReadError",
    "top_result": "BANCO DO BRASIL SA",
    "error_detail": "",
-   "elapsed": 27.2,
+   "elapsed": 26.9,
    "verdict": "WORKING"
   },
   {
@@ -274,9 +274,9 @@
    "filings": 0,
    "has_download": false,
    "dl_check": "",
-   "top_result": "Sefalana Financial Services Proprietary Limited",
+   "top_result": "Sefalana Farms Proprietary Limited",
    "error_detail": "",
-   "elapsed": 2.7,
+   "elapsed": 4.7,
    "verdict": "PARTIAL"
   },
   {
@@ -293,7 +293,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 90.0,
+   "elapsed": 80.0,
    "verdict": "BROKEN"
   },
   {
@@ -310,7 +310,7 @@
    "dl_check": "OK text/html [shop-20251231]",
    "top_result": "SHOPIFY INC.",
    "error_detail": "",
-   "elapsed": 4.1,
+   "elapsed": 4.2,
    "verdict": "WORKING"
   },
   {
@@ -378,7 +378,7 @@
    "dl_check": "OK text/html []",
    "top_result": "BANCO DE CHILE",
    "error_detail": "",
-   "elapsed": 4.6,
+   "elapsed": 3.6,
    "verdict": "WORKING"
   },
   {
@@ -412,7 +412,7 @@
    "dl_check": "OK application/json",
    "top_result": "ALPINA ANTIOQUIA Z F S.A.",
    "error_detail": "",
-   "elapsed": 5.8,
+   "elapsed": 6.9,
    "verdict": "WORKING"
   },
   {
@@ -429,7 +429,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "FLORIDA ICE AND FARM COMPANY SOCIEDAD ANONIMA",
    "error_detail": "",
-   "elapsed": 3.9,
+   "elapsed": 6.5,
    "verdict": "WORKING"
   },
   {
@@ -446,7 +446,7 @@
    "dl_check": "OK application/zip",
    "top_result": "LOGICOM PUBLIC LIMITED",
    "error_detail": "",
-   "elapsed": 2.8,
+   "elapsed": 3.0,
    "verdict": "WORKING"
   },
   {
@@ -459,11 +459,11 @@
    "lookup": "pass",
    "financials": "pass(3)",
    "filings": 3,
-   "has_download": true,
-   "dl_check": "OK text/html [Ve\u0159ejn\u00fd rejst\u0159\u00edk a Sb\u00edrka listin - Ministerstvo\r\n\tspravedlnosti \u010cesk\u00e9 republiky]",
+   "has_download": false,
+   "dl_check": "",
    "top_result": "\u010cEZ Recyklace, s.r.o.",
    "error_detail": "",
-   "elapsed": 3.1,
+   "elapsed": 3.5,
    "verdict": "WORKING"
   },
   {
@@ -514,7 +514,7 @@
    "dl_check": "",
    "top_result": "BANCO POPULAR DOMINICANO S A BANCO MULTIPLE",
    "error_detail": "",
-   "elapsed": 58.4,
+   "elapsed": 44.9,
    "verdict": "PARTIAL"
   },
   {
@@ -531,7 +531,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "Groupe Saidal",
    "error_detail": "",
-   "elapsed": 6.1,
+   "elapsed": 5.2,
    "verdict": "WORKING"
   },
   {
@@ -548,7 +548,7 @@
    "dl_check": "",
    "top_result": "Banco Pichincha C.A.",
    "error_detail": "FAIL:InvalidIdentifierError:Ecuadorian RUC must be 13 digits: '549300CO09CR3FNOZ392' (got '549300093392')",
-   "elapsed": 0.4,
+   "elapsed": 1.6,
    "verdict": "PARTIAL"
   },
   {
@@ -565,7 +565,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "Bolt Technology O\u00dc",
    "error_detail": "",
-   "elapsed": 2.5,
+   "elapsed": 2.2,
    "verdict": "WORKING"
   },
   {
@@ -582,7 +582,7 @@
    "dl_check": "HTTP 403",
    "top_result": "COMMERCIAL INTERNATIONAL BANK- EGYPT",
    "error_detail": "",
-   "elapsed": 3.8,
+   "elapsed": 4.0,
    "verdict": "WORKING"
   },
   {
@@ -599,7 +599,7 @@
    "dl_check": "OK application/zip",
    "top_result": "TELEFONICA SA",
    "error_detail": "",
-   "elapsed": 12.5,
+   "elapsed": 6.7,
    "verdict": "WORKING"
   },
   {
@@ -633,7 +633,7 @@
    "dl_check": "OK text/xml",
    "top_result": "Asuntotekniikka Oy",
    "error_detail": "",
-   "elapsed": 9.4,
+   "elapsed": 2.9,
    "verdict": "WORKING"
   },
   {
@@ -650,7 +650,7 @@
    "dl_check": "",
    "top_result": "TOTALENERGIES MARKETING FRANCE",
    "error_detail": "",
-   "elapsed": 23.7,
+   "elapsed": 1.9,
    "verdict": "WORKING"
   },
   {
@@ -684,7 +684,7 @@
    "dl_check": "",
    "top_result": "\u10e8\u10de\u10e1 \u10e1\u10d8\u10da\u10d9\u10dc\u10d4\u10e2\u10d8",
    "error_detail": "",
-   "elapsed": 6.9,
+   "elapsed": 7.4,
    "verdict": "WORKING"
   },
   {
@@ -701,7 +701,7 @@
    "dl_check": "OK application/octet-stream",
    "top_result": "MTN Ghana",
    "error_detail": "",
-   "elapsed": 33.0,
+   "elapsed": 19.9,
    "verdict": "WORKING"
   },
   {
@@ -712,13 +712,13 @@
    "id_type": "COMPANY_NUMBER",
    "search": "pass",
    "lookup": "FAIL:RateLimitError:GEMI publicity portal rate-limited the lookup (429) \u2014 back off before retrying.",
-   "financials": "FAIL:RateLimitError:GEMI publicity portal rate-limited the financials fetch (429) \u2014 back off before retrying.",
+   "financials": "FAIL:HTTPStatusError:Server error '504 Gateway Time-out' for url 'https://publicity.businessportal.gr/api/company/details'\nFor more information check: https://de",
    "filings": 0,
    "has_download": false,
    "dl_check": "",
    "top_result": "\u0391\u039d\u0391\u03a0\u03a4\u03a5\u039e\u0399\u0391\u039a\u039f\u03a3 \u039f\u03a1\u0393\u0391\u039d\u0399\u03a3\u039c\u039f\u03a3 \u039c\u039f\u039d\u039f\u03a0\u03a1\u039f\u03a3\u03a9\u03a0\u0397 \u0391\u039d\u03a9\u039d\u03a5\u039c\u0397 \u0395\u03a4\u0391\u0399\u03a1\u0395\u0399\u0391 \u0394\u0397\u039c\u039f\u03a5 \u039a",
    "error_detail": "FAIL:RateLimitError:GEMI publicity portal rate-limited the lookup (429) \u2014 back off before retrying.",
-   "elapsed": 5.4,
+   "elapsed": 21.6,
    "verdict": "PARTIAL"
   },
   {
@@ -735,7 +735,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "TENCENT",
    "error_detail": "",
-   "elapsed": 11.5,
+   "elapsed": 12.8,
    "verdict": "WORKING"
   },
   {
@@ -769,7 +769,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "FAIL:HTTPError:e-beszamolo search rejected: A keres\u00e9s nem j\u00e1rt eredm\u00e9nnyel.\r\n     \r\n \r\n     \r\n     \r\n     \r\n     \r\n\r\n \r\n\r\n \r\n    $(document).ready(function",
-   "elapsed": 7.3,
+   "elapsed": 5.8,
    "verdict": "PARTIAL"
   },
   {
@@ -786,7 +786,7 @@
    "dl_check": "HTTP 403",
    "top_result": "PT Bank Mandiri (Persero) Tbk",
    "error_detail": "",
-   "elapsed": 50.3,
+   "elapsed": 20.5,
    "verdict": "WORKING"
   },
   {
@@ -820,7 +820,7 @@
    "dl_check": "",
    "top_result": "G.A GINAT TEVA LTD / \u05d2.\u05d0 \u05d2\u05d9\u05e0\u05ea \u05d8\u05d1\u05e2 \u05d1\u05e2~\u05de",
    "error_detail": "",
-   "elapsed": 9.7,
+   "elapsed": 11.4,
    "verdict": "WORKING"
   },
   {
@@ -871,7 +871,7 @@
    "dl_check": "",
    "top_result": "Marel Edvaldsson ehf.",
    "error_detail": "",
-   "elapsed": 3.1,
+   "elapsed": 3.4,
    "verdict": "WORKING"
   },
   {
@@ -888,7 +888,7 @@
    "dl_check": "OK application/xhtml+xml",
    "top_result": "MORASSUTTI ENI",
    "error_detail": "",
-   "elapsed": 2.7,
+   "elapsed": 2.5,
    "verdict": "WORKING"
   },
   {
@@ -905,7 +905,7 @@
    "dl_check": "OK application/zip",
    "top_result": "JORDAN PHOSPHATE MINES",
    "error_detail": "",
-   "elapsed": 3.6,
+   "elapsed": 6.2,
    "verdict": "PARTIAL"
   },
   {
@@ -939,7 +939,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "SAFARICOM PLC",
    "error_detail": "",
-   "elapsed": 2.3,
+   "elapsed": 3.3,
    "verdict": "WORKING"
   },
   {
@@ -956,7 +956,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "FAIL:HTTPStatusError:Client error '403 Forbidden' for url 'https://register.minjust.gov.kg/register/?name=Kyrgyzaltyn+OJSC'\nFor more information check: https://d",
-   "elapsed": 0.6,
+   "elapsed": 0.3,
    "verdict": "BROKEN"
   },
   {
@@ -973,7 +973,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "ACLEDA Bank Plc.",
    "error_detail": "",
-   "elapsed": 7.6,
+   "elapsed": 8.2,
    "verdict": "WORKING"
   },
   {
@@ -1041,7 +1041,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "JOHN KEELLS HOLDINGS PLC",
    "error_detail": "",
-   "elapsed": 3.6,
+   "elapsed": 3.7,
    "verdict": "WORKING"
   },
   {
@@ -1058,7 +1058,7 @@
    "dl_check": "",
    "top_result": "Telia Finance AB Lietuvos filialas \"Telia Finance Lietuva\"",
    "error_detail": "",
-   "elapsed": 43.7,
+   "elapsed": 43.1,
    "verdict": "WORKING"
   },
   {
@@ -1075,7 +1075,7 @@
    "dl_check": "OK application/zip",
    "top_result": "ArcelorMittal",
    "error_detail": "",
-   "elapsed": 2.1,
+   "elapsed": 2.3,
    "verdict": "WORKING"
   },
   {
@@ -1084,16 +1084,16 @@
    "company": "Latvenergo",
    "identifier": "40003032949",
    "id_type": "COMPANY_NUMBER",
-   "search": "pass",
+   "search": "TIMEOUT",
    "lookup": "TIMEOUT",
    "financials": "TIMEOUT",
    "filings": 0,
    "has_download": false,
    "dl_check": "",
-   "top_result": "Akciju sabiedr\u012bbas \"Latvenergo\" fili\u0101le \"Daugavas hidroelekt",
+   "top_result": "",
    "error_detail": "",
-   "elapsed": 366.0,
-   "verdict": "PARTIAL"
+   "elapsed": 120.0,
+   "verdict": "BROKEN"
   },
   {
    "country": "MA",
@@ -1109,7 +1109,7 @@
    "dl_check": "OK application/zip",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 1.6,
+   "elapsed": 2.2,
    "verdict": "PARTIAL"
   },
   {
@@ -1126,7 +1126,7 @@
    "dl_check": "OK application/json",
    "top_result": "societatea pe ac\u0163iuni moldo-rus\u0103 moldovagaz",
    "error_detail": "",
-   "elapsed": 25.0,
+   "elapsed": 24.1,
    "verdict": "WORKING"
   },
   {
@@ -1143,7 +1143,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "\"CRNOGORSKI TELEKOM\" A.D. PODGORICA",
    "error_detail": "",
-   "elapsed": 8.2,
+   "elapsed": 8.6,
    "verdict": "WORKING"
   },
   {
@@ -1177,7 +1177,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 91.1,
+   "elapsed": 81.1,
    "verdict": "BROKEN"
   },
   {
@@ -1194,7 +1194,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 4.8,
+   "elapsed": 5.2,
    "verdict": "BROKEN"
   },
   {
@@ -1211,7 +1211,7 @@
    "dl_check": "OK application/zip",
    "top_result": "BANK OF VALLETTA P.L.C.",
    "error_detail": "",
-   "elapsed": 2.4,
+   "elapsed": 2.0,
    "verdict": "WORKING"
   },
   {
@@ -1245,7 +1245,7 @@
    "dl_check": "OK text/html []",
    "top_result": "AMERICA MOVIL S A B DE C V",
    "error_detail": "",
-   "elapsed": 3.1,
+   "elapsed": 2.8,
    "verdict": "WORKING"
   },
   {
@@ -1262,7 +1262,7 @@
    "dl_check": "HTTP 403",
    "top_result": "PUBLIC BANK BERHAD",
    "error_detail": "",
-   "elapsed": 30.1,
+   "elapsed": 39.5,
    "verdict": "WORKING"
   },
   {
@@ -1294,9 +1294,9 @@
    "filings": 9,
    "has_download": true,
    "dl_check": "OK application/pdf",
-   "top_result": "DANGOTE CEMENT DISTRIBUTORS ASSOCIATION OF NIGERIA, OBAJANA",
+   "top_result": "DANGOTE FERTILISER LIMITED",
    "error_detail": "",
-   "elapsed": 3.1,
+   "elapsed": 3.4,
    "verdict": "WORKING"
   },
   {
@@ -1330,7 +1330,7 @@
    "dl_check": "",
    "top_result": "EQUINOR ASA",
    "error_detail": "",
-   "elapsed": 1.9,
+   "elapsed": 1.2,
    "verdict": "WORKING"
   },
   {
@@ -1381,7 +1381,7 @@
    "dl_check": "",
    "top_result": "COMPA\u00d1\u00cdA DE MINAS BUENAVENTURA S.A.A.",
    "error_detail": "",
-   "elapsed": 3.4,
+   "elapsed": 3.6,
    "verdict": "WORKING"
   },
   {
@@ -1398,7 +1398,7 @@
    "dl_check": "OK application/octet-stream",
    "top_result": "SM Investments Corporation",
    "error_detail": "",
-   "elapsed": 9.0,
+   "elapsed": 8.3,
    "verdict": "WORKING"
   },
   {
@@ -1415,7 +1415,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "Habib Bank Limited",
    "error_detail": "",
-   "elapsed": 6.2,
+   "elapsed": 6.3,
    "verdict": "WORKING"
   },
   {
@@ -1432,7 +1432,7 @@
    "dl_check": "OK application/octet-stream",
    "top_result": "ORLEN SP\u00d3\u0141KA AKCYJNA",
    "error_detail": "",
-   "elapsed": 19.0,
+   "elapsed": 5.2,
    "verdict": "WORKING"
   },
   {
@@ -1449,7 +1449,7 @@
    "dl_check": "OK application/xhtml+xml",
    "top_result": "FUNDO EDP CLEANTECH FCR",
    "error_detail": "",
-   "elapsed": 3.3,
+   "elapsed": 2.9,
    "verdict": "WORKING"
   },
   {
@@ -1466,7 +1466,7 @@
    "dl_check": "OK application/zip",
    "top_result": "CODIPSA",
    "error_detail": "",
-   "elapsed": 6.4,
+   "elapsed": 6.5,
    "verdict": "WORKING"
   },
   {
@@ -1483,7 +1483,7 @@
    "dl_check": "",
    "top_result": "The Saudi National Bank ( Qatar branch)",
    "error_detail": "",
-   "elapsed": 2.0,
+   "elapsed": 1.9,
    "verdict": "PARTIAL"
   },
   {
@@ -1500,7 +1500,7 @@
    "dl_check": "OK application/json",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 4.2,
+   "elapsed": 1.6,
    "verdict": "PARTIAL"
   },
   {
@@ -1511,14 +1511,14 @@
    "id_type": "COMPANY_NUMBER",
    "search": "pass",
    "lookup": "pass",
-   "financials": "pass(1)",
-   "filings": 1,
+   "financials": "TIMEOUT",
+   "filings": 0,
    "has_download": false,
    "dl_check": "",
    "top_result": "HITCHEM EXIM DOO NI\u0160",
    "error_detail": "",
-   "elapsed": 61.8,
-   "verdict": "WORKING"
+   "elapsed": 76.0,
+   "verdict": "PARTIAL"
   },
   {
    "country": "RU",
@@ -1534,7 +1534,7 @@
    "dl_check": "",
    "top_result": "\u041e\u0411\u0429\u0415\u0421\u0422\u0412\u041e \u0421 \u041e\u0413\u0420\u0410\u041d\u0418\u0427\u0415\u041d\u041d\u041e\u0419 \u041e\u0422\u0412\u0415\u0422\u0421\u0422\u0412\u0415\u041d\u041d\u041e\u0421\u0422\u042c\u042e \"\u0424\u0418\u041d\u0410\u041d\u0421\u041e\u0412\u0410\u042f \u041a\u041e\u041c\u041f\u0410\u041d\u0418",
    "error_detail": "",
-   "elapsed": 1.9,
+   "elapsed": 1.5,
    "verdict": "WORKING"
   },
   {
@@ -1551,7 +1551,7 @@
    "dl_check": "",
    "top_result": "SAUDI TELECOM COMPANY",
    "error_detail": "",
-   "elapsed": 19.8,
+   "elapsed": 17.7,
    "verdict": "WORKING"
   },
   {
@@ -1585,7 +1585,7 @@
    "dl_check": "OK application/zip",
    "top_result": "Volvo Information Technology Aktiebolag",
    "error_detail": "",
-   "elapsed": 3.4,
+   "elapsed": 3.6,
    "verdict": "WORKING"
   },
   {
@@ -1602,7 +1602,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "DBS GROUP HOLDINGS LTD",
    "error_detail": "",
-   "elapsed": 14.9,
+   "elapsed": 16.5,
    "verdict": "WORKING"
   },
   {
@@ -1619,7 +1619,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "KRKA, tovarna zdravil, d.d., Novo mesto",
    "error_detail": "",
-   "elapsed": 12.4,
+   "elapsed": 9.4,
    "verdict": "WORKING"
   },
   {
@@ -1636,7 +1636,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "VOLKSWAGEN SLOVAKIA, a.s.",
    "error_detail": "",
-   "elapsed": 7.4,
+   "elapsed": 6.4,
    "verdict": "WORKING"
   },
   {
@@ -1670,7 +1670,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "FAIL:HTTPStatusError:Client error '403 Forbidden' for url 'https://datawarehouse.dbd.go.th/api/search?key=PTT+Public+Company+Limited&page=1&pageSize=5'\nFor more ",
-   "elapsed": 3.4,
+   "elapsed": 2.8,
    "verdict": "BROKEN"
   },
   {
@@ -1687,7 +1687,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "FAIL:InvalidIdentifierError:Tunisia Matricule Fiscal must be 7 digits + 3 letters + 3 digits (e.g. 1234567/A/M/000), got: BT",
-   "elapsed": 0.9,
+   "elapsed": 0.7,
    "verdict": "BROKEN"
   },
   {
@@ -1704,7 +1704,7 @@
    "dl_check": "",
    "top_result": "T\u00dcRK HAVA YOLLARI A.O.",
    "error_detail": "",
-   "elapsed": 1.2,
+   "elapsed": 2.0,
    "verdict": "PARTIAL"
   },
   {
@@ -1721,7 +1721,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "",
-   "elapsed": 22.3,
+   "elapsed": 10.4,
    "verdict": "PARTIAL"
   },
   {
@@ -1738,7 +1738,7 @@
    "dl_check": "",
    "top_result": "CRDB BANK PUBLIC LIMITED COMPANY",
    "error_detail": "FAIL:HTTPStatusError:Server error '500 Internal Server Error' for url 'https://dse.co.tz/livewire/message/financial-statement-front-component'\nFor more informati",
-   "elapsed": 4.1,
+   "elapsed": 4.9,
    "verdict": "PARTIAL"
   },
   {
@@ -1755,7 +1755,7 @@
    "dl_check": "OK text/html [\u0420\u0435\u0433\u0443\u043b\u044f\u0440\u043d\u0430 \u0456\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0456\u044f (XML) - Smida]",
    "top_result": "\u0410\u041a\u0426\u0406\u041e\u041d\u0415\u0420\u041d\u0415 \u0422\u041e\u0412\u0410\u0420\u0418\u0421\u0422\u0412\u041e \"\u041d\u0410\u0426\u0406\u041e\u041d\u0410\u041b\u042c\u041d\u0410 \u0410\u041a\u0426\u0406\u041e\u041d\u0415\u0420\u041d\u0410 \u041a\u041e\u041c\u041f\u0410\u041d\u0406\u042f \"\u041d\u0410\u0424\u0422",
    "error_detail": "",
-   "elapsed": 48.1,
+   "elapsed": 58.9,
    "verdict": "WORKING"
   },
   {
@@ -1772,7 +1772,7 @@
    "dl_check": "OK text/html [aapl-20250927]",
    "top_result": "Apple Inc.",
    "error_detail": "",
-   "elapsed": 2.6,
+   "elapsed": 2.5,
    "verdict": "WORKING"
   },
   {
@@ -1789,7 +1789,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "PAMER S A",
    "error_detail": "",
-   "elapsed": 11.4,
+   "elapsed": 11.9,
    "verdict": "WORKING"
   },
   {
@@ -1806,7 +1806,7 @@
    "dl_check": "OK application/pdf",
    "top_result": "Chet el kapitali ishtirokidagi \"Hamkorbank\" aksiyadorlik tij",
    "error_detail": "",
-   "elapsed": 4.5,
+   "elapsed": 5.1,
    "verdict": "WORKING"
   },
   {
@@ -1823,7 +1823,7 @@
    "dl_check": "",
    "top_result": "C\u00f4ng Ty TNHH Vinamilk Nguy\u1ec5n Bi\u1ec3u",
    "error_detail": "",
-   "elapsed": 70.6,
+   "elapsed": 67.5,
    "verdict": "WORKING"
   },
   {
@@ -1840,7 +1840,7 @@
    "dl_check": "",
    "top_result": "Raiffeisen Bank Kosovo J.S.C. SH.A.",
    "error_detail": "",
-   "elapsed": 16.5,
+   "elapsed": 18.2,
    "verdict": "PARTIAL"
   },
   {
@@ -1857,7 +1857,7 @@
    "dl_check": "OK text/html [Sasol Limited_2025-06-30]",
    "top_result": "Sasol Limited",
    "error_detail": "",
-   "elapsed": 3.8,
+   "elapsed": 3.5,
    "verdict": "WORKING"
   },
   {
@@ -1891,7 +1891,7 @@
    "dl_check": "",
    "top_result": "",
    "error_detail": "FAIL:HTTPStatusError:Client error '404 Not Found' for url 'https://www.zse.co.zw/listed-companies'\nFor more information check: https://developer.mozilla.org/en-U",
-   "elapsed": 1.8,
+   "elapsed": 13.4,
    "verdict": "BROKEN"
   }
  ]
