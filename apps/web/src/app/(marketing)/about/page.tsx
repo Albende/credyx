@@ -67,7 +67,7 @@ export default function AboutPage() {
                 <Link href="/register">Start free</Link>
               </Button>
               <Button asChild variant="outline" size="lg">
-                <Link href="/contact">Talk to the team</Link>
+                <Link href="/team">Meet the team</Link>
               </Button>
             </div>
           </div>

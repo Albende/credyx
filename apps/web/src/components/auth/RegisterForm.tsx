@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { FormError } from "@/components/ui/form-error";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import { registerSchema, type RegisterInput } from "@/lib/schemas/auth";
+import { humanizeError } from "@/lib/humanize-error";
 
 export function RegisterForm() {
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -66,13 +67,13 @@ export function RegisterForm() {
       toast.success("Account created. Check your inbox.");
       setSubmittedEmail(values.email);
     } catch (err) {
-      const message =
+      const detail =
         err instanceof ApiError
-          ? err.message
+          ? ((err.body as { detail?: string } | undefined)?.detail ?? err.message)
           : err instanceof Error
             ? err.message
-            : "Registration failed";
-      setSubmitError(message);
+            : null;
+      setSubmitError(humanizeError(detail, "Couldn't create your account. Please try again."));
     }
   });
 

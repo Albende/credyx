@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormError } from "@/components/ui/form-error";
 import { loginSchema, type LoginInput } from "@/lib/schemas/auth";
+import { humanizeError } from "@/lib/humanize-error";
 
 export function LoginForm() {
   const router = useRouter();
@@ -38,7 +39,10 @@ export function LoginForm() {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(
-          (body as { detail?: string }).detail || "Invalid email or password",
+          humanizeError(
+            (body as { detail?: string }).detail,
+            "That email and password don't match. Please try again.",
+          ),
         );
       }
       toast.success("Welcome back");
@@ -46,7 +50,9 @@ export function LoginForm() {
       router.push(next);
       router.refresh();
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Login failed");
+      setSubmitError(
+        err instanceof Error ? err.message : "Couldn't sign you in. Please try again.",
+      );
     }
   });
 

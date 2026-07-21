@@ -20,6 +20,7 @@ const SECTIONS: { title: string; links: FooterLink[] }[] = [
     title: "Company",
     links: [
       { href: "/about", label: "About" },
+      { href: "/team", label: "Team" },
       { href: "/blog", label: "Blog" },
       { href: "/contact", label: "Contact" },
       { href: "/careers", label: "Careers" },
