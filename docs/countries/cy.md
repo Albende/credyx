@@ -1,4 +1,4 @@
-# 🇨🇾 Cyprus — DRCOR + VIES
+# 🇨🇾 Cyprus — DRCOR + GLEIF/ESEF + VIES
 
 ## Identifiers
 
@@ -10,55 +10,76 @@
 
 ## Sources
 
-### DRCOR — Department of Registrar of Companies and Official Receiver
+### DRCOR — Department of Registrar of Companies and Intellectual Property
 
-- Public free search:
-  https://efiling.drcor.mcit.gov.cy/DrcorPublic/SearchForm.aspx
-- Results:
-  https://efiling.drcor.mcit.gov.cy/DrcorPublic/SearchResults.aspx
-- Detail page:
-  https://efiling.drcor.mcit.gov.cy/DrcorPublic/ViewOrganisation.aspx?id={internal_id}
-- **Auth**: none for search and basic detail; structured filings sit
-  behind a paid e-filing account and are intentionally NOT wired.
-- **Mechanics**: ASP.NET WebForms. Each search round-trip needs
-  `__VIEWSTATE`, `__VIEWSTATEGENERATOR`, and `__EVENTVALIDATION` echoed
-  from a prior GET. Adapter does this with httpx — no Playwright.
-- **Rate limit**: throttled to 30 req / min adapter-side; DRCOR does not
-  publish a public rate limit.
-- **Robots / ToS**: search pages are publicly indexable; we set the
-  shared respectful UA and back off on 429.
+- Public free results (plain GET, no auth, no JS):
+  `https://efiling.drcor.mcit.gov.cy/DrcorPublic/SearchResults.aspx?name={name}&number={num}&searchtype=optStartMatch&index=1&tname=%25&sc=0`
+- **Auth**: none for search. The old ASP.NET `SearchForm.aspx` postback
+  simply 302-redirects to the `SearchResults.aspx` query-string URL above,
+  so the adapter skips the ViewState round-trip and GETs the results page
+  directly.
+- **Results shape**: an ASP.NET GridView. Each `tr.basket` row carries
+  `Name | TypeCode (ΗΕ=company / ΕΕ=business name) | Registration Number |
+  Type | Name Status | Organisation Status`. Company names are stored in
+  Latin (or, for some issuers, their registered Greek legal name). Status
+  and type labels are Greek and mapped to English adapter-side
+  (accent-insensitive).
+- **Per-company detail page**: the row `Select` button is a session-bound
+  `__doPostBack` that the public endpoint rejects (`Error.aspx?code=d1`),
+  so `ViewOrganisation.aspx` is not reachable statelessly. All fields come
+  from the row; the number-scoped `SearchResults` URL is used as the
+  company's stable public `source_url`.
+- **Number vs business-name collision**: the ΗΕ (company) and ΕΕ
+  (business-name) registers share a number space, so HE lookup filters to
+  the ΗΕ type code. Multiple name rows per number are collapsed keeping the
+  current name (`Τελευταίο Όνομα`); superseded names are surfaced in
+  `raw["previous_names"]`.
+- **Rate limit**: throttled to 30 req / min adapter-side.
+
+### GLEIF + filings.xbrl.org — ESEF financial filings (free, no key)
+
+- **HE → LEI**: GLEIF JSON:API, `filter[entity.registeredAs]={digits}` +
+  `filter[entity.legalAddress.country]=CY`. The numeric part of the
+  returned `registeredAs` (e.g. `ΗΕ 28390`) is verified against the HE
+  number. `https://api.gleif.org/api/v1/lei-records`
+- **LEI → filings**: `https://filings.xbrl.org/api/filings?filter[entity.identifier]={LEI}&sort=-period_end`.
+  Each filing yields the ESEF iXBRL report package (`package_url`, a real
+  downloadable `.zip`), used as `FinancialFiling.document_url`
+  (`document_format="xbrl"`), plus the human viewer as `source_url`.
+- Covers Cyprus-domiciled listed issuers filing under the EU ESEF mandate
+  (2021+). Companies whose only ESEF filer is a foreign-domiciled parent
+  (e.g. Bank of Cyprus Holdings, IE) return `[]` for the CY operating
+  entity — no fabrication.
 
 ### VIES — EU VAT validation
 
 - SOAP endpoint:
-  https://ec.europa.eu/taxation_customs/vies/services/checkVatService
-- Free, no key. Returns trader name + address when the member state
-  exposes them (CY does).
-
-### CySEC — for listed firms
-
-- https://www.cysec.gov.cy/ — published filings are limited and
-  per-issuer HTML/PDF; not yet wired.
+  `https://ec.europa.eu/taxation_customs/vies/services/checkVatService`
+- Free, no key. Returns trader name + address when CY exposes them.
 
 ## Capabilities
 
 | Capability | Status | Notes |
 |------------|--------|-------|
-| `search_by_name` | ✅ | DRCOR scrape (ASP.NET ViewState round-trip) |
-| `lookup_by_identifier(COMPANY_NUMBER)` | ✅ | DRCOR scrape → ViewOrganisation |
+| `search_by_name` | ✅ | DRCOR public GET → GridView parse |
+| `lookup_by_identifier(COMPANY_NUMBER)` | ✅ | DRCOR GET, ΗΕ-filtered, current-name |
 | `lookup_by_identifier(VAT)` | ✅ | VIES SOAP |
-| `fetch_financials` | ❌ | Returns `[]`; no free machine-readable source |
-| `health_check` | ✅ | Probes DRCOR SearchForm for `__VIEWSTATE` |
+| `fetch_financials` | ✅ | GLEIF `registeredAs` → LEI → filings.xbrl.org ESEF packages |
+| `health_check` | ✅ | Probes DRCOR results for `GridView1` |
 
 ## Test companies
 
-- Bank of Cyprus Public Company Limited — `HE 165`
-- Hellenic Bank Public Company Limited — `HE 6059`
-- Cyprus Popular Bank Public Co Ltd — `HE 1`
-- Cablenet Communication Systems Ltd — `HE 192919`
+- **Logicom Public Limited — `HE 28390`** (LEI `549300IPBYXB0HYPIC28`)
+  — search + lookup + 1 ESEF annual report (2021).
+- **Vassiliko Cement Works Public Company Limited — `HE 1210`**
+  (LEI `213800BYCUHXLRDEA130`) — lookup + 2 ESEF annual reports
+  (2022, 2021).
+- Bank of Cyprus Public Company Limited — `HE 165` — search + lookup work;
+  `fetch_financials` returns `[]` (the ESEF filer is the IE parent, Bank of
+  Cyprus Holdings).
 
 ## Status
 
-🟢 **Live**. DRCOR scrape + VIES VAT validation. Filings remain out of
-scope until a free machine-readable source exists or paid DRCOR e-filing
-is approved.
+🟢 **Live**. DRCOR public GET for name/HE search and lookup; VIES for VAT;
+ESEF filings via GLEIF → filings.xbrl.org (free, no API key). DRCOR's own
+paywalled e-filings are never used.

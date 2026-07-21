@@ -1,37 +1,43 @@
-"""Montenegro adapter — CRPS + Tax Authority + Montenegroberza (MNSE).
+"""Montenegro adapter — Tax Administration white list + Montenegroberza (MNSE).
 
-All three sources are free, no auth, no paid contracts. Per project rules
-this adapter never invents data — when a source is unreachable or returns
-no rows, callers get an empty list or ``None``.
+Both sources are free, need no API key, and no paid contract. Per project
+rules this adapter never invents data — when a source has no record for a
+company, callers get an empty list or ``None``.
 
 Sources:
 
-- **CRPS** (Centralni Registar Privrednih Subjekata, run by the Tax
-  Administration / Uprava prihoda i carina) — public business register at
-  https://crps.mpa.gov.me/. Free HTML search and per-company detail by
-  PIB (tax ID) or MB (matični broj). Both are 8-digit numeric identifiers.
-- **Uprava prihoda i carina** — https://www.upravaprihoda.gov.me/ runs the
-  public PIB validator. We probe its homepage for health checks because
-  the CRPS portal occasionally rate-limits unsigned UAs.
-- **Montenegroberza / Montenegro Stock Exchange (MNSE)** — free annual
-  reports for listed issuers at https://www.mse.co.me/. We surface the
-  issuer-page URL for the known MNSE-listed majors only; full reports
-  are PDFs the cross-cutting extraction worker can pick up later.
+- **Bijela lista poreskih obveznika** (Tax Administration "white list" of
+  compliant taxpayers), published as open data on the national portal
+  https://data.gov.me/. A single XLSX maps ``PIB`` (tax id) → registered
+  company name for every major Montenegrin taxpayer. We resolve the live
+  download URL through the CKAN API and cache the parsed table in-process.
+  This is the backbone for name search and identifier lookup.
+- **Montenegroberza / Montenegro Stock Exchange (MNSE)** —
+  https://www.mnse.me/. Free issuer profiles (matični broj, registered
+  address, NACE activity code, ISIN) and — crucially — the actual filed
+  financial and audit reports as downloadable PDFs, per listed issuer.
+
+The former CRPS web register (``crps.me`` / ``crps.mpa.gov.me``) is dead —
+the domains are parked, and the replacement portal ``irms.tax.gov.me``
+answers ``503`` to every off-Montenegro request, so neither is usable from
+here. See ``docs/countries/me.md`` for the source audit.
 
 Identifier scope:
-- COMPANY_NUMBER → MB (Matični broj), 8 digits.
 - VAT             → PIB (Poreski identifikacioni broj), 8 digits.
+- COMPANY_NUMBER  → MB (Matični broj), 8 digits.
 
-Both happen to share the same numeric width but the underlying registers
-are distinct; we keep them as separate identifier types to preserve that
-distinction downstream.
+Montenegrin companies commonly share the same numeric value for PIB and MB,
+but the registers are distinct so we keep both identifier types.
 """
 from __future__ import annotations
 
+import asyncio
+import html
+import io
 import re
 import unicodedata
+import zipfile
 from datetime import datetime
-from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -50,33 +56,39 @@ from packages.shared.models import (
     RegistryIdentifier,
 )
 
-_ME_ID_RE = re.compile(r"^\d{8}$")
-_DIGITS_RE = re.compile(r"\d{8}")
-_TAG_STRIP_RE = re.compile(r"<[^>]+>")
-_STATUS_HINTS_LATIN = (
-    "aktivno",
-    "aktivan",
-    "aktivna",
-    "registrovan",
-    "registrovano",
-    "u steč",
-    "u stec",
-    "brisan",
-    "ugaš",
-    "ugas",
-    "likvid",
+# mnse.me serves a stripped WAP page to non-browser user-agents; the full
+# desktop site (with issuer profiles and filing PDFs) needs a browser UA.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 
-# MNSE issuers with publicly listed annual reports. Keys are PIBs of the
-# real issuers — confirmed against the test-company set in the project
-# brief. Adding more entries requires verifying the issuer slug exists
-# on mse.co.me.
-_MNSE_ISSUER_SLUGS: dict[str, str] = {
-    "02289377": "crnogorski-telekom-ad",
-    "02002230": "elektroprivreda-crne-gore-ad",
-    "02297473": "crnogorska-komercijalna-banka-ad",
-    "02001306": "plantaze-13-jul-ad",
+_ME_ID_RE = re.compile(r"^\d{8}$")
+_PIB_TOKEN_RE = re.compile(r"^\d{8}$")
+_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+_LEGAL_FORM_TOKENS = ("A.D.", "AD", "D.O.O.", "DOO", "K.D.", "KD", "O.D.", "OD")
+_STOPWORDS = {
+    "AD",
+    "DOO",
+    "KD",
+    "OD",
+    "CRNE",
+    "GORE",
+    "PODGORICA",
+    "NIKSIC",
+    "DRUSTVO",
+    "SA",
+    "OGRANICENOM",
+    "ODGOVORNOSCU",
+    "PREDUZECE",
+    "KOMPANIJA",
+    "AKCIONARSKO",
+    "AKCIONARSKO DRUSTVO",
+    "AND",
+    "THE",
 }
+
+_CKAN_PACKAGE = "bijela-lista-poreskih-obveznika"
 
 
 def _normalize_me_id(value: str, *, label: str) -> str:
@@ -90,363 +102,474 @@ def _normalize_me_id(value: str, *, label: str) -> str:
     return cleaned
 
 
-def _strip_tags(text: str) -> str:
-    return _TAG_STRIP_RE.sub(" ", text)
+def _strip_diacritics(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    )
 
 
 def _normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _norm_name(name: str) -> str:
+    return _normalize_ws(_strip_diacritics(name).upper())
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Distinctive uppercase, diacritic-free tokens for fuzzy matching."""
+    cleaned = re.sub(r"[^A-Za-z0-9 ]", " ", _strip_diacritics(name).upper())
+    tokens = [t for t in cleaned.split() if len(t) >= 3 and t not in _STOPWORDS]
+    tokens.sort(key=len, reverse=True)
+    return tokens
+
+
+def _extract_legal_form(name: str) -> str | None:
+    upper = name.upper()
+    for token in _LEGAL_FORM_TOKENS:
+        if f" {token}" in f" {upper}" or upper.endswith(token):
+            return token.replace(".", "")
+    return None
+
+
+_BIJELA_CACHE: dict[str, str] | None = None
+_BIJELA_LOCK = asyncio.Lock()
+
+
+def _parse_bijela_xlsx(content: bytes) -> dict[str, str]:
+    """Extract PIB → name from the Tax Administration white-list workbook.
+
+    The sheet materializes a million empty rows (>80 MB) but every value is
+    a shared string, so we read only ``sharedStrings.xml`` (tens of KB) and
+    pair each 8-digit PIB with the string that follows it.
+    """
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        raw = archive.read("xl/sharedStrings.xml").decode("utf-8", "replace")
+    strings = [
+        html.unescape(m)
+        for m in re.findall(r"<si>(?:<t[^>]*>(.*?)</t>|)</si>", raw, re.S)
+    ]
+    table: dict[str, str] = {}
+    for i, value in enumerate(strings):
+        if _PIB_TOKEN_RE.match(value) and i + 1 < len(strings):
+            name = _normalize_ws(strings[i + 1])
+            if name:
+                table.setdefault(value, name)
+    return table
+
+
+async def _load_bijela() -> dict[str, str]:
+    global _BIJELA_CACHE
+    if _BIJELA_CACHE is not None:
+        return _BIJELA_CACHE
+    async with _BIJELA_LOCK:
+        if _BIJELA_CACHE is not None:
+            return _BIJELA_CACHE
+        headers = {"User-Agent": _BROWSER_UA}
+        async with build_http_client(timeout=90.0, headers=headers) as client:
+            meta = await get_with_retry(
+                client,
+                "https://data.gov.me/api/3/action/package_show",
+                params={"id": _CKAN_PACKAGE},
+            )
+            url = _pick_xlsx_url(meta.json())
+            resp = await get_with_retry(client, url)
+            resp.raise_for_status()
+            _BIJELA_CACHE = _parse_bijela_xlsx(resp.content)
+    return _BIJELA_CACHE
+
+
+def _pick_xlsx_url(package_payload: dict[str, Any]) -> str:
+    resources = package_payload.get("result", {}).get("resources", [])
+    for res in resources:
+        if (res.get("format") or "").upper() == "XLSX" and res.get("url"):
+            return res["url"]
+    for res in resources:
+        if (res.get("url") or "").lower().endswith(".xlsx"):
+            return res["url"]
+    raise httpx.HTTPError("No XLSX resource on Bijela lista dataset")
+
+
 class MEAdapter(CountryAdapter):
     country_code = "ME"
     country_name = "Montenegro"
-    identifier_types = [IdentifierType.COMPANY_NUMBER, IdentifierType.VAT]
+    identifier_types = [IdentifierType.VAT, IdentifierType.COMPANY_NUMBER]
     primary_identifier = IdentifierType.VAT
     requires_api_key = False
     api_key_env = None
     rate_limit_per_minute = 30
 
-    CRPS_BASE = "https://crps.mpa.gov.me"
-    TAX_BASE = "https://www.upravaprihoda.gov.me"
-    MNSE_BASE = "https://www.mse.co.me"
+    MNSE_BASE = "https://www.mnse.me"
+    DATA_BASE = "https://data.gov.me"
 
     async def health_check(self) -> AdapterHealth:
+        notes = []
+        ok = True
         try:
-            async with build_http_client(timeout=20.0) as client:
-                resp = await get_with_retry(client, f"{self.CRPS_BASE}/")
-                if resp.status_code >= 500:
-                    raise RuntimeError(f"CRPS HTTP {resp.status_code}")
+            async with self._client() as client:
+                resp = await get_with_retry(
+                    client, f"{self.MNSE_BASE}/symbols.asp", params={"term": "banka"}
+                )
+                if resp.status_code != 200 or not resp.text.strip().startswith("["):
+                    ok = False
+                    notes.append(f"MNSE search HTTP {resp.status_code}")
         except Exception as exc:
-            return AdapterHealth(
-                country_code=self.country_code,
-                name=self.country_name,
-                status=AdapterStatus.ERROR,
-                capabilities={"search": True, "lookup": True, "financials": True},
-                rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=f"CRPS probe failed: {str(exc)[:160]}",
-            )
+            ok = False
+            notes.append(f"MNSE probe failed: {str(exc)[:120]}")
+        try:
+            await _load_bijela()
+        except Exception as exc:
+            ok = False
+            notes.append(f"Bijela lista load failed: {str(exc)[:120]}")
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.OK,
+            status=AdapterStatus.OK if ok else AdapterStatus.ERROR,
             capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "CRPS HTML scrape (search/lookup). Financials limited to "
-                "MNSE-listed issuers; non-listed filings are not freely "
-                "indexed by CRPS."
+                "; ".join(notes)
+                if notes
+                else (
+                    "Search/lookup via Tax Administration white list "
+                    "(data.gov.me); financials via MNSE issuer filings. "
+                    "Coverage is limited to white-listed and MNSE-listed "
+                    "companies — the CRPS/IRMS web register is unreachable."
+                )
             ),
         )
 
+    def _client(self) -> httpx.AsyncClient:
+        return build_http_client(timeout=30.0, headers={"User-Agent": _BROWSER_UA})
+
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        rows = await self._crps_search(name)
+        query = _norm_name(name)
+        if len(query) < 2:
+            return []
+        table = await _load_bijela()
         out: list[CompanyMatch] = []
-        seen: set[str] = set()
-        for row in rows:
-            pib = row.get("pib")
-            mb = row.get("mb")
-            primary = pib or mb
-            if not primary or primary in seen:
-                continue
-            seen.add(primary)
-            company_name = row.get("name") or ""
-            if not company_name:
-                continue
-            idents: list[RegistryIdentifier] = []
-            if pib:
-                idents.append(
-                    RegistryIdentifier(type=IdentifierType.VAT, value=f"ME{pib}", label="PIB")
-                )
-            if mb:
-                idents.append(
-                    RegistryIdentifier(
-                        type=IdentifierType.COMPANY_NUMBER, value=mb, label="MB"
+        seen_pib: set[str] = set()
+        seen_name: set[str] = set()
+
+        for pib, company_name in table.items():
+            if query in _norm_name(company_name):
+                seen_pib.add(pib)
+                seen_name.add(_norm_name(company_name))
+                out.append(
+                    CompanyMatch(
+                        id=pib,
+                        name=company_name,
+                        country=self.country_code,
+                        identifiers=[
+                            RegistryIdentifier(
+                                type=IdentifierType.VAT, value=f"ME{pib}", label="PIB"
+                            )
+                        ],
+                        status="Aktivan",
+                        source_url=f"{self.DATA_BASE}/dataset/{_CKAN_PACKAGE}",
                     )
                 )
-            out.append(
-                CompanyMatch(
-                    id=primary,
-                    name=company_name,
-                    country=self.country_code,
-                    identifiers=idents,
-                    address=row.get("address"),
-                    status=row.get("status"),
-                    source_url=self._detail_url(primary),
+                if len(out) >= limit:
+                    return out
+
+        async with self._client() as client:
+            issuers = await self._mnse_group_issuers(client, name)
+            for issuer in issuers:
+                if len(out) >= limit:
+                    break
+                detail = await self._mnse_detail(client, issuer["id"])
+                if detail is None:
+                    continue
+                mb = detail.get("mb")
+                display_name = detail.get("name") or issuer["issuer_desc"]
+                if _norm_name(display_name) in seen_name:
+                    continue
+                if mb and mb in seen_pib:
+                    continue
+                idents: list[RegistryIdentifier] = []
+                if mb:
+                    idents.append(
+                        RegistryIdentifier(
+                            type=IdentifierType.COMPANY_NUMBER, value=mb, label="MB"
+                        )
+                    )
+                    if mb in table:
+                        idents.insert(
+                            0,
+                            RegistryIdentifier(
+                                type=IdentifierType.VAT, value=f"ME{mb}", label="PIB"
+                            ),
+                        )
+                idents.append(
+                    RegistryIdentifier(
+                        type=IdentifierType.OTHER,
+                        value=issuer["label"],
+                        label="MNSE symbol",
+                    )
                 )
-            )
-            if len(out) >= limit:
-                break
-        return out
+                out.append(
+                    CompanyMatch(
+                        id=mb or issuer["label"],
+                        name=display_name,
+                        country=self.country_code,
+                        identifiers=idents,
+                        address=detail.get("address"),
+                        status="Listed (MNSE)",
+                        source_url=self._issuer_url(issuer["id"]),
+                    )
+                )
+        return out[:limit]
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.VAT:
             ident = _normalize_me_id(value, label="PIB")
-            label = "PIB"
         elif id_type == IdentifierType.COMPANY_NUMBER:
             ident = _normalize_me_id(value, label="MB")
-            label = "MB"
         else:
             raise InvalidIdentifierError(
                 f"ME supports VAT (PIB) or COMPANY_NUMBER (MB), got {id_type}"
             )
 
-        rows = await self._crps_search(ident)
-        match = _pick_by_identifier(rows, ident)
-        if match is None:
+        table = await _load_bijela()
+        name = table.get(ident)
+        if name is None:
             return None
-        pib = match.get("pib")
-        mb = match.get("mb")
-        idents: list[RegistryIdentifier] = []
-        if pib:
-            idents.append(
-                RegistryIdentifier(type=IdentifierType.VAT, value=f"ME{pib}", label="PIB")
-            )
-        if mb:
-            idents.append(
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER, value=mb, label="MB"
-                )
-            )
+
+        idents = [
+            RegistryIdentifier(type=IdentifierType.VAT, value=f"ME{ident}", label="PIB")
+        ]
+        raw: dict[str, Any] = {"source": "bijela_lista", "pib": ident}
+        address: str | None = None
+        nace: list[str] = []
+
+        async with self._client() as client:
+            issuer = await self._resolve_issuer(client, name)
+            if issuer is not None:
+                detail = await self._mnse_detail(client, issuer["id"])
+                if detail is not None:
+                    raw["mnse"] = detail
+                    address = detail.get("address")
+                    mb = detail.get("mb")
+                    if mb:
+                        idents.append(
+                            RegistryIdentifier(
+                                type=IdentifierType.COMPANY_NUMBER,
+                                value=mb,
+                                label="MB",
+                            )
+                        )
+                    if detail.get("isin"):
+                        idents.append(
+                            RegistryIdentifier(
+                                type=IdentifierType.OTHER,
+                                value=detail["isin"],
+                                label="ISIN",
+                            )
+                        )
+                    idents.append(
+                        RegistryIdentifier(
+                            type=IdentifierType.OTHER,
+                            value=issuer["label"],
+                            label="MNSE symbol",
+                        )
+                    )
+                    if detail.get("nace"):
+                        nace = [detail["nace"]]
+
         return CompanyDetails(
-            id=pib or mb or ident,
-            name=match.get("name") or "",
+            id=ident,
+            name=name,
             country=self.country_code,
-            legal_form=match.get("legal_form"),
-            status=match.get("status"),
-            registered_address=match.get("address"),
+            legal_form=_extract_legal_form(name),
+            status="Aktivan",
+            registered_address=address,
             capital_currency="EUR",
+            nace_codes=nace,
             identifiers=idents,
-            raw={"crps_row": match, "queried_as": label},
-            source_url=self._detail_url(pib or mb or ident),
+            raw=raw,
+            source_url=f"{self.DATA_BASE}/dataset/{_CKAN_PACKAGE}",
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         ident = _normalize_me_id(company_id, label="PIB")
-        slug = _MNSE_ISSUER_SLUGS.get(ident)
-        if slug is None:
-            # CRPS does not expose filed annual accounts under a free, stable
-            # URL — they are deposited but only retrievable via paid extracts.
-            # Empty list keeps the contract honest.
+        table = await _load_bijela()
+        name = table.get(ident)
+        if name is None:
             return []
-        issuer_url = f"{self.MNSE_BASE}/issuers/{slug}/"
-        current_year = datetime.utcnow().year
-        return [
-            FinancialFiling(
-                company_id=ident,
-                year=current_year - 1,
-                type=FilingType.ANNUAL_REPORT,
-                period_end=None,
-                currency="EUR",
-                structured_data=None,
-                document_url=issuer_url,
-                document_format="html",
-                source_url=issuer_url,
+
+        async with self._client() as client:
+            issuer = await self._resolve_issuer(client, name)
+            if issuer is None:
+                return []
+            resp = await get_with_retry(client, self._issuer_url(issuer["id"]))
+            docs = _parse_financial_docs(resp.text)
+
+        source_url = self._issuer_url(issuer["id"])
+        filings: list[FinancialFiling] = []
+        for doc in docs:
+            filings.append(
+                FinancialFiling(
+                    company_id=ident,
+                    year=doc["year"],
+                    type=doc["type"],
+                    currency="EUR",
+                    document_url=f"{self.MNSE_BASE}{doc['href']}",
+                    document_format=doc["format"],
+                    source_url=source_url,
+                )
             )
-        ]
+        filings.sort(key=lambda f: f.year, reverse=True)
+        if filings:
+            cutoff = filings[0].year - years + 1
+            filings = [f for f in filings if f.year >= cutoff]
+        return filings
 
-    async def _crps_search(self, query: str) -> list[dict[str, Any]]:
-        """Hit the CRPS public search page and return parsed result rows.
+    async def _mnse_group_issuers(
+        self, client: httpx.AsyncClient, term: str
+    ) -> list[dict[str, str]]:
+        rows = await self._mnse_search(client, term)
+        grouped: dict[str, dict[str, str]] = {}
+        for row in rows:
+            desc = row.get("issuer_desc") or ""
+            label = row.get("label") or ""
+            sid = row.get("id") or ""
+            if not desc or not sid:
+                continue
+            current = grouped.get(desc)
+            if current is None or _base_symbol_rank(label) < _base_symbol_rank(
+                current["label"]
+            ):
+                grouped[desc] = {"label": label, "id": sid, "issuer_desc": desc}
+        return list(grouped.values())
 
-        The CRPS front-end exposes a single search endpoint that accepts a
-        free-text term (matched against name, PIB, or MB). We submit the
-        term, parse the results table, and let callers decide whether to
-        treat it as a name search or an identifier lookup.
-        """
-        params = {"q": query}
-        async with build_http_client(timeout=30.0) as client:
-            for path in ("/pretraga", "/", "/Search"):
-                try:
-                    resp = await get_with_retry(
-                        client, f"{self.CRPS_BASE}{path}", params=params
-                    )
-                except httpx.HTTPError:
+    async def _resolve_issuer(
+        self, client: httpx.AsyncClient, name: str
+    ) -> dict[str, str] | None:
+        tokens = _name_tokens(name)
+        if not tokens:
+            return None
+        target = _norm_name(name)
+        for term in tokens[:2]:
+            issuers = await self._mnse_group_issuers(client, term)
+            best: dict[str, str] | None = None
+            best_score = 0
+            for issuer in issuers:
+                desc = _norm_name(issuer["issuer_desc"])
+                score = sum(1 for tok in tokens if tok in desc)
+                if term not in desc:
                     continue
-                if resp.status_code == 200 and resp.text:
-                    rows = _parse_crps_results(resp.text)
-                    if rows:
-                        return rows
+                if score > best_score or (
+                    score == best_score and desc == target
+                ):
+                    best, best_score = issuer, score
+            if best is not None and best_score >= 1:
+                return best
+        return None
+
+    async def _mnse_search(
+        self, client: httpx.AsyncClient, term: str
+    ) -> list[dict[str, Any]]:
+        resp = await get_with_retry(
+            client, f"{self.MNSE_BASE}/symbols.asp", params={"term": term}
+        )
+        if resp.status_code != 200:
+            return []
+        body = resp.text.strip()
+        if not body.startswith("["):
+            return []
+        import json
+
+        try:
+            return json.loads(body)
+        except ValueError:
+            return []
+
+    async def _mnse_detail(
+        self, client: httpx.AsyncClient, stock_id: str
+    ) -> dict[str, Any] | None:
+        resp = await get_with_retry(client, self._issuer_url(stock_id))
+        if resp.status_code != 200:
+            return None
+        return _parse_issuer_detail(resp.text)
+
+    def _issuer_url(self, stock_id: str) -> str:
+        return f"{self.MNSE_BASE}/code/navigate.asp?Id=14&stockId={stock_id}"
+
+
+def _base_symbol_rank(label: str) -> tuple[int, int]:
+    """Lower rank == more likely the issuer's primary equity symbol."""
+    has_suffix = 1 if "-" in label else 0
+    return (has_suffix, len(label))
+
+
+def _parse_issuer_detail(html_text: str) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    header = re.search(r'td_header_row[^>]*>([^<]+)</td>', html_text)
+    name = _normalize_ws(header.group(1)) if header else ""
+    if name and name.upper() not in ("SIMBOL", "SYMBOL"):
+        info["name"] = name
+    for label, val in re.findall(
+        r'td_color2_\d+">([^<]+)</td>\s*<td class="td_color1_\d+[^"]*">([^<]*)</td>',
+        html_text,
+    ):
+        label_n = _strip_diacritics(label).strip().lower()
+        value = _normalize_ws(html.unescape(val))
+        if not value:
+            continue
+        if label_n.startswith("adresa"):
+            info["address"] = value
+        elif label_n.startswith("maticni"):
+            info["mb"] = value.zfill(8)
+        elif label_n.startswith("sifra djelatnosti"):
+            info["nace"] = value
+    isin = re.search(r"ISIN\s*</td>\s*<td[^>]*>([A-Z]{2}[A-Z0-9]{9,10})", html_text)
+    if isin:
+        info["isin"] = isin.group(1)
+    return info
+
+
+def _parse_financial_docs(html_text: str) -> list[dict[str, Any]]:
+    start = html_text.find("Finansijski i revizorski izvje")
+    if start == -1:
         return []
-
-    def _detail_url(self, identifier: str) -> str:
-        return f"{self.CRPS_BASE}/?q={identifier}"
-
-
-class _CRPSResultsParser(HTMLParser):
-    """Minimal table extractor for the CRPS results page.
-
-    CRPS renders search hits in HTML tables. We collect every ``<tr>`` /
-    ``<td>`` cell as plain text and let downstream heuristics pick the
-    columns. This keeps the parser tolerant to layout drift — only a
-    catastrophic markup change (e.g. switching to a JS-only client) breaks
-    it, and that surfaces as an empty result, not fake data.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.rows: list[list[str]] = []
-        self._in_row = False
-        self._in_cell = False
-        self._row: list[str] = []
-        self._cell: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "tr":
-            self._in_row = True
-            self._row = []
-        elif self._in_row and tag in ("td", "th"):
-            self._in_cell = True
-            self._cell = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            self._row.append(_normalize_ws("".join(self._cell)))
-            self._cell = []
-            self._in_cell = False
-        elif tag == "tr" and self._in_row:
-            if any(c for c in self._row):
-                self.rows.append(self._row)
-            self._row = []
-            self._in_row = False
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._cell.append(data)
-
-
-def _parse_crps_results(html_text: str) -> list[dict[str, Any]]:
-    parser = _CRPSResultsParser()
-    try:
-        parser.feed(html_text)
-    except Exception:
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for cells in parser.rows:
-        if not cells:
+    end = html_text.find("<h1>", start + 5)
+    section = html_text[start : end if end != -1 else start + 8000]
+    docs: list[dict[str, Any]] = []
+    seen: set[tuple[int, FilingType]] = set()
+    for href, inner in re.findall(
+        r'href="(/upload/[^"]+)"[^>]*>(.*?)</a>', section, re.S
+    ):
+        text = _normalize_ws(re.sub(r"<[^>]+>", " ", html.unescape(inner)))
+        years = _YEAR_RE.findall(text)
+        if not years:
             continue
-        ids = _extract_ids(cells)
-        if not ids["pib"] and not ids["mb"]:
+        year = max(int(y) for y in years)
+        filing_type = _classify_filing(text)
+        key = (year, filing_type)
+        if key in seen:
             continue
-        name = _extract_name(cells, ids)
-        if not name:
-            continue
-        rows.append(
+        seen.add(key)
+        ext = href.rsplit(".", 1)[-1].lower() if "." in href else None
+        docs.append(
             {
-                "name": name,
-                "pib": ids["pib"],
-                "mb": ids["mb"],
-                "address": _extract_address(cells, name, ids),
-                "status": _extract_status(cells),
-                "legal_form": _extract_legal_form(name),
+                "href": href,
+                "year": year,
+                "type": filing_type,
+                "format": ext,
+                "description": text,
             }
         )
-    return rows
+    return docs
 
 
-def _extract_ids(cells: list[str]) -> dict[str, str | None]:
-    pib: str | None = None
-    mb: str | None = None
-    # We can't tell PIB from MB by digit pattern alone (both 8 digits).
-    # Heuristic: cells often label the column ("PIB:", "MB:"); if no label
-    # is present, the first 8-digit token wins as PIB and the second as MB.
-    for cell in cells:
-        upper = cell.upper()
-        for match in _DIGITS_RE.finditer(cell):
-            digits = match.group(0)
-            context = cell[max(0, match.start() - 6) : match.start()].upper()
-            tail = upper
-            if "PIB" in context or "PIB" in tail[:8]:
-                pib = pib or digits
-            elif "MB" in context or "MATIČNI" in upper or "MATICNI" in upper:
-                mb = mb or digits
-    if pib is None or mb is None:
-        flat: list[str] = []
-        for cell in cells:
-            for match in _DIGITS_RE.finditer(cell):
-                flat.append(match.group(0))
-        if pib is None and flat:
-            pib = flat[0]
-        if mb is None and len(flat) > 1:
-            mb = flat[1] if flat[1] != pib else (flat[2] if len(flat) > 2 else None)
-    return {"pib": pib, "mb": mb}
-
-
-def _extract_name(cells: list[str], ids: dict[str, str | None]) -> str | None:
-    id_values = {ids["pib"], ids["mb"]} - {None}
-    best: str | None = None
-    for cell in cells:
-        compact = cell.replace(" ", "")
-        if not cell or compact.isdigit():
-            continue
-        if any(idv and idv in compact for idv in id_values):
-            stripped = cell
-            for idv in id_values:
-                if idv:
-                    stripped = stripped.replace(idv, "")
-            stripped = _normalize_ws(stripped)
-            if len(stripped) < 4:
-                continue
-            cell = stripped
-        norm = _strip_diacritics(cell).lower()
-        if any(h in norm for h in _STATUS_HINTS_LATIN) and len(cell) < 25:
-            continue
-        if best is None or len(cell) > len(best):
-            best = cell
-    return best
-
-
-def _extract_address(
-    cells: list[str], name: str, ids: dict[str, str | None]
-) -> str | None:
-    id_values = {ids["pib"], ids["mb"]} - {None}
-    address_keywords = ("ulica", "bb", "podgorica", "nikšić", "niksic", "bar", "kotor")
-    for cell in cells:
-        if not cell or cell == name:
-            continue
-        compact = cell.replace(" ", "")
-        if compact.isdigit():
-            continue
-        if any(idv and idv in compact for idv in id_values):
-            continue
-        norm = _strip_diacritics(cell).lower()
-        if any(k in norm for k in address_keywords) or re.search(r"\d{5}", cell):
-            return cell
-    return None
-
-
-def _extract_status(cells: list[str]) -> str | None:
-    for cell in cells:
-        norm = _strip_diacritics(cell).lower()
-        if any(h in norm for h in _STATUS_HINTS_LATIN):
-            return cell
-    return None
-
-
-def _extract_legal_form(name: str) -> str | None:
-    # Montenegrin legal-form suffixes are a closed, short list — pull from
-    # the company name when CRPS doesn't split them into a dedicated column.
-    upper = name.upper()
-    for token in ("A.D.", "AD", "D.O.O.", "DOO", "K.D.", "KD", "O.D.", "OD"):
-        if f" {token}" in f" {upper}" or upper.endswith(token):
-            return token.replace(".", "")
-    return None
-
-
-def _pick_by_identifier(
-    rows: list[dict[str, Any]], ident: str
-) -> dict[str, Any] | None:
-    for row in rows:
-        if row.get("pib") == ident or row.get("mb") == ident:
-            return row
-    return rows[0] if len(rows) == 1 else None
-
-
-def _strip_diacritics(text: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
-    )
+def _classify_filing(text: str) -> FilingType:
+    lowered = _strip_diacritics(text).lower()
+    if "revizor" in lowered:
+        return FilingType.AUDIT_REPORT
+    if "godisnji izvjestaj" in lowered:
+        return FilingType.ANNUAL_REPORT
+    return FilingType.BALANCE_SHEET

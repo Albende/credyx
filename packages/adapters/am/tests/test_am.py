@@ -9,35 +9,35 @@ from packages.adapters._base.errors import (
 from packages.adapters.am import AMAdapter
 from packages.adapters.am.adapter import (
     _classify_status,
-    _extract_company_record,
-    _extract_search_rows,
+    _legal_form_from_name,
     _normalize_reg_number,
     _normalize_tin,
     _parse_am_date,
-    _parse_capital_amount,
+    _parse_company_card,
+    _parse_search_hits,
 )
 from packages.shared.models import IdentifierType
 
 
 def test_normalize_tin_strips_prefix_and_whitespace():
-    assert _normalize_tin("02525118") == "02525118"
-    assert _normalize_tin(" 02525118 ") == "02525118"
-    assert _normalize_tin("AM02525118") == "02525118"
-    assert _normalize_tin("am 02525118") == "02525118"
-    assert _normalize_tin("0252-5118") == "02525118"
+    assert _normalize_tin("00024873") == "00024873"
+    assert _normalize_tin(" 00024873 ") == "00024873"
+    assert _normalize_tin("AM00024873") == "00024873"
+    assert _normalize_tin("am 00024873") == "00024873"
+    assert _normalize_tin("0002-4873") == "00024873"
 
 
 def test_normalize_tin_rejects_invalid_lengths():
     with pytest.raises(InvalidIdentifierError):
         _normalize_tin("123")
     with pytest.raises(InvalidIdentifierError):
-        _normalize_tin("025251189")  # 9 digits
+        _normalize_tin("000248739")  # 9 digits
     with pytest.raises(InvalidIdentifierError):
-        _normalize_tin("0252ABCD")
+        _normalize_tin("0002ABCD")
 
 
 def test_normalize_reg_number_accepts_common_shapes():
-    assert _normalize_reg_number("290.110.05049") == "290.110.05049"
+    assert _normalize_reg_number("286.120.1110041") == "286.120.1110041"
     assert _normalize_reg_number(" 222-555-12345 ") == "222-555-12345"
     assert _normalize_reg_number("12345") == "12345"
     with pytest.raises(InvalidIdentifierError):
@@ -47,6 +47,7 @@ def test_normalize_reg_number_accepts_common_shapes():
 
 
 def test_parse_am_date_handles_common_formats():
+    assert _parse_am_date("15-01-2020").isoformat() == "2020-01-15"
     assert _parse_am_date("15.04.1992").isoformat() == "1992-04-15"
     assert _parse_am_date("2001-09-30").isoformat() == "2001-09-30"
     assert _parse_am_date("31/12/2010").isoformat() == "2010-12-31"
@@ -65,81 +66,81 @@ def test_classify_status_maps_localized_values():
     assert _classify_status(None) is None
 
 
-def test_parse_capital_amount_strips_currency_and_separators():
-    assert _parse_capital_amount("50,000,000 AMD") == 50000000.0
-    assert _parse_capital_amount("AMD 105000000") == 105000000.0
-    assert _parse_capital_amount("") is None
-    assert _parse_capital_amount(None) is None
-    assert _parse_capital_amount("free text only") is None
+def test_classify_status_reads_register_negative_phrasing_as_active():
+    text = (
+        "There is no information recorded in the unified state register "
+        "regarding being in the process of liquidation or the termination "
+        "of activity"
+    )
+    assert _classify_status(text) == "active"
 
 
-def test_extract_company_record_parses_two_column_table():
+def test_legal_form_from_name():
+    assert _legal_form_from_name('"UCOM" CJSC') == "CJSC"
+    assert _legal_form_from_name('"ARDSHIN" LLC') == "LLC"
+    assert _legal_form_from_name("SOME OJSC") == "OJSC"
+    assert _legal_form_from_name("no suffix here") is None
+
+
+def test_parse_search_hits_extracts_id_and_name():
     html = """
-    <html><body>
-      <h1>Ardshinbank CJSC</h1>
-      <table>
-        <tr><td>Company name:</td><td>"ARDSHINBANK" CJSC</td></tr>
-        <tr><td>ՀՎՀՀ:</td><td>02525118</td></tr>
-        <tr><td>State registration number:</td><td>22.110.00125</td></tr>
-        <tr><td>Status:</td><td>Active</td></tr>
-        <tr><td>Registered address:</td><td>Yerevan, Grigor Lusavorich 13</td></tr>
-        <tr><td>Registration date:</td><td>03.12.2002</td></tr>
-        <tr><td>Legal form:</td><td>Closed Joint-Stock Company</td></tr>
-        <tr><td>Charter capital:</td><td>105,000,000,000 AMD</td></tr>
-      </table>
-    </body></html>
+    <section>
+      <article class="application-view-article company-search-result">
+        <a href="/en/companies/37191802"><h4>&quot;UCOM&quot; CJSC</h4></a>
+      </article>
+      <article class="application-view-article company-search-result">
+        <a href="/en/companies/55415850"><h4>&quot;ARDSHIN&quot; LLC</h4></a>
+      </article>
+    </section>
     """
-    record = _extract_company_record(html)
-    assert "ARDSHINBANK" in record["name"]
-    assert record["tin"] == "02525118"
-    assert record["reg_number"] == "22.110.00125"
-    assert record["status_raw"] == "Active"
+    hits = _parse_search_hits(html)
+    assert ("37191802", '"UCOM" CJSC') in hits
+    assert ("55415850", '"ARDSHIN" LLC') in hits
+
+
+def test_parse_company_card_reads_definition_list():
+    html = """
+    <div class="border company-title">
+      <h4>&quot;UCOM&quot; CJSC</h4>
+      <dl class="detail-list">
+        <dt>Company Status</dt>
+        <dd>There is no information recorded regarding liquidation</dd>
+        <dt>Registration number</dt><dd>286.120.1110041</dd>
+        <dt>Registration date</dt><dd>15-01-2020</dd>
+        <dt>Registration Body</dt><dd>RA MoJ state register</dd>
+        <dt>Tax id</dt><dd>00024873</dd>
+        <dt>Unique identifier</dt><dd>37191802</dd>
+        <dt>Address</dt><dd>Yerevan, Manandyan 33/8</dd>
+      </dl>
+    </div>
+    """
+    record = _parse_company_card(html)
+    assert "UCOM" in record["name"]
+    assert record["reg_number"] == "286.120.1110041"
+    assert record["registration_date"] == "15-01-2020"
+    assert record["tin"] == "00024873"
+    assert record["unique_id"] == "37191802"
     assert "Yerevan" in record["address"]
-    assert record["registration_date"] == "03.12.2002"
-    assert "Joint-Stock" in record["legal_form"]
-    assert "105,000,000,000" in record["capital"]
+    assert "no information recorded" in record["status_raw"].lower()
 
 
-def test_extract_company_record_empty_when_no_table():
-    assert _extract_company_record("") == {}
-    assert _extract_company_record("<html><body>No data</body></html>") == {}
-
-
-def test_extract_company_record_falls_back_to_heading():
-    html = "<html><body><h1>Ameriabank CJSC</h1><p>No table here.</p></body></html>"
-    record = _extract_company_record(html)
-    assert record.get("name") == "Ameriabank CJSC"
-
-
-def test_extract_search_rows_picks_name_and_tin():
-    html = """
-    <html><body><table>
-      <tr><th>Name</th><th>TIN</th><th>Status</th></tr>
-      <tr><td>ARDSHINBANK CJSC</td><td>02525118</td><td>Active</td></tr>
-      <tr><td>AMERIABANK CJSC</td><td>02501006</td><td>Active</td></tr>
-    </table></body></html>
-    """
-    rows = _extract_search_rows(html)
-    names = {r["name"] for r in rows}
-    tins = {r["tin"] for r in rows}
-    assert "ARDSHINBANK CJSC" in names
-    assert "AMERIABANK CJSC" in names
-    assert "02525118" in tins
-    assert "02501006" in tins
+def test_parse_company_card_empty_without_name():
+    assert _parse_company_card("") == {}
+    assert _parse_company_card("<html><body>No data</body></html>") == {}
 
 
 @pytest.mark.asyncio
 async def test_lookup_rejects_unsupported_identifier():
     adapter = AMAdapter()
     with pytest.raises(InvalidIdentifierError):
-        await adapter.lookup_by_identifier(IdentifierType.LEI, "02525118")
+        await adapter.lookup_by_identifier(IdentifierType.LEI, "00024873")
 
 
 @pytest.mark.asyncio
 async def test_fetch_financials_not_implemented():
     adapter = AMAdapter()
     with pytest.raises(AdapterNotImplementedError):
-        await adapter.fetch_financials("02525118")
+        await adapter.fetch_financials("00024873")
 
 
 def test_adapter_static_attributes():
@@ -155,41 +156,35 @@ def test_adapter_static_attributes():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_ardshinbank_returns_company_details():
+async def test_lookup_ucom_by_tin_returns_company_details():
     adapter = AMAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "02525118"
+        IdentifierType.VAT, "00024873"
     )
     assert details is not None
     assert details.country == "AM"
-    assert details.id == "02525118"
-    assert details.name
-    upper = details.name.upper()
-    assert "ARDSHIN" in upper or "АРДШИН" in upper or "ԱՐԴՇԻՆ" in upper
+    assert details.id == "00024873"
+    assert "UCOM" in details.name.upper()
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_ameriabank_returns_company_details():
+async def test_lookup_ucom_by_reg_number_returns_company_details():
     adapter = AMAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "02501006"
+        IdentifierType.COMPANY_NUMBER, "286.120.1110041"
     )
     assert details is not None
-    assert details.id == "02501006"
-    upper = details.name.upper()
-    assert "AMERIA" in upper or "АМЕРИА" in upper or "ԱՄԵՐԻԱ" in upper
+    assert "UCOM" in details.name.upper()
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_search_by_name_returns_some_matches():
+async def test_search_by_name_returns_matches():
     adapter = AMAdapter()
-    matches = await adapter.search_by_name("Ardshinbank", limit=10)
+    matches = await adapter.search_by_name("UCOM", limit=10)
     assert isinstance(matches, list)
-    # We don't assert non-empty — the public results page may require JS in
-    # some renders. We only require that the call succeeds and returns the
-    # documented shape.
+    assert matches
     for m in matches:
         assert m.country == "AM"
         assert m.name

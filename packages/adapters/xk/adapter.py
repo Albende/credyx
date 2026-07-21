@@ -1,34 +1,56 @@
 """Kosovo adapter — ARBK (Agjencia për Regjistrimin e Bizneseve të Kosovës).
 
 Source: https://arbk.rks-gov.net/ — the Kosovo Business Registration Agency
-operates the public free portal. Search by business name or by the
-unique business number. No API key, no auth.
+public portal. In 2024 ARBK replaced the legacy ``page.aspx`` server-rendered
+site with a React single-page app backed by a JSON API under
+``/api/api/``. This adapter talks to that API directly. No API key and no
+user registration are required.
+
+Two API traits shape the implementation:
+
+* **Signed request header.** Every call carries a ``key`` header that the
+  SPA derives on the fly: ``GET /api/api/Home/GetDate`` returns the server
+  time, which is AES-128-CBC encrypted (key = IV = the ASCII literal
+  ``8056483646328769``, PKCS7 padding) and base64-encoded. The server
+  rejects a stale or missing header, so the key is recomputed per request.
+* **Search is Cloudflare-Turnstile walled.** ``Services/KerkoBiznesin``
+  requires a Turnstile token minted in a browser and rejects any forged
+  value with 401. It is therefore unusable server-side. Instead the adapter
+  pulls the agency's own bulk export ``Services/EksportoBiznesetJson`` — a
+  ZIP of the full active+historic register (~269k businesses) keyed by the
+  Numri Unik Identifikues (NUI). Search and lookup run against that cached
+  dump, so both return real registry data key-free.
 
 Identifier:
-- COMPANY_NUMBER → Numri Unik i Biznesit (UBI / NRB), 8 digits + 1
-  trailing letter (e.g. ``70123456A``). Some historical entities also
-  carry a 9-digit fiscal/VAT number (NF). Both identifier shapes are
-  accepted.
-- VAT → Numri Fiskal (NF), 9 digits in the canonical form ``\\d{9}``.
-  Under the EU VAT prefix convention this is rendered ``XK`` + NF — the
-  adapter strips that prefix when present.
+- COMPANY_NUMBER → the ARBK business number as printed on the register,
+  i.e. the NUI. Modern entities carry a 9-digit NUI (e.g. ``810485145``);
+  legacy entities carry an 8-digit number, occasionally with a trailing
+  letter. Both shapes are accepted and matched against the export verbatim.
+- VAT → Numri Fiskal (NF), 9 digits, optionally EU-prefixed ``XK``. The
+  free bulk export does not expose the NF, so VAT lookup cannot be resolved
+  from it and returns ``None``.
 
-ARBK does not publish filed annual accounts in machine-readable form;
-``fetch_financials`` returns ``[]`` rather than fabricate data. Filings
-of audited statements live with the Kosovo Financial Reporting Council
-(KKRF / KCFR) but are exposed only as scanned PDFs behind a
-session-bound page — out of scope for the free MVP.
+ARBK does not publish filed annual accounts, and Kosovo has no free
+machine-readable financial-statement registry (ARBK stores none; the
+Central Bank publishes only its own and sector aggregates; the KKRF/POB
+registers auditors, not filings). ``fetch_financials`` returns ``[]``
+rather than fabricate data.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
+import json
 import logging
 import re
-from datetime import date, datetime
-from html import unescape
-from html.parser import HTMLParser
+import unicodedata
+import zipfile
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import InvalidIdentifierError
@@ -47,120 +69,24 @@ logger = logging.getLogger(__name__)
 
 _UBI_RE = re.compile(r"^\d{8}[A-Z]$")
 _NF_RE = re.compile(r"^\d{9}$")
-
-# ARBK card labels appear in Albanian, Serbian, and English depending on
-# the language toggle. Match loosely on either.
-_LABEL_NAME = (
-    "emri i biznesit",
-    "emri",
-    "emertimi",
-    "emërtimi",
-    "naziv",
-    "business name",
-    "name",
-)
-_LABEL_STATUS = (
-    "statusi",
-    "gjendja",
-    "status",
-    "stanje",
-    "state",
-)
-_LABEL_ADDRESS = (
-    "adresa",
-    "selia",
-    "adresa e selisë",
-    "adresa e selise",
-    "adresa selia",
-    "address",
-    "registered address",
-    "sedište",
-    "sediste",
-)
-_LABEL_REG_DATE = (
-    "data e regjistrimit",
-    "data e themelimit",
-    "data e krijimit",
-    "datum registracije",
-    "registration date",
-    "date of registration",
-    "incorporation date",
-)
-_LABEL_LEGAL_FORM = (
-    "forma e biznesit",
-    "forma ligjore",
-    "lloji i biznesit",
-    "lloji i subjektit",
-    "pravna forma",
-    "legal form",
-    "business type",
-    "entity type",
-)
-_LABEL_UBI = (
-    "numri i biznesit",
-    "numri unik",
-    "ubi",
-    "nrb",
-    "numri i regjistrimit",
-    "broj biznisa",
-    "business number",
-    "registration number",
-)
-_LABEL_NF = (
-    "numri fiskal",
-    "nf",
-    "fiskalni broj",
-    "tax id",
-    "tax number",
-    "vat",
-)
-_LABEL_DIRECTOR = (
-    "pronari",
-    "pronar",
-    "perfaqesues",
-    "përfaqësues",
-    "administrator",
-    "administratori",
-    "drejtori",
-    "drejtuesi",
-    "direktor",
-    "owner",
-    "director",
-    "manager",
-    "representative",
-)
-_LABEL_CAPITAL = (
-    "kapitali",
-    "kapitali themeltar",
-    "kapital",
-    "share capital",
-    "founding capital",
-)
-_LABEL_OBJECT = (
-    "veprimtaria",
-    "veprimtaria kryesore",
-    "fusha e veprimtarise",
-    "fusha e veprimtarisë",
-    "delatnost",
-    "activity",
-    "business activity",
-    "scope",
-)
+_COMPANY_NUM_RE = re.compile(r"^\d{8}[A-Z]?$|^\d{9}$")
 
 _STATUS_ACTIVE_TOKENS = (
     "aktiv",
     "i regjistruar",
     "e regjistruar",
+    "regjistruar",
     "active",
     "registered",
     "aktivan",
 )
 _STATUS_INACTIVE_TOKENS = (
+    "shuar",
+    "pasiv",
     "c'regjistruar",
     "ç'regjistruar",
     "çregjistruar",
     "cregjistruar",
-    "shuar",
     "pezulluar",
     "i pezulluar",
     "falimentuar",
@@ -187,14 +113,21 @@ def _normalize_ubi(value: str) -> str:
 
 def _normalize_nf(value: str) -> str:
     cleaned = re.sub(r"[\s\-]", "", value.strip()).upper()
-    # Kosovo VAT under the EU prefix convention is rendered "XK" + NF.
-    # Strip the prefix only when followed by a valid NF body to avoid
-    # truncating real input.
     if cleaned.startswith("XK") and _NF_RE.match(cleaned[2:]):
         cleaned = cleaned[2:]
     if not _NF_RE.match(cleaned):
         raise InvalidIdentifierError(
             f"Kosovo fiscal number must be 9 digits, got: {value}"
+        )
+    return cleaned
+
+
+def _normalize_company_number(value: str) -> str:
+    cleaned = re.sub(r"[\s\-./]", "", value.strip()).upper()
+    if not _COMPANY_NUM_RE.match(cleaned):
+        raise InvalidIdentifierError(
+            "Kosovo business number must be a 9-digit NUI (e.g. 810485145) or a "
+            f"legacy 8-digit number, got: {value}"
         )
     return cleaned
 
@@ -207,9 +140,9 @@ def _parse_xk_date(value: str | None) -> date | None:
         return date.fromisoformat(s[:10])
     except ValueError:
         pass
-    for fmt in ("%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y"):
+    for fmt in ("%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y", "%m/%d/%Y"):
         try:
-            return datetime.strptime(s[:10], fmt).date()
+            return datetime.strptime(s[:10].rstrip("/"), fmt).date()
         except ValueError:
             continue
     return None
@@ -248,6 +181,79 @@ def _parse_capital_amount(raw: str | None) -> float | None:
         return None
 
 
+_AES_SECRET = b"8056483646328769"
+
+
+def _compute_key(date_str: str) -> str:
+    """Reproduce the SPA's ``key`` header: AES-128-CBC(GetDate) → base64.
+
+    Key and IV are both the 16-byte ASCII literal ``8056483646328769``;
+    padding is PKCS7. Mirrors the CryptoJS call in the ARBK front end.
+    """
+    data = date_str.encode("utf-8")
+    pad = 16 - (len(data) % 16)
+    data += bytes([pad]) * pad
+    encryptor = Cipher(algorithms.AES(_AES_SECRET), modes.CBC(_AES_SECRET)).encryptor()
+    ciphertext = encryptor.update(data) + encryptor.finalize()
+    return base64.b64encode(ciphertext).decode("ascii")
+
+
+def _fold(value: str) -> str:
+    """Diacritic-insensitive, alphanumeric-only casefold for name matching.
+
+    The bulk export loses non-ASCII letters (they arrive as U+FFFD), so
+    folding both query and target to bare ASCII is what makes matching
+    survive the source's mangled diacritics.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]", "", stripped.lower())
+
+
+def _dget(record: dict[str, Any], *fragments: str) -> Any:
+    """Fetch a dump field by an ASCII fragment of its (possibly mangled) key."""
+    for key, val in record.items():
+        low = key.lower()
+        if all(frag.lower() in low for frag in fragments):
+            return val
+    return None
+
+
+def _nace_code(description: str | None) -> str | None:
+    if not description:
+        return None
+    match = re.match(r"\s*(\d{3,5})", description)
+    return match.group(1) if match else None
+
+
+def _slim(record: dict[str, Any]) -> dict[str, Any]:
+    number = str(_dget(record, "nr", "biznesit") or "").strip()
+    name = str(_dget(record, "emri", "biznesit") or "").strip()
+    nace_desc = _dget(record, "nace")
+    return {
+        "number": number,
+        "name": name,
+        "name_fold": _fold(name),
+        "legal_form": (_dget(record, "lloji", "biznesit") or None),
+        "sector": (_dget(record, "sektori") or None),
+        "city": (_dget(record, "qyteti") or None),
+        "status_raw": (_dget(record, "statusi", "biznesit") or None),
+        "nace_description": nace_desc or None,
+        "nace_code": _nace_code(nace_desc),
+        "employees": _dget(record, "nr", "tor"),
+        "size": (_dget(record, "madh") or None),
+        "reg_year": _dget(record, "years"),
+        "reg_month": (_dget(record, "months") or None),
+    }
+
+
+_DUMP_TTL = timedelta(hours=12)
+_dump_records: list[dict[str, Any]] | None = None
+_dump_index: dict[str, dict[str, Any]] | None = None
+_dump_ts: datetime | None = None
+_dump_lock = asyncio.Lock()
+
+
 class XKAdapter(CountryAdapter):
     country_code = "XK"
     country_name = "Kosovo"
@@ -258,483 +264,212 @@ class XKAdapter(CountryAdapter):
     rate_limit_per_minute = 30
 
     BASE_URL = "https://arbk.rks-gov.net"
-    SEARCH_PATH = "/page.aspx?id=2,32"
-    LOOKUP_PATH = "/page.aspx?id=2,32"
+    DATE_PATH = "/api/api/Home/GetDate"
+    EXPORT_PATH = "/api/api/Services/EksportoBiznesetJson"
+    DETAIL_PATH = "/api/api/Services/TeDhenatBiznesit"
 
     def _client(self) -> httpx.AsyncClient:
         return build_http_client(
             base_url=self.BASE_URL,
             headers={
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "sq;q=0.9,sr;q=0.8,en;q=0.7",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "sq;q=0.9,en;q=0.8",
+                "Origin": self.BASE_URL,
+                "Referer": f"{self.BASE_URL}/",
             },
-            timeout=25.0,
+            timeout=90.0,
+        )
+
+    async def _signed_key(self, client: httpx.AsyncClient) -> str:
+        resp = await get_with_retry(client, self.DATE_PATH)
+        resp.raise_for_status()
+        server_date = resp.text.strip().strip('"')
+        return _compute_key(server_date)
+
+    async def _load_dump(self, force_refresh: bool = False) -> list[dict[str, Any]]:
+        global _dump_records, _dump_index, _dump_ts
+        now = datetime.utcnow()
+        if (
+            not force_refresh
+            and _dump_records is not None
+            and _dump_ts is not None
+            and now - _dump_ts < _DUMP_TTL
+        ):
+            return _dump_records
+
+        async with _dump_lock:
+            now = datetime.utcnow()
+            if (
+                not force_refresh
+                and _dump_records is not None
+                and _dump_ts is not None
+                and now - _dump_ts < _DUMP_TTL
+            ):
+                return _dump_records
+
+            async with self._client() as client:
+                key = await self._signed_key(client)
+                resp = await get_with_retry(
+                    client,
+                    self.EXPORT_PATH,
+                    params={"Gjuha": "1"},
+                    headers={"key": key},
+                )
+                resp.raise_for_status()
+                payload = resp.content
+
+            archive = zipfile.ZipFile(io.BytesIO(payload))
+            json_name = next(
+                n for n in archive.namelist() if n.lower().endswith(".json")
+            )
+            raw_records = json.loads(archive.read(json_name).decode("utf-8"))
+
+            records = [_slim(r) for r in raw_records]
+            records = [r for r in records if r["number"] and r["name"]]
+            _dump_records = records
+            _dump_index = {r["number"].upper(): r for r in records}
+            _dump_ts = datetime.utcnow()
+            logger.info("XK ARBK export loaded: %d businesses", len(records))
+            return records
+
+    def _match_from_slim(self, slim: dict[str, Any]) -> CompanyMatch:
+        return CompanyMatch(
+            id=slim["number"],
+            name=slim["name"],
+            country=self.country_code,
+            identifiers=[
+                RegistryIdentifier(
+                    type=IdentifierType.COMPANY_NUMBER,
+                    value=slim["number"],
+                    label="Numri Unik Identifikues (NUI)",
+                )
+            ],
+            address=slim.get("city"),
+            status=_classify_status(slim.get("status_raw")),
+            source_url=f"{self.BASE_URL}/",
+        )
+
+    def _details_from_slim(self, slim: dict[str, Any]) -> CompanyDetails:
+        return CompanyDetails(
+            id=slim["number"],
+            name=slim["name"],
+            country=self.country_code,
+            legal_form=slim.get("legal_form"),
+            status=_classify_status(slim.get("status_raw")),
+            registered_address=slim.get("city"),
+            capital_currency="EUR",
+            nace_codes=[slim["nace_code"]] if slim.get("nace_code") else [],
+            identifiers=[
+                RegistryIdentifier(
+                    type=IdentifierType.COMPANY_NUMBER,
+                    value=slim["number"],
+                    label="Numri Unik Identifikues (NUI)",
+                )
+            ],
+            raw={
+                "source": "arbk.rks-gov.net EksportoBiznesetJson",
+                "number": slim["number"],
+                "sector": slim.get("sector"),
+                "nace_description": slim.get("nace_description"),
+                "employees": slim.get("employees"),
+                "size_band": slim.get("size"),
+                "registration_year": slim.get("reg_year"),
+                "registration_month": slim.get("reg_month"),
+                "status_raw": slim.get("status_raw"),
+            },
+            source_url=f"{self.BASE_URL}/",
         )
 
     async def health_check(self) -> AdapterHealth:
+        capabilities = {"search": False, "lookup": False, "financials": False}
         try:
             async with self._client() as client:
-                resp = await get_with_retry(client, "/")
+                key = await self._signed_key(client)
+                resp = await get_with_retry(
+                    client,
+                    self.DETAIL_PATH,
+                    params={"nRegjistriId": "1", "Gjuha": "1"},
+                    headers={"key": key},
+                )
                 resp.raise_for_status()
-                page_text = _decode_response(resp)
+                alive = isinstance(resp.json(), list)
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={
-                    "search": False,
-                    "lookup": False,
-                    "financials": False,
-                },
+                capabilities=capabilities,
                 requires_api_key=False,
                 api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
 
-        low = page_text.lower()
-        portal_alive = (
-            "arbk" in low or "biznes" in low or "register" in low or "regjistr" in low
-        )
-        if not portal_alive:
-            return AdapterHealth(
-                country_code=self.country_code,
-                name=self.country_name,
-                status=AdapterStatus.DEGRADED,
-                capabilities={
-                    "search": True,
-                    "lookup": True,
-                    "financials": False,
-                },
-                requires_api_key=False,
-                api_key_present=True,
-                rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=(
-                    "arbk.rks-gov.net responded but markup unrecognised; "
-                    "site may be under maintenance."
-                ),
-            )
+        capabilities.update({"search": True, "lookup": True})
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.OK,
-            capabilities={
-                "search": True,
-                "lookup": True,
-                "financials": False,
-            },
+            status=AdapterStatus.OK if alive else AdapterStatus.DEGRADED,
+            capabilities=capabilities,
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup live via arbk.rks-gov.net HTML scrape. Financial "
-                "statements are not centrally published in machine-readable "
-                "form."
+                "Search + lookup live via arbk.rks-gov.net /api/api bulk export. "
+                "Financial statements are not published in machine-readable form."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        query = name.strip()
+        query = _fold(name)
         if not query:
             return []
-        async with self._client() as client:
-            resp = await get_with_retry(
-                client,
-                self.SEARCH_PATH,
-                params={"emri": query, "name": query, "q": query},
-            )
-            if resp.status_code == 404:
-                return []
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
+        records = await self._load_dump()
 
-        rows = _extract_search_rows(page_text)
-        matches: list[CompanyMatch] = []
-        for row in rows[:limit]:
-            ubi = row.get("ubi")
-            if not row.get("name"):
+        exact: list[dict[str, Any]] = []
+        prefix: list[dict[str, Any]] = []
+        contains: list[dict[str, Any]] = []
+        for slim in records:
+            folded = slim["name_fold"]
+            if not folded:
                 continue
-            ids: list[RegistryIdentifier] = []
-            if ubi:
-                ids.append(
-                    RegistryIdentifier(
-                        type=IdentifierType.COMPANY_NUMBER,
-                        value=ubi,
-                        label="Numri Unik i Biznesit",
-                    )
-                )
-            nf = row.get("nf")
-            if nf:
-                ids.append(
-                    RegistryIdentifier(
-                        type=IdentifierType.VAT,
-                        value=nf,
-                        label="Numri Fiskal",
-                    )
-                )
-            row_id = ubi or nf
-            if not row_id:
-                continue
-            matches.append(
-                CompanyMatch(
-                    id=row_id,
-                    name=row["name"],
-                    country=self.country_code,
-                    identifiers=ids,
-                    address=row.get("address"),
-                    status=_classify_status(row.get("status_raw")),
-                    source_url=f"{self.BASE_URL}{self.SEARCH_PATH}",
-                )
-            )
-        return matches
+            if folded == query:
+                exact.append(slim)
+            elif folded.startswith(query):
+                prefix.append(slim)
+            elif query in folded:
+                contains.append(slim)
+            if len(exact) >= limit:
+                break
+
+        ranked = (exact + prefix + contains)[:limit]
+        return [self._match_from_slim(s) for s in ranked]
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.COMPANY_NUMBER:
-            ident = _normalize_ubi(value)
-            param_keys = ("ubi", "nrb", "search", "q")
+            ident = _normalize_company_number(value)
         elif id_type == IdentifierType.VAT:
-            ident = _normalize_nf(value)
-            param_keys = ("nf", "fiskal", "search", "q")
+            _normalize_nf(value)
+            logger.info(
+                "XK VAT (fiscal number) lookup is not resolvable from the free "
+                "ARBK bulk export, which is keyed by NUI only."
+            )
+            return None
         else:
             raise InvalidIdentifierError(
-                "Kosovo adapter only supports COMPANY_NUMBER (UBI) or VAT (NF), "
+                "Kosovo adapter only supports COMPANY_NUMBER (NUI) or VAT (NF), "
                 f"got {id_type}"
             )
 
-        async with self._client() as client:
-            resp = await get_with_retry(
-                client,
-                self.LOOKUP_PATH,
-                params={k: ident for k in param_keys},
-            )
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
-
-        record = _extract_company_record(page_text)
-        if not record.get("name"):
-            low = page_text.lower()
-            if any(
-                token in low
-                for token in (
-                    "nuk u gjet",
-                    "asnje rezultat",
-                    "asnjë rezultat",
-                    "no results",
-                    "not found",
-                    "nije pronađen",
-                    "nije pronaden",
-                )
-            ):
-                return None
+        await self._load_dump()
+        slim = _dump_index.get(ident) if _dump_index else None
+        if slim is None:
             return None
-
-        identifiers: list[RegistryIdentifier] = []
-        ubi_val = record.get("ubi") if id_type == IdentifierType.VAT else ident
-        nf_val = record.get("nf") if id_type == IdentifierType.COMPANY_NUMBER else ident
-        if ubi_val and _UBI_RE.match(ubi_val):
-            identifiers.append(
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER,
-                    value=ubi_val,
-                    label="Numri Unik i Biznesit",
-                )
-            )
-        if nf_val and _NF_RE.match(nf_val):
-            identifiers.append(
-                RegistryIdentifier(
-                    type=IdentifierType.VAT,
-                    value=nf_val,
-                    label="Numri Fiskal",
-                )
-            )
-
-        director_name = (record.get("director") or "").strip()
-
-        return CompanyDetails(
-            id=ubi_val or ident,
-            name=record["name"],
-            country=self.country_code,
-            legal_form=record.get("legal_form"),
-            status=_classify_status(record.get("status_raw")),
-            incorporation_date=_parse_xk_date(record.get("registration_date")),
-            registered_address=record.get("address"),
-            capital_amount=_parse_capital_amount(record.get("capital")),
-            capital_currency="EUR",
-            identifiers=identifiers,
-            raw={
-                "source": "arbk.rks-gov.net",
-                "fields": record,
-                "director_name": director_name or None,
-                "business_object": record.get("business_object"),
-            },
-            source_url=f"{self.BASE_URL}{self.LOOKUP_PATH}",
-        )
+        return self._details_from_slim(slim)
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         return []
-
-
-def _decode_response(resp: httpx.Response) -> str:
-    """Decode the body, preferring UTF-8 (arbk.rks-gov.net uses UTF-8).
-
-    Falls back defensively to cp1250/Latin-1 derivatives when an upstream
-    proxy strips encoding headers so Albanian (ë, ç) and Serbian (š, đ)
-    diacritics survive.
-    """
-    body = resp.content
-    if not body:
-        return ""
-    for encoding in ("utf-8", "cp1250", "cp1252", "iso-8859-1"):
-        try:
-            return body.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return resp.text
-
-
-class _TableParser(HTMLParser):
-    """Flatten every <td>/<th> cell into a list of stripped text strings."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.cells: list[str] = []
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag in ("td", "th"):
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self.cells.append(text)
-            self._in_cell -= 1
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-class _SearchRowParser(HTMLParser):
-    """Capture every <tr>'s flattened cell list, for search-results tables."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.rows: list[list[str]] = []
-        self._row: list[str] = []
-        self._in_row = False
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag == "tr":
-            self._in_row = True
-            self._row = []
-        elif tag in ("td", "th") and self._in_row:
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self._row.append(text)
-            self._in_cell -= 1
-            self._buf = []
-        elif tag == "tr" and self._in_row:
-            if self._row:
-                self.rows.append(self._row)
-            self._in_row = False
-            self._row = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-def _match_label(cell: str, candidates: tuple[str, ...]) -> bool:
-    low = cell.lower().strip().rstrip(":").strip()
-    return any(label in low for label in candidates)
-
-
-def _extract_company_record(html: str) -> dict[str, Any]:
-    """Pull the company fields out of an ARBK detail page."""
-    if not html:
-        return {}
-
-    parser = _TableParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("XK ARBK HTML parse failed: %s", exc)
-        return {}
-
-    cells = [c for c in parser.cells if c]
-    record: dict[str, Any] = {}
-    for label_cell, value_cell in zip(cells, cells[1:]):
-        if not value_cell:
-            continue
-        if "name" not in record and _match_label(label_cell, _LABEL_NAME):
-            record["name"] = value_cell
-        elif "status_raw" not in record and _match_label(label_cell, _LABEL_STATUS):
-            record["status_raw"] = value_cell
-        elif "address" not in record and _match_label(label_cell, _LABEL_ADDRESS):
-            record["address"] = value_cell
-        elif "registration_date" not in record and _match_label(
-            label_cell, _LABEL_REG_DATE
-        ):
-            record["registration_date"] = value_cell
-        elif "legal_form" not in record and _match_label(label_cell, _LABEL_LEGAL_FORM):
-            record["legal_form"] = value_cell
-        elif "ubi" not in record and _match_label(label_cell, _LABEL_UBI):
-            up = value_cell.upper().replace(" ", "")
-            if _UBI_RE.match(up):
-                record["ubi"] = up
-        elif "nf" not in record and _match_label(label_cell, _LABEL_NF):
-            up = value_cell.upper().replace(" ", "")
-            if up.startswith("XK") and _NF_RE.match(up[2:]):
-                up = up[2:]
-            if _NF_RE.match(up):
-                record["nf"] = up
-        elif "director" not in record and _match_label(label_cell, _LABEL_DIRECTOR):
-            record["director"] = value_cell
-        elif "capital" not in record and _match_label(label_cell, _LABEL_CAPITAL):
-            record["capital"] = value_cell
-        elif "business_object" not in record and _match_label(label_cell, _LABEL_OBJECT):
-            record["business_object"] = value_cell
-
-    if "name" not in record:
-        # ARBK sometimes renders the company name above the table in a
-        # heading element when only one match is returned.
-        m = re.search(
-            r"<h[12][^>]*>\s*([^<]{3,200})\s*</h[12]>",
-            html,
-            re.IGNORECASE,
-        )
-        if m:
-            candidate = unescape(re.sub(r"\s+", " ", m.group(1)).strip())
-            low = candidate.lower()
-            if "arbk" not in low and "kerko" not in low and "kërko" not in low:
-                record["name"] = candidate
-    return record
-
-
-def _extract_search_rows(html: str) -> list[dict[str, Any]]:
-    """Best-effort parse of the ARBK name-search results page.
-
-    Rows expose the company name alongside the UBI (8 digits + letter).
-    The UBI shape is unique, so it serves as the row anchor.
-    """
-    if not html:
-        return []
-    parser = _SearchRowParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("XK ARBK search parse failed: %s", exc)
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for cells in parser.rows:
-        cleaned = [c for c in cells if c]
-        if len(cleaned) < 2:
-            continue
-        ubi_match: str | None = None
-        nf_match: str | None = None
-        for c in cleaned:
-            up = c.upper().replace(" ", "")
-            if not ubi_match and _UBI_RE.match(up):
-                ubi_match = up
-            elif not nf_match and _NF_RE.match(up):
-                nf_match = up
-        if not (ubi_match or nf_match):
-            continue
-        name_candidate: str | None = None
-        for c in cleaned:
-            up = c.upper().replace(" ", "")
-            if up == ubi_match or up == nf_match:
-                continue
-            if re.fullmatch(r"[\d\s./\-]+", c):
-                continue
-            if len(c) < 3:
-                continue
-            if name_candidate is None or len(c) > len(name_candidate):
-                name_candidate = c
-        if not name_candidate:
-            continue
-        if name_candidate.lower() in {
-            "name",
-            "emri",
-            "emertimi",
-            "emërtimi",
-            "naziv",
-        }:
-            continue
-        rows.append(
-            {
-                "name": name_candidate,
-                "ubi": ubi_match,
-                "nf": nf_match,
-                "address": _pick_address(cleaned),
-                "status_raw": _pick_status(cleaned),
-            }
-        )
-    return rows
-
-
-def _pick_address(cells: list[str]) -> str | None:
-    for c in cells:
-        low = c.lower()
-        if any(
-            token in low
-            for token in (
-                "prishtine",
-                "prishtinë",
-                "prishtina",
-                "pristina",
-                "peje",
-                "pejë",
-                "prizren",
-                "mitrovice",
-                "mitrovicë",
-                "ferizaj",
-                "gjilan",
-                "gjakove",
-                "gjakovë",
-                "rruga",
-                "rr.",
-                "street",
-                "ulica",
-            )
-        ):
-            return c
-    return None
-
-
-def _pick_status(cells: list[str]) -> str | None:
-    for c in cells:
-        low = c.lower()
-        if any(token in low for token in _STATUS_ACTIVE_TOKENS):
-            return c
-        if any(token in low for token in _STATUS_INACTIVE_TOKENS):
-            return c
-    return None

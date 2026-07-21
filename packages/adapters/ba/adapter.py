@@ -1,27 +1,32 @@
 """Bosnia and Herzegovina adapter.
 
-The BiH commercial registry is fragmented across three jurisdictions:
+BiH has no single company register: incorporation records live in three
+separate court/agency systems (Federation of BiH court registry, Republika
+Srpska APIF, Brčko District), none of which exposes a free machine-readable
+API — the FBiH portal is a stateful Oracle APEX app and the RS bizreg host
+is offline.
 
-* Federation of BiH — https://bizreg.pravosudje.ba/  (primary, default)
-* Republika Srpska   — https://bizreg.esrpska.com/   (fallback)
-* Brčko District     — separate portal, not searched here
+The one free, no-auth, structured live source that covers real Bosnian
+companies with both registry detail *and* filed financial statements is the
+**Banja Luka Stock Exchange** (``blberza.com``). It publishes, for every
+issuer traded on the RS capital market:
 
-All three expose free, no-auth, public HTML search pages. There is no
-official JSON API: this adapter posts the same form a browser would submit
-and parses the resulting result table. Annual filings for listed firms are
-published as free PDFs on the Sarajevo Stock Exchange (SASE) and Banja Luka
-Stock Exchange (BLSE); they are not centrally indexed, so `fetch_financials`
-returns the per-issuer listing URL as a discovery pointer rather than
-synthesizing numbers.
+* an issuer-name autocomplete service (JSON) — used for name search,
+* an issuer profile page (address, contact, ownership) — used for lookup,
+* an unaudited financial-statements page sourced from APIF — used for
+  financials (real filed balance sheets, not synthesized numbers).
 
-Identifiers:
-  JIB — Jedinstveni Identifikacijski Broj, 13 digits (tax-style ID)
-  MB  — Matični broj, 7-13 digits (company registration number)
+Issuers are keyed by their exchange code (e.g. ``TLKM`` for Telekom Srpske);
+that code is this adapter's ``COMPANY_NUMBER``. Coverage is therefore RS
+listed/registered issuers; FBiH-only private companies are not reachable
+without the paid court registry and surface as empty results, never mock
+data.
 """
 from __future__ import annotations
 
+import json
 import re
-from datetime import date, datetime
+from datetime import date
 from html import unescape
 
 import httpx
@@ -38,32 +43,56 @@ from packages.shared.models import (
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
+    Shareholder,
 )
 
-_JIB_RE = re.compile(r"^\d{13}$")
-_MB_RE = re.compile(r"^\d{7,13}$")
+_CODE_RE = re.compile(r"^[A-Za-z0-9]{2,12}$")
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 _CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
-_LISTED_SASE = {
-    "4200211100005": "BHTSR",   # BH Telecom
-    "4200225150005": "JPESR",   # JP Elektroprivreda BiH
-    "4200119190100": "BSNLR",   # Bosnalijek
+_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
+_YEAR_OPT_RE = re.compile(r'value="(\d{4})"')
+
+_PAGE_NOT_FOUND = "requested page does not exist"
+
+_SECTION_HEADINGS = {
+    "podaci o emitentu",
+    "vlasnička struktura",
+    "deset najvećih akcionara",
+    "područje djelatnosti",
+    "lice ovlašćeno za zastupanje",
+    "upravni odbor",
+    "nadzorni odbor",
+    "registar emitenata",
+    "grafikoni",
+    "cijene",
+    "poslovi",
+    "objave",
+    "finansijski izvještaji",
+    "podaci o hartiji",
+}
+
+_BALANCE_SHEET_LABELS = {
+    "stalna sredstva": "non_current_assets",
+    "tekuća sredstva": "current_assets",
+    "gotovinski ekvivalenti i gotovina": "cash",
+    "bilansna aktiva": "total_assets",
+    "kapital": "total_equity",
+    "osnovni kapital": "share_capital",
+    "rezerve": "reserves",
+    "neraspoređeni dobitak": "retained_earnings",
+    "dugoročne obaveze": "non_current_liabilities",
+    "kratkoročne obaveze": "current_liabilities",
 }
 
 
-def _normalize_jib(value: str) -> str:
-    cleaned = value.strip().replace(" ", "").replace("-", "")
-    if not _JIB_RE.match(cleaned):
-        raise InvalidIdentifierError(f"BA JIB must be exactly 13 digits: {value}")
-    return cleaned
-
-
-def _normalize_mb(value: str) -> str:
-    cleaned = value.strip().replace(" ", "").replace("-", "")
-    if not _MB_RE.match(cleaned):
-        raise InvalidIdentifierError(f"BA MB must be 7-13 digits: {value}")
+def _normalize_code(value: str) -> str:
+    cleaned = value.strip().upper()
+    if not _CODE_RE.match(cleaned):
+        raise InvalidIdentifierError(
+            f"BA issuer code must be 2-12 alphanumerics (e.g. TLKM): {value!r}"
+        )
     return cleaned
 
 
@@ -71,35 +100,72 @@ def _strip_html(fragment: str) -> str:
     return _WS_RE.sub(" ", unescape(_TAG_RE.sub(" ", fragment))).strip()
 
 
+def _cells(row_html: str) -> list[str]:
+    return [_strip_html(c) for c in _CELL_RE.findall(row_html)]
+
+
+def _parse_amount(value: str | None) -> float | None:
+    if not value:
+        return None
+    digits = re.sub(r"[^0-9,.\-]", "", value).replace(".", "").replace(",", ".")
+    if digits in {"", "-", "."}:
+        return None
+    try:
+        return float(digits)
+    except ValueError:
+        return None
+
+
+def _status_from_name(name: str) -> str:
+    low = name.lower()
+    if "u stečaju" in low or "u stecaju" in low:
+        return "Bankruptcy (u stečaju)"
+    if "u likvidaciji" in low:
+        return "Liquidation (u likvidaciji)"
+    return "Listed"
+
+
+def _legal_form_from_name(name: str) -> str | None:
+    low = f" {name.lower()} "
+    if "akcionarsko društvo" in low or " a.d." in low or " ad " in low:
+        return "Akcionarsko društvo (a.d.)"
+    if "društvo sa ograničenom" in low or " d.o.o." in low:
+        return "Društvo sa ograničenom odgovornošću (d.o.o.)"
+    return None
+
+
 class BAAdapter(CountryAdapter):
     country_code = "BA"
     country_name = "Bosnia and Herzegovina"
-    identifier_types = [IdentifierType.VAT, IdentifierType.COMPANY_NUMBER]
-    primary_identifier = IdentifierType.VAT
+    identifier_types = [IdentifierType.COMPANY_NUMBER]
+    primary_identifier = IdentifierType.COMPANY_NUMBER
     requires_api_key = False
     rate_limit_per_minute = 30
 
-    FBIH_BASE = "https://bizreg.pravosudje.ba"
-    RS_BASE = "https://bizreg.esrpska.com"
-    SASE_BASE = "https://www.sase.ba"
     BLSE_BASE = "https://www.blberza.com"
+    AUTOCOMPLETE_PATH = (
+        "/Code/Services/Autocompleter/IssuerListAutocompleterService.ashx"
+    )
 
-    def _client(self, base_url: str) -> httpx.AsyncClient:
-        # BiH registries occasionally serve windows-1250 / iso-8859-2; httpx
-        # auto-decodes via the Content-Type header. We just send a permissive
-        # Accept and let upstream choose.
+    def _client(self) -> httpx.AsyncClient:
         return build_http_client(
-            base_url=base_url,
+            base_url=self.BLSE_BASE,
             timeout=30.0,
-            headers={"Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"},
+            headers={"Accept": "text/html,application/json;q=0.9,*/*;q=0.5"},
         )
+
+    def _issuer_url(self, code: str) -> str:
+        return f"{self.BLSE_BASE}/Pages/IssuerData.aspx?code={code}"
+
+    def _reports_url(self, code: str) -> str:
+        return f"{self.BLSE_BASE}/Pages/FinancialReports.aspx?code={code}"
 
     async def health_check(self) -> AdapterHealth:
         try:
-            async with self._client(self.FBIH_BASE) as client:
-                resp = await get_with_retry(client, "/")
+            async with self._client() as client:
+                resp = await get_with_retry(client, self.AUTOCOMPLETE_PATH, params={"q": "a"})
                 if resp.status_code >= 500:
-                    raise AdapterError(f"FBiH bizreg HTTP {resp.status_code}")
+                    raise AdapterError(f"BLSE autocomplete HTTP {resp.status_code}")
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -111,279 +177,255 @@ class BAAdapter(CountryAdapter):
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.DEGRADED,
-            capabilities={"search": True, "lookup": True, "financials": False},
+            status=AdapterStatus.OK,
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Fragmented HTML registries (FBiH/RS/Brcko). Structured "
-                "filings only for SASE/BLSE-listed issuers as PDFs."
+                "Live source: Banja Luka Stock Exchange (blberza.com). Covers "
+                "RS capital-market issuers; FBiH-only private firms not reachable "
+                "via a free API."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
+        query = name.strip()
+        if not query:
+            return []
+        try:
+            async with self._client() as client:
+                resp = await get_with_retry(
+                    client, self.AUTOCOMPLETE_PATH, params={"q": query}
+                )
+                if resp.status_code != 200:
+                    return []
+                rows = json.loads(resp.text)
+        except (httpx.HTTPError, json.JSONDecodeError):
+            return []
+
         matches: list[CompanyMatch] = []
-        # Federation first (covers ~63% of the country).
-        matches.extend(await self._search_fbih(name, limit))
-        if len(matches) < limit:
-            matches.extend(await self._search_rs(name, limit - len(matches)))
-        # De-duplicate by JIB / MB / name.
-        seen: set[str] = set()
-        deduped: list[CompanyMatch] = []
-        for m in matches:
-            key = m.id or m.name.lower()
-            if key in seen:
+        for entry in rows:
+            if not isinstance(entry, list) or len(entry) < 2:
                 continue
-            seen.add(key)
-            deduped.append(m)
-        return deduped[:limit]
-
-    async def _search_fbih(self, name: str, limit: int) -> list[CompanyMatch]:
-        # FBiH bizreg uses a public search form posting `naziv` (name). The
-        # response is an HTML table where each row contains JIB, MB, naziv,
-        # sjedište (seat) and a court reference.
-        params = {"naziv": name, "limit": str(limit)}
-        try:
-            async with self._client(self.FBIH_BASE) as client:
-                resp = await client.get("/pretraga/subjekti", params=params)
-                if resp.status_code != 200:
-                    return []
-                html = resp.text
-        except httpx.HTTPError:
-            return []
-        return _parse_search_table(
-            html=html,
-            country_code=self.country_code,
-            source_url=f"{self.FBIH_BASE}/pretraga/subjekti?naziv={name}",
-            jurisdiction="FBiH",
-            limit=limit,
-        )
-
-    async def _search_rs(self, name: str, limit: int) -> list[CompanyMatch]:
-        params = {"naziv": name, "limit": str(limit)}
-        try:
-            async with self._client(self.RS_BASE) as client:
-                resp = await client.get("/pretraga/subjekti", params=params)
-                if resp.status_code != 200:
-                    return []
-                html = resp.text
-        except httpx.HTTPError:
-            return []
-        return _parse_search_table(
-            html=html,
-            country_code=self.country_code,
-            source_url=f"{self.RS_BASE}/pretraga/subjekti?naziv={name}",
-            jurisdiction="RS",
-            limit=limit,
-        )
+            code, company_name = str(entry[0]).strip(), str(entry[1]).strip()
+            if not code or not company_name:
+                continue
+            matches.append(
+                CompanyMatch(
+                    id=code,
+                    name=company_name,
+                    country=self.country_code,
+                    identifiers=[
+                        RegistryIdentifier(
+                            type=IdentifierType.COMPANY_NUMBER,
+                            value=code,
+                            label="BLSE issuer code",
+                        )
+                    ],
+                    status=_status_from_name(company_name),
+                    source_url=self._issuer_url(code),
+                )
+            )
+            if len(matches) >= limit:
+                break
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
-        if id_type == IdentifierType.VAT:
-            normalized = _normalize_jib(value)
-            param = "jib"
-        elif id_type == IdentifierType.COMPANY_NUMBER:
-            normalized = _normalize_mb(value)
-            param = "mb"
-        else:
+        if id_type != IdentifierType.COMPANY_NUMBER:
             raise InvalidIdentifierError(
-                f"BA supports VAT (JIB) and COMPANY_NUMBER (MB), got {id_type}"
+                f"BA lookup uses COMPANY_NUMBER (BLSE issuer code), got {id_type}"
             )
-
-        details = await self._lookup_at(self.FBIH_BASE, param, normalized, "FBiH")
-        if details is None:
-            details = await self._lookup_at(self.RS_BASE, param, normalized, "RS")
-        return details
-
-    async def _lookup_at(
-        self, base: str, param: str, value: str, jurisdiction: str
-    ) -> CompanyDetails | None:
+        code = _normalize_code(value)
         try:
-            async with self._client(base) as client:
-                resp = await get_with_retry(
-                    client, f"/subjekt?{param}={value}",
-                )
-                if resp.status_code == 404:
-                    return None
+            async with self._client() as client:
+                resp = await get_with_retry(client, f"/Pages/IssuerData.aspx?code={code}")
                 if resp.status_code != 200:
                     return None
                 html = resp.text
         except httpx.HTTPError:
             return None
 
-        fields = _parse_detail_fields(html)
-        if not fields.get("naziv") and not fields.get("name"):
+        if _PAGE_NOT_FOUND in html.lower():
             return None
-        jib = fields.get("jib") or (value if param == "jib" else "")
-        mb = fields.get("mb") or (value if param == "mb" else "")
-        identifiers: list[RegistryIdentifier] = []
-        if jib:
-            identifiers.append(
-                RegistryIdentifier(type=IdentifierType.VAT, value=jib, label="JIB")
-            )
-        if mb:
-            identifiers.append(
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER, value=mb, label="MB"
-                )
-            )
-        company_id = jib or mb
+        name = _extract_issuer_name(html)
+        if not name or "unknown issuer" in name.lower():
+            return None
+
+        tokens = _tokenize(html)
+        address = _labeled(tokens, "Adresa")
+        phone = _labeled(tokens, "Telefon")
+        website = _labeled(tokens, "Web")
+        email = _labeled(tokens, "Email")
+        security_code = _labeled(tokens, "Emisije emitenata")
+        activity = _labeled(tokens, "Područje")
+        shareholders = _extract_shareholders(html)
+
+        raw: dict[str, object] = {"source": "BLSE", "issuer_code": code}
+        if security_code:
+            raw["security_code"] = security_code
+        if activity:
+            raw["activity"] = activity
+
         return CompanyDetails(
-            id=company_id,
-            name=fields.get("naziv") or fields.get("name") or "",
+            id=code,
+            name=name,
             country=self.country_code,
-            legal_form=fields.get("pravna_forma") or fields.get("oblik"),
-            status=fields.get("status"),
-            incorporation_date=_parse_ba_date(fields.get("datum_osnivanja")),
-            dissolution_date=_parse_ba_date(fields.get("datum_brisanja")),
-            registered_address=fields.get("sjediste") or fields.get("adresa"),
-            capital_amount=_parse_amount(fields.get("kapital")),
-            capital_currency="BAM" if fields.get("kapital") else None,
-            identifiers=identifiers,
-            raw={"jurisdiction": jurisdiction, "fields": fields},
-            source_url=f"{base}/subjekt?{param}={value}",
+            legal_form=_legal_form_from_name(name),
+            status=_status_from_name(name),
+            registered_address=address,
+            identifiers=[
+                RegistryIdentifier(
+                    type=IdentifierType.COMPANY_NUMBER,
+                    value=code,
+                    label="BLSE issuer code",
+                )
+            ],
+            shareholders=shareholders,
+            website=website,
+            phone=phone,
+            email=email,
+            raw=raw,
+            source_url=self._issuer_url(code),
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # Only SASE-listed issuers have structured public annual reports
-        # under our free-source rule. For everyone else, BiH filings live
-        # behind paid registry portals or in court archives — return [].
+        code = _normalize_code(company_id)
         try:
-            jib = _normalize_jib(company_id)
-        except InvalidIdentifierError:
+            async with self._client() as client:
+                resp = await get_with_retry(
+                    client, f"/Pages/FinancialReports.aspx?code={code}"
+                )
+                if resp.status_code != 200:
+                    return []
+                html = resp.text
+        except httpx.HTTPError:
             return []
 
-        if jib not in _LISTED_SASE:
+        if _PAGE_NOT_FOUND in html.lower():
             return []
 
-        ticker = _LISTED_SASE[jib]
-        # SASE publishes per-issuer financial-report listings at a stable
-        # URL pattern. We return a single discovery pointer per recent year;
-        # PDF parsing is a Phase-2 task.
-        current_year = datetime.utcnow().year
-        listing_url = f"{self.SASE_BASE}/v1/Emitent/Index/{ticker}"
+        available = _available_annual_years(html)
+        if not available:
+            return []
+        balance_sheets = _parse_balance_sheets(html)
+
+        reports_url = self._reports_url(code)
         filings: list[FinancialFiling] = []
-        for offset in range(years):
-            yr = current_year - offset - 1
+        for year in available[:years]:
+            bs = balance_sheets.get(year)
+            structured = None
+            if bs:
+                structured = {
+                    "currency": "BAM",
+                    "source": "APIF via Banja Luka Stock Exchange (unaudited)",
+                    "statement": "abbreviated_balance_sheet",
+                    "balance_sheet": bs,
+                }
             filings.append(
                 FinancialFiling(
-                    company_id=jib,
-                    year=yr,
+                    company_id=code,
+                    year=year,
                     type=FilingType.ANNUAL_REPORT,
-                    period_end=date(yr, 12, 31),
+                    period_end=date(year, 12, 31),
                     currency="BAM",
-                    structured_data=None,
+                    structured_data=structured,
                     document_url=None,
-                    document_format="pdf",
-                    source_url=listing_url,
+                    document_format="html" if structured else None,
+                    source_url=reports_url,
                 )
             )
         return filings
 
 
-def _parse_search_table(
-    *,
-    html: str,
-    country_code: str,
-    source_url: str,
-    jurisdiction: str,
-    limit: int,
-) -> list[CompanyMatch]:
-    matches: list[CompanyMatch] = []
-    for row_html in _ROW_RE.findall(html):
-        cells = [_strip_html(c) for c in _CELL_RE.findall(row_html)]
-        if len(cells) < 2:
-            continue
-        # Heuristic: pick out a 13-digit JIB and an MB anywhere in the row.
-        jib = next((c for c in cells if _JIB_RE.match(c)), "")
-        mb_candidates = [c for c in cells if _MB_RE.match(c) and c != jib]
-        mb = mb_candidates[0] if mb_candidates else ""
-        # Company name is the longest non-numeric cell.
-        name_cells = [c for c in cells if c and not c.replace(" ", "").isdigit()]
-        if not name_cells:
-            continue
-        company_name = max(name_cells, key=len)
-        if not jib and not mb:
-            continue
-        identifiers: list[RegistryIdentifier] = []
-        if jib:
-            identifiers.append(
-                RegistryIdentifier(type=IdentifierType.VAT, value=jib, label="JIB")
-            )
-        if mb:
-            identifiers.append(
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER, value=mb, label="MB"
-                )
-            )
-        matches.append(
-            CompanyMatch(
-                id=jib or mb,
-                name=company_name,
-                country=country_code,
-                identifiers=identifiers,
-                address=next(
-                    (c for c in name_cells if c != company_name and len(c) > 4),
-                    None,
-                ),
-                status=jurisdiction,
-                source_url=source_url,
-            )
-        )
-        if len(matches) >= limit:
-            break
-    return matches
+def _extract_issuer_name(html: str) -> str:
+    for raw in _H1_RE.findall(html):
+        text = _strip_html(raw)
+        if text and text.lower() not in _SECTION_HEADINGS:
+            return text
+    return ""
 
 
-# Lines in the detail page render as "Label: value". This catches both
-# table-cell labels and prose. Keep keys ASCII-lowercase so the call sites
-# stay readable.
-_LABEL_MAP: dict[str, str] = {
-    "naziv": "naziv",
-    "naziv subjekta": "naziv",
-    "puni naziv": "naziv",
-    "skraceni naziv": "skraceni_naziv",
-    "skraćeni naziv": "skraceni_naziv",
-    "jib": "jib",
-    "matični broj": "mb",
-    "maticni broj": "mb",
-    "pravni oblik": "pravna_forma",
-    "oblik organiziranja": "oblik",
-    "sjedište": "sjediste",
-    "sjediste": "sjediste",
-    "adresa": "adresa",
-    "datum osnivanja": "datum_osnivanja",
-    "datum upisa": "datum_osnivanja",
-    "datum brisanja": "datum_brisanja",
-    "status": "status",
-    "osnovni kapital": "kapital",
-    "kapital": "kapital",
-    "djelatnost": "djelatnost",
+def _tokenize(html: str) -> list[str]:
+    parts = unescape(_TAG_RE.sub("\n", html)).split("\n")
+    return [_WS_RE.sub(" ", p).strip() for p in parts if p.strip()]
+
+
+_FIELD_LABELS = {
+    "adresa", "telefon", "web", "email", "emisije emitenata",
+    "područje", "oblast", "vlasnička struktura",
 }
 
-_LABEL_LINE_RE = re.compile(
-    r"([A-Za-zČĆŽŠĐčćžšđ\u0400-\u04FF ]{3,40})\s*[:：]\s*([^\n<]{1,300})"
-)
+
+def _labeled(tokens: list[str], label: str) -> str | None:
+    for i, tok in enumerate(tokens):
+        if tok == label and i + 1 < len(tokens):
+            value = tokens[i + 1].strip()
+            if not value or value.lower() in _FIELD_LABELS:
+                return None
+            return value
+    return None
 
 
-def _parse_detail_fields(html: str) -> dict[str, str]:
-    text = _strip_html(html)
-    out: dict[str, str] = {}
-    for label, value in _LABEL_LINE_RE.findall(text):
-        key = label.strip().lower()
-        norm = _LABEL_MAP.get(key)
-        if norm and norm not in out:
-            out[norm] = value.strip()
-    return out
+def _extract_shareholders(html: str) -> list[Shareholder]:
+    anchor = html.lower().find("deset najve")
+    if anchor < 0:
+        return []
+    segment = html[anchor:anchor + 6000]
+    holders: list[Shareholder] = []
+    for row_html in _ROW_RE.findall(segment):
+        cells = [c for c in _cells(row_html) if c]
+        if len(cells) < 2:
+            continue
+        name = cells[0]
+        if name.lower() in {"naziv", "% učešća", "% ucesca"}:
+            continue
+        percent = _parse_amount(cells[1])
+        if percent is None:
+            continue
+        holders.append(Shareholder(name=name, percent=percent))
+        if len(holders) >= 10:
+            break
+    return holders
+
+
+def _available_annual_years(html: str) -> list[int]:
+    match = re.search(r'ddlGodisnji"[^>]*>(.*?)</select>', html, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return []
+    years = [int(y) for y in _YEAR_OPT_RE.findall(match.group(1))]
+    return sorted(set(years), reverse=True)
+
+
+def _parse_balance_sheets(html: str) -> dict[int, dict[str, float]]:
+    per_year: dict[int, dict[str, float]] = {}
+    col_years: list[int] = []
+    for row_html in _ROW_RE.findall(html):
+        cells = [c for c in _cells(row_html) if c]
+        if not cells:
+            continue
+        head = cells[0].lower()
+        if head.startswith("skra") and "bilans" in head:
+            col_years = [int(c) for c in cells[1:] if re.fullmatch(r"\d{4}", c)]
+            continue
+        if not col_years:
+            continue
+        key = _BALANCE_SHEET_LABELS.get(cells[0].lower())
+        if not key or len(cells) < 1 + len(col_years):
+            continue
+        for year, raw_value in zip(col_years, cells[1:1 + len(col_years)]):
+            amount = _parse_amount(raw_value)
+            if amount is not None:
+                per_year.setdefault(year, {})[key] = amount
+    return per_year
 
 
 def _parse_ba_date(value: str | None) -> date | None:
     if not value:
         return None
     value = value.strip()
-    # BiH writes dates as 31.12.2023 or 31.12.2023.; ISO is rare here.
     for sep in (".", "/", "-"):
         if sep in value:
             parts = [p for p in value.split(sep) if p]
@@ -395,15 +437,5 @@ def _parse_ba_date(value: str | None) -> date | None:
                     continue
     try:
         return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
-
-
-def _parse_amount(value: str | None) -> float | None:
-    if not value:
-        return None
-    digits = re.sub(r"[^0-9,\.]", "", value).replace(".", "").replace(",", ".")
-    try:
-        return float(digits)
     except ValueError:
         return None

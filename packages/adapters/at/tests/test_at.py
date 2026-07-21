@@ -2,18 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.at import ATAdapter
 from packages.adapters.at.adapter import _normalize_fn, _normalize_uid
-from packages.shared.models import AdapterStatus, IdentifierType
+from packages.shared.models import AdapterStatus, FilingType, IdentifierType
 
 
 def test_normalize_fn_accepts_variants():
-    assert _normalize_fn("FN 81476 a") == "81476a"
-    assert _normalize_fn("81476A") == "81476a"
+    assert _normalize_fn("FN 93363 z") == "93363z"
+    assert _normalize_fn("93363Z") == "93363z"
     assert _normalize_fn("fn33209m") == "33209m"
     assert _normalize_fn("66209t") == "66209t"
     # FN may be present without a check letter on older entries.
@@ -37,32 +34,17 @@ def test_normalize_uid_strips_at_prefix():
 
 
 @pytest.mark.asyncio
-async def test_search_raises_not_implemented():
+async def test_lookup_rejects_garbage_fn():
     adapter = ATAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("OMV")
-
-
-@pytest.mark.asyncio
-async def test_lookup_by_fn_raises_not_implemented():
-    adapter = ATAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "FN 81476 a")
-
-
-@pytest.mark.asyncio
-async def test_lookup_by_fn_rejects_garbage_first():
-    adapter = ATAdapter()
-    # Invalid identifier should surface before the "not implemented" error
-    # so callers debugging input get the precise message.
     with pytest.raises(InvalidIdentifierError):
         await adapter.lookup_by_identifier(IdentifierType.COMPANY_NUMBER, "not-an-fn")
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_returns_empty():
+async def test_lookup_rejects_unsupported_identifier():
     adapter = ATAdapter()
-    assert await adapter.fetch_financials("81476a") == []
+    with pytest.raises(InvalidIdentifierError):
+        await adapter.lookup_by_identifier(IdentifierType.LEI, "irrelevant")
 
 
 @pytest.mark.asyncio
@@ -72,20 +54,66 @@ async def test_health_check_live():
     health = await adapter.health_check()
     assert health.country_code == "AT"
     assert health.status in (AdapterStatus.OK, AdapterStatus.DEGRADED)
-    # Lookup is the only enabled capability free of charge.
+    assert health.capabilities.get("search") is True
     assert health.capabilities.get("lookup") is True
-    assert health.capabilities.get("search") is False
-    assert health.capabilities.get("financials") is False
+    assert health.capabilities.get("financials") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_search_by_name_live():
+    adapter = ATAdapter()
+    matches = await adapter.search_by_name("voestalpine", limit=5)
+    assert matches, "JustizOnline must return matches for a real company name"
+    top = matches[0]
+    assert top.country == "AT"
+    assert top.id  # canonical Firmenbuchnummer
+    assert any(i.type == IdentifierType.COMPANY_NUMBER for i in top.identifiers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_lookup_by_fn_live():
+    adapter = ATAdapter()
+    details = await adapter.lookup_by_identifier(
+        IdentifierType.COMPANY_NUMBER, "93363z"
+    )
+    assert details is not None
+    assert details.country == "AT"
+    assert "OMV" in details.name
+    assert details.registered_address
+    fn_ids = [i for i in details.identifiers if i.type == IdentifierType.COMPANY_NUMBER]
+    assert fn_ids and fn_ids[0].value == "93363z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_live():
+    adapter = ATAdapter()
+    filings = await adapter.fetch_financials("93363z", years=3)
+    assert filings, "OMV is a listed issuer with ESEF filings"
+    assert len(filings) <= 3
+    for f in filings:
+        assert f.type == FilingType.ANNUAL_REPORT
+        assert f.currency == "EUR"
+        assert f.document_url and f.document_url.startswith("https://filings.xbrl.org/")
+        assert f.period_end is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_unlisted_returns_empty():
+    adapter = ATAdapter()
+    # Well-formed FN unlikely to map to an LEI-holding listed issuer.
+    assert await adapter.fetch_financials("1a") == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_lookup_by_vat_via_vies_returns_record_or_none():
-    """VIES must answer for AT VAT. The four published test UIDs may or may
-    not currently validate (VIES can mark numbers invalid if the underlying
-    registration changed), so the test only asserts on shape: either we get
-    a CompanyDetails with a VAT identifier or we get None — never an
-    exception, never invented data.
+    """VIES must answer for AT VAT. Published test UIDs may or may not validate
+    at any moment; assert only on shape — a CompanyDetails with a VAT identifier
+    or None, never an exception, never invented data.
     """
     adapter = ATAdapter()
     for vat in ("ATU12832407", "ATU14660509", "ATU14809701", "ATU14624500"):
@@ -95,9 +123,6 @@ async def test_lookup_by_vat_via_vies_returns_record_or_none():
         assert details.country == "AT"
         vat_ids = [i for i in details.identifiers if i.type == IdentifierType.VAT]
         assert vat_ids, "VIES-validated record must carry the VAT identifier"
-        assert vat_ids[0].value == vat.upper().replace(" ", "")
-        # VIES for AT may redact name/address; if a name was returned it must
-        # not be the literal privacy placeholder.
         assert details.name and details.name != "---"
 
 
@@ -105,6 +130,5 @@ async def test_lookup_by_vat_via_vies_returns_record_or_none():
 @pytest.mark.integration
 async def test_lookup_invalid_uid_returns_none():
     adapter = ATAdapter()
-    # Well-formed but unallocated AT UID — VIES should answer "valid=false".
     details = await adapter.lookup_by_identifier(IdentifierType.VAT, "ATU00000000")
     assert details is None

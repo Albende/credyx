@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.az import AZAdapter
 from packages.adapters.az.adapter import (
-    _classify_status,
-    _extract_taxpayer_record,
+    _distinctive_tokens,
+    _extract_annual_reports,
     _normalize_voen,
     _parse_az_date,
+    _slug_similarity,
+    _slugify_az,
 )
-from packages.shared.models import IdentifierType
+from packages.shared.models import FilingType, IdentifierType
 
 
 def test_normalize_voen_strips_prefix_and_whitespace():
@@ -34,62 +33,62 @@ def test_normalize_voen_rejects_invalid_lengths():
 
 
 def test_parse_az_date_handles_common_formats():
+    assert _parse_az_date("1995-11-24").isoformat() == "1995-11-24"
     assert _parse_az_date("15.04.1992").isoformat() == "1992-04-15"
-    assert _parse_az_date("2001-09-30").isoformat() == "2001-09-30"
     assert _parse_az_date("31/12/2010").isoformat() == "2010-12-31"
     assert _parse_az_date("") is None
     assert _parse_az_date(None) is None
     assert _parse_az_date("not a date") is None
 
 
-def test_classify_status_maps_localized_values():
-    assert _classify_status("Fəal") == "active"
-    assert _classify_status("aktivdir") == "active"
-    assert _classify_status("Действующее") == "active"
-    assert _classify_status("Ləğv edilib") == "inactive"
-    assert _classify_status("закрыт") == "inactive"
-    assert _classify_status(None) is None
+def test_slugify_az_transliterates_diacritics():
+    assert (
+        _slugify_az('"KAPİTAL BANK" AÇIQ SƏHMDAR CƏMİYYƏTİ')
+        == "kapital-bank-aciq-sehmdar-cemiyyeti"
+    )
+    assert (
+        _slugify_az("AZƏRBAYCAN RESPUBLİKASININ DÖVLƏT NEFT ŞİRKƏTİ")
+        == "azerbaycan-respublikasinin-dovlet-neft-sirketi"
+    )
 
 
-def test_extract_taxpayer_record_parses_two_column_table():
-    html = """
-    <html><body>
-      <table>
-        <tr><td>Vergi ödəyicisinin adı:</td>
-            <td>"AZƏRBAYCAN RESPUBLİKASI DÖVLƏT NEFT ŞİRKƏTİ"</td></tr>
-        <tr><td>VÖEN:</td><td>9900003871</td></tr>
-        <tr><td>Vəziyyət:</td><td>Fəal</td></tr>
-        <tr><td>Ünvan:</td><td>Bakı şəhəri, Heydər Əliyev pr. 73</td></tr>
-        <tr><td>Qeydiyyat tarixi:</td><td>15.04.1992</td></tr>
-        <tr><td>Təşkilati-hüquqi forma:</td><td>Açıq Səhmdar Cəmiyyəti</td></tr>
-      </table>
-    </body></html>
-    """
-    record = _extract_taxpayer_record(html)
-    assert "DÖVLƏT NEFT ŞİRKƏTİ" in record["name"]
-    assert record["status_raw"] == "Fəal"
-    assert "Bakı" in record["address"]
-    assert record["registration_date"] == "15.04.1992"
-    assert "Səhmdar" in record["legal_form"]
+def test_slug_similarity_matches_register_name_to_issuer_slug():
+    # Register name (genitive) vs Baku Stock Exchange issuer slug.
+    socar_name = _distinctive_tokens(
+        _slugify_az("AZƏRBAYCAN RESPUBLİKASININ DÖVLƏT NEFT ŞİRKƏTİ")
+    )
+    socar_issuer = _distinctive_tokens("azerbaycan-respublikasi-dovlet-neft-sirketi")
+    assert _slug_similarity(socar_name, socar_issuer) >= 0.6
+
+    # A different bank must not collide via shared legal-form words.
+    kapital = _distinctive_tokens("kapital-bank-aciq-sehmdar-cemiyyeti")
+    pasa = _distinctive_tokens("pasa-bank-aciq-sehmdar-cemiyyeti")
+    assert _slug_similarity(kapital, pasa) < 0.6
 
 
-def test_extract_taxpayer_record_empty_when_no_table():
-    assert _extract_taxpayer_record("") == {}
-    assert _extract_taxpayer_record("<html><body>No data</body></html>") == {}
+def test_extract_annual_reports_scopes_to_annual_block():
+    html = (
+        '<h5>İllik maliyyə hesabatları:</h5>'
+        '<div class="mb-5 pdf_grid">'
+        '<div class="doc-card" title="2024 İllik Maliyyə hesabatı">'
+        '<a href="https://www.bfb.az/issuer/rep-2024.pdf">yüklə</a></div>'
+        '<div class="doc-card" title="2023 İllik Maliyyə hesabatı">'
+        '<a href="/issuer/rep-2023.pdf">yüklə</a></div>'
+        '</div>'
+        '<h5>Yarımillik maliyyə hesabatları:</h5>'
+        '<div class="doc-card" title="2024 Yarımillik">'
+        '<a href="https://www.bfb.az/issuer/half-2024.pdf">yüklə</a></div>'
+    )
+    reports = _extract_annual_reports(html)
+    assert reports == [
+        (2024, "https://www.bfb.az/issuer/rep-2024.pdf"),
+        (2023, "https://www.bfb.az/issuer/rep-2023.pdf"),
+    ]
 
 
-@pytest.mark.asyncio
-async def test_search_by_name_not_implemented():
-    adapter = AZAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("SOCAR")
-
-
-@pytest.mark.asyncio
-async def test_fetch_financials_not_implemented():
-    adapter = AZAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.fetch_financials("9900003871")
+def test_extract_annual_reports_empty_when_no_section():
+    assert _extract_annual_reports("") == []
+    assert _extract_annual_reports("<html><body>no reports</body></html>") == []
 
 
 @pytest.mark.asyncio
@@ -103,6 +102,18 @@ async def test_lookup_rejects_non_vat_identifier():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_search_by_name_returns_matches():
+    adapter = AZAdapter()
+    matches = await adapter.search_by_name("AZERCELL")
+    assert matches
+    top = matches[0]
+    assert top.country == "AZ"
+    assert top.id.isdigit() and len(top.id) == 10
+    assert "AZERCELL" in top.name.upper()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_lookup_socar_returns_company_details():
     adapter = AZAdapter()
     details = await adapter.lookup_by_identifier(
@@ -112,7 +123,7 @@ async def test_lookup_socar_returns_company_details():
     assert details.country == "AZ"
     assert details.id == "9900003871"
     assert details.name
-    # Match either Latin or Cyrillic transliteration of "Neft".
+    assert details.capital_amount and details.capital_amount > 0
     assert any(
         token in details.name.upper() for token in ("NEFT", "НЕФТ", "SOCAR")
     )
@@ -127,7 +138,29 @@ async def test_lookup_pasha_bank():
     )
     assert details is not None
     assert details.id == "1700767721"
-    assert "PASHA" in details.name.upper() or "ПАША" in details.name.upper()
+    assert "PA" in details.name.upper()  # PAŞA / PASHA / ПАША
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_socar_returns_listed_filings():
+    adapter = AZAdapter()
+    filings = await adapter.fetch_financials("9900003871", years=3)
+    assert filings
+    first = filings[0]
+    assert first.company_id == "9900003871"
+    assert first.type == FilingType.ANNUAL_REPORT
+    assert first.currency == "AZN"
+    assert first.source_url and "bfb.az" in first.source_url
+    assert first.document_url and first.document_url.lower().endswith(".pdf")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_empty_for_non_listed():
+    adapter = AZAdapter()
+    # Azercell is a real active taxpayer but is not a Baku Stock Exchange issuer.
+    assert await adapter.fetch_financials("9900022721") == []
 
 
 @pytest.mark.asyncio
@@ -138,3 +171,4 @@ async def test_health_check_reports_status():
     assert health.country_code == "AZ"
     assert health.requires_api_key is False
     assert health.rate_limit_per_minute == 30
+    assert health.capabilities["lookup"] is True

@@ -1,30 +1,36 @@
-"""Cambodia adapter — MoC Online Business Registration + CSX (best-effort).
+"""Cambodia adapter — GLEIF registry + CSX filings (both free, no key).
 
-Two free, no-auth sources are stitched together here:
+Two free, no-auth, live sources are stitched together:
 
-* businessregistration.moc.gov.kh — the Ministry of Commerce Online
-  Business Registration portal. Its public search page exposes a JSON
-  endpoint at ``/api/public/companies`` that returns name/registration-
-  number/status snippets. No API key. Session-cookie session is created
-  lazily on the first request.
-* csx.com.kh — the Cambodia Securities Exchange. Listed issuers publish
-  free annual reports under ``/en/listed-companies/profile/{TICKER}``.
-  We never download the report bodies; only the canonical URL is
-  emitted, and only after the ticker landing page returns 200.
+* GLEIF (api.gleif.org) — the Global LEI index. Cambodian legal entities
+  carry their Ministry of Commerce registration number in the LEI
+  record's ``entity.registeredAs`` field (e.g. ``00003077`` for ACLEDA
+  Bank Plc.), alongside the English legal name and address. This gives a
+  name search and a MoC-number lookup keyed on the same identifier the
+  Certificate of Incorporation prints. No API key.
+  (The Ministry of Commerce's own ``businessregistration.moc.gov.kh``
+  public JSON search — used by earlier builds — has been replaced by a
+  maintenance page and no longer serves data.)
+* csx.com.kh — the Cambodia Securities Exchange. Its website API exposes
+  the full listed-company universe and every listed issuer's filed
+  annual reports as downloadable PDFs. We resolve a company's CSX symbol
+  from its registry name, then emit ``FinancialFiling`` records whose
+  ``document_url`` is the exchange's ``file/view-attach`` endpoint — a
+  live GET that streams the actual company-specific PDF.
 
 Identifier:
   The MoC company registration number is an 8-digit zero-padded code
-  printed on every Certificate of Incorporation (e.g. ``00012345``).
-  Cambodian VAT TINs are 10-digit codes issued by the General
-  Department of Taxation and frequently appear alongside the MoC
-  number on the same record — ``COMPANY_NUMBER`` and ``VAT`` are both
-  accepted on lookup.
+  printed on every Certificate of Incorporation (e.g. ``00003077``).
+  Cambodian VAT TINs are 9–10-digit codes issued by the General
+  Department of Taxation — ``COMPANY_NUMBER`` and ``VAT`` are both
+  accepted on lookup; the MoC number is primary.
 """
 from __future__ import annotations
 
 import re
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -36,7 +42,6 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
-    Director,
     FilingType,
     FinancialFiling,
     IdentifierType,
@@ -45,30 +50,11 @@ from packages.shared.models import (
 
 _MOC_NUMBER_RE = re.compile(r"^\d{1,10}$")
 _VAT_TIN_RE = re.compile(r"^\d{9,10}$")
-# CSX tickers are uppercase ASCII, 2–5 chars; we guard hard so we never
-# synthesise a URL from a noisy field.
-_CSX_TICKER_RE = re.compile(r"^[A-Z]{2,5}$")
-
-# Known CSX-listed issuers as of the MVP build. The mapping is keyed by
-# normalised company-name token so a name search can surface a ticker
-# even when the MoC payload omits one. Values are (ticker, currency).
-_CSX_KNOWN: dict[str, tuple[str, str]] = {
-    "acleda": ("ABC", "KHR"),
-    "phnompenhspecialeconomiczone": ("PPSP", "KHR"),
-    "ppsp": ("PPSP", "KHR"),
-    "phnompenhwatersupplyauthority": ("PWSA", "KHR"),
-    "ppwsa": ("PWSA", "KHR"),
-    "pwsa": ("PWSA", "KHR"),
-    "sihanoukvilleautonomousport": ("PAS", "KHR"),
-    "pas": ("PAS", "KHR"),
-    "grandtwins": ("GTI", "KHR"),
-    "phnompenhautonomousport": ("PPAP", "KHR"),
-    "ppap": ("PPAP", "KHR"),
-}
+_YEAR_RE = re.compile(r"(19|20)\d{2}")
 
 
 def _normalize_moc_number(value: str) -> str:
-    """Strip whitespace, dashes, dots and zero-pad to 8 digits.
+    """Strip separators and zero-pad a numeric MoC number to 8 digits.
 
     Pure-numeric inputs are zero-padded; alphanumeric inputs are rejected
     so we never silently coerce a TIN or a CSX ticker into a MoC slot.
@@ -116,47 +102,44 @@ def _parse_kh_date(s: Any) -> date | None:
     return None
 
 
-def _coerce_float(v: Any) -> float | None:
-    if v is None or v == "":
-        return None
-    try:
-        return float(str(v).replace(",", "").replace(" ", ""))
-    except (TypeError, ValueError):
-        return None
-
-
-def _pick(r: dict[str, Any], *keys: str) -> Any:
-    for k in keys:
-        v = r.get(k)
-        if v not in (None, ""):
-            return v
-    return None
-
-
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
-def _detect_csx_ticker(name: str, raw: dict[str, Any] | None = None) -> tuple[str | None, str | None]:
-    """Return ``(ticker, currency)`` if we recognise a CSX listing.
+def _english_name(entity: dict[str, Any]) -> str:
+    legal = (entity.get("legalName") or {}).get("name")
+    for coll, want in (
+        ("otherNames", "ALTERNATIVE_LANGUAGE_LEGAL_NAME"),
+        ("transliteratedOtherNames", "PREFERRED_ASCII_TRANSLITERATED_LEGAL_NAME"),
+        ("transliteratedOtherNames", "AUTO_ASCII_TRANSLITERATED_LEGAL_NAME"),
+    ):
+        for o in entity.get(coll) or []:
+            if o.get("language") == "en" or o.get("type") == want:
+                if o.get("name"):
+                    return str(o["name"]).strip()
+    if legal:
+        return str(legal).strip()
+    return ""
 
-    First trust an explicit ticker field on the payload (if it matches
-    the strict ticker regex); otherwise fall back to the known-issuer
-    name table. Never invent a ticker.
-    """
-    if raw:
-        candidate = _pick(raw, "csx_symbol", "stockSymbol", "symbol", "Ticker")
-        if candidate:
-            t = str(candidate).strip().upper()
-            if _CSX_TICKER_RE.match(t):
-                return t, "KHR"
-    slug = _slug(name)
-    if not slug:
-        return None, None
-    for key, (ticker, ccy) in _CSX_KNOWN.items():
-        if key in slug:
-            return ticker, ccy
-    return None, None
+
+def _address_str(entity: dict[str, Any]) -> str | None:
+    addr = entity.get("legalAddress") or entity.get("headquartersAddress") or {}
+    parts: list[str] = []
+    parts.extend(str(x) for x in (addr.get("addressLines") or []) if x)
+    for key in ("city", "region", "postalCode", "country"):
+        v = addr.get(key)
+        if v:
+            parts.append(str(v))
+    return ", ".join(parts) or None
+
+
+def _normalize_gleif_status(entity: dict[str, Any]) -> str | None:
+    raw = str(entity.get("status") or "").upper()
+    if raw == "ACTIVE":
+        return "active"
+    if raw in ("INACTIVE", "NULL"):
+        return "ceased"
+    return raw.lower() or None
 
 
 class KHAdapter(CountryAdapter):
@@ -167,30 +150,33 @@ class KHAdapter(CountryAdapter):
     requires_api_key = False
     rate_limit_per_minute = 30
 
-    MOC_BASE = "https://www.businessregistration.moc.gov.kh"
+    GLEIF_BASE = "https://api.gleif.org/api/v1"
     CSX_BASE = "https://csx.com.kh"
+    CSX_API = "/api/v1/website"
 
-    def _moc_headers(self) -> dict[str, str]:
-        return {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "km;q=0.9, en;q=0.8",
-            "Referer": f"{self.MOC_BASE}/",
-            "Origin": self.MOC_BASE,
-        }
+    def _gleif_headers(self) -> dict[str, str]:
+        return {"Accept": "application/vnd.api+json"}
 
     async def health_check(self) -> AdapterHealth:
         try:
             async with build_http_client(
-                base_url=self.MOC_BASE, headers=self._moc_headers()
+                base_url=self.GLEIF_BASE, headers=self._gleif_headers()
             ) as client:
-                resp = await get_with_retry(client, "/")
+                resp = await get_with_retry(
+                    client,
+                    "/lei-records",
+                    params={
+                        "filter[entity.legalAddress.country]": "KH",
+                        "page[size]": 1,
+                    },
+                )
                 if resp.status_code >= 500:
                     return AdapterHealth(
                         country_code=self.country_code,
                         name=self.country_name,
                         status=AdapterStatus.ERROR,
                         capabilities={"search": False, "lookup": False, "financials": False},
-                        notes=f"businessregistration.moc.gov.kh HTTP {resp.status_code}",
+                        notes=f"api.gleif.org HTTP {resp.status_code}",
                     )
         except Exception as exc:
             return AdapterHealth(
@@ -207,9 +193,9 @@ class KHAdapter(CountryAdapter):
             capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Registry via businessregistration.moc.gov.kh public search. "
-                "Financials best-effort: CSX annual-report URLs for listed "
-                "issuers only; unlisted firms return []."
+                "Registry via GLEIF (entity.registeredAs = MoC number). "
+                "Financials via CSX website API: filed annual-report PDFs "
+                "for listed issuers; unlisted firms return []."
             ),
         )
 
@@ -217,41 +203,44 @@ class KHAdapter(CountryAdapter):
         query = name.strip()
         if not query:
             return []
-        rows = await self._moc_search(query, limit)
+        records = await self._gleif_search(query, limit)
         matches: list[CompanyMatch] = []
-        for r in rows[:limit]:
-            moc = _pick(r, "registration_number", "registrationNumber", "regNo", "moc_number", "id")
-            display = _pick(r, "name_en", "english_name", "nameEn", "name", "name_km", "title")
-            if not (moc and display):
+        for rec in records:
+            attrs = rec.get("attributes") or {}
+            entity = attrs.get("entity") or {}
+            lei = attrs.get("lei")
+            moc = entity.get("registeredAs")
+            display = _english_name(entity)
+            if not display or not (moc or lei):
                 continue
-            moc_s = str(moc).strip()
-            identifiers = [
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER,
-                    value=moc_s,
-                    label="MoC Number",
-                )
-            ]
-            tin = _pick(r, "tin", "vat", "vat_tin", "VAT")
-            if tin:
+            identifiers: list[RegistryIdentifier] = []
+            if moc:
                 identifiers.append(
                     RegistryIdentifier(
-                        type=IdentifierType.VAT,
-                        value=str(tin).strip(),
-                        label="Tax Identification Number",
+                        type=IdentifierType.COMPANY_NUMBER,
+                        value=str(moc).strip(),
+                        label="MoC Number",
+                    )
+                )
+            if lei:
+                identifiers.append(
+                    RegistryIdentifier(
+                        type=IdentifierType.LEI, value=str(lei), label="LEI"
                     )
                 )
             matches.append(
                 CompanyMatch(
-                    id=moc_s,
-                    name=str(display).strip(),
+                    id=str(moc).strip() if moc else str(lei),
+                    name=display,
                     country=self.country_code,
                     identifiers=identifiers,
-                    address=_pick(r, "address_en", "address", "registered_address"),
-                    status=_normalize_status(_pick(r, "status", "company_status")),
-                    source_url=f"{self.MOC_BASE}/search?query={moc_s}",
+                    address=_address_str(entity),
+                    status=_normalize_gleif_status(entity),
+                    source_url=f"https://search.gleif.org/#/record/{lei}" if lei else None,
                 )
             )
+            if len(matches) >= limit:
+                break
         return matches
 
     async def lookup_by_identifier(
@@ -259,19 +248,26 @@ class KHAdapter(CountryAdapter):
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.COMPANY_NUMBER:
             moc = _normalize_moc_number(value)
-            record = await self._moc_lookup(moc)
-            if record is None:
+            rec = await self._gleif_lookup(
+                {"filter[entity.registeredAs]": moc}
+            )
+            if rec is None and moc.startswith("0"):
+                rec = await self._gleif_lookup(
+                    {"filter[entity.registeredAs]": moc.lstrip("0") or "0"}
+                )
+            if rec is None:
                 return None
-            return _record_to_details(record, moc, self.MOC_BASE)
+            return self._record_to_details(rec, moc)
         if id_type == IdentifierType.VAT:
             tin = _normalize_vat_tin(value)
-            rows = await self._moc_search(tin, 5)
-            for r in rows:
-                if _slug(str(_pick(r, "tin", "vat", "vat_tin", "VAT") or "")) == _slug(tin):
-                    moc = _pick(r, "registration_number", "registrationNumber", "regNo")
-                    if moc:
-                        return _record_to_details(r, _normalize_moc_number(str(moc)), self.MOC_BASE)
-            return None
+            rec = await self._gleif_lookup({"filter[fulltext]": tin})
+            if rec is None:
+                return None
+            entity = (rec.get("attributes") or {}).get("entity") or {}
+            moc = entity.get("registeredAs")
+            return self._record_to_details(
+                rec, _normalize_moc_number(str(moc)) if moc else tin
+            )
         raise InvalidIdentifierError(
             f"Cambodia supports COMPANY_NUMBER or VAT, got {id_type}"
         )
@@ -280,182 +276,230 @@ class KHAdapter(CountryAdapter):
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         moc = _normalize_moc_number(company_id)
-        record = await self._moc_lookup(moc) or {}
-        name = str(_pick(record, "name_en", "english_name", "nameEn", "name") or "")
-        ticker, ccy = _detect_csx_ticker(name, record)
-        if not ticker:
+        rec = await self._gleif_lookup({"filter[entity.registeredAs]": moc})
+        if rec is None:
+            return []
+        entity = (rec.get("attributes") or {}).get("entity") or {}
+        name = _english_name(entity)
+        if not name:
             return []
 
-        url = f"{self.CSX_BASE}/en/listed-companies/profile/{ticker}"
-        filings: list[FinancialFiling] = []
-        # Verify the CSX landing page actually exists before claiming a
-        # filing is available — we never emit a fabricated URL.
-        async with build_http_client(timeout=15.0) as client:
-            try:
-                probe = await client.get(url)
-            except (httpx.TransportError, httpx.TimeoutException):
-                return []
-            if probe.status_code != 200:
-                return []
+        symbol = await self._csx_resolve_symbol(name)
+        if symbol is None:
+            return []
 
-        current_year = datetime.utcnow().year
-        for year in range(current_year - years, current_year):
+        reports = await self._csx_annual_reports(symbol, years)
+        filings: list[FinancialFiling] = []
+        seen_years: set[int] = set()
+        for report in reports:
+            year = _report_year(report)
+            if year is None or year in seen_years:
+                continue
+            detail = await self._csx_report_detail(symbol, report["id"])
+            document_url = _view_attach_url(self.CSX_BASE, self.CSX_API, detail)
+            if not document_url:
+                continue
+            seen_years.add(year)
             filings.append(
                 FinancialFiling(
                     company_id=moc,
                     year=year,
                     type=FilingType.ANNUAL_REPORT,
                     period_end=date(year, 12, 31),
-                    currency=ccy or "KHR",
-                    document_url=url,
-                    document_format="html",
-                    source_url=url,
+                    currency="KHR",
+                    document_url=document_url,
+                    document_format="pdf",
+                    source_url=f"{self.CSX_BASE}/en/listed-companies/profile/{symbol}",
                 )
             )
+            if len(filings) >= years:
+                break
         return filings
 
-    async def _moc_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+    async def _gleif_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+        params = {
+            "filter[entity.legalAddress.country]": "KH",
+            "filter[fulltext]": query,
+            "page[size]": min(max(limit, 1), 50),
+        }
         async with build_http_client(
-            base_url=self.MOC_BASE, headers=self._moc_headers()
+            base_url=self.GLEIF_BASE, headers=self._gleif_headers()
         ) as client:
-            for path, params in (
-                ("/api/public/companies", {"q": query, "limit": limit}),
-                ("/api/public/companies/search", {"name": query, "limit": limit}),
-            ):
+            try:
+                resp = await get_with_retry(client, "/lei-records", params=params)
+            except (httpx.TransportError, httpx.TimeoutException):
+                return []
+            if resp.status_code >= 400:
+                return []
+            try:
+                payload = resp.json()
+            except ValueError:
+                return []
+        data = payload.get("data")
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+    async def _gleif_lookup(self, filters: dict[str, Any]) -> dict[str, Any] | None:
+        params = {**filters, "page[size]": 1}
+        async with build_http_client(
+            base_url=self.GLEIF_BASE, headers=self._gleif_headers()
+        ) as client:
+            try:
+                resp = await get_with_retry(client, "/lei-records", params=params)
+            except (httpx.TransportError, httpx.TimeoutException):
+                return None
+            if resp.status_code >= 400:
+                return None
+            try:
+                payload = resp.json()
+            except ValueError:
+                return None
+        data = payload.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        return None
+
+    async def _csx_resolve_symbol(self, name: str) -> str | None:
+        target = _slug(name)
+        if not target:
+            return None
+        async with build_http_client(base_url=self.CSX_BASE) as client:
+            try:
+                resp = await get_with_retry(
+                    client, f"{self.CSX_API}/company/stock/list-companies"
+                )
+            except (httpx.TransportError, httpx.TimeoutException):
+                return None
+            if resp.status_code >= 400:
+                return None
+            try:
+                rows = (resp.json() or {}).get("data") or []
+            except ValueError:
+                return None
+        best: str | None = None
+        for row in rows:
+            listed = _slug(str(row.get("nameEn") or ""))
+            symbol = str(row.get("symbolEn") or "").strip()
+            if not listed or not symbol:
+                continue
+            if listed == target:
+                return symbol
+            if best is None and (listed in target or target in listed):
+                best = symbol
+        return best
+
+    async def _csx_annual_reports(
+        self, symbol: str, years: int
+    ) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        max_pages = max(1, min(years, 5))
+        async with build_http_client(base_url=self.CSX_BASE, timeout=30.0) as client:
+            for page in range(1, max_pages + 1):
                 try:
-                    resp = await get_with_retry(client, path, params=params)
+                    resp = await client.post(
+                        f"{self.CSX_API}/company/stock/annual-reports/{symbol}",
+                        params={"page": page},
+                        json={},
+                    )
                 except (httpx.TransportError, httpx.TimeoutException):
-                    continue
+                    break
                 if resp.status_code >= 400:
-                    continue
+                    break
                 try:
                     payload = resp.json()
                 except ValueError:
-                    continue
-                rows = _extract_rows(payload)
-                if rows:
-                    return rows
-        return []
+                    break
+                rows = payload.get("data") or []
+                for row in rows:
+                    title = str(row.get("title") or "").lower()
+                    if "annual report" in title and "quarter" not in title:
+                        collected.append(row)
+                total_pages = payload.get("totalPages") or 1
+                if page >= total_pages:
+                    break
+        return collected
 
-    async def _moc_lookup(self, moc: str) -> dict[str, Any] | None:
-        async with build_http_client(
-            base_url=self.MOC_BASE, headers=self._moc_headers()
-        ) as client:
-            for path in (
-                f"/api/public/companies/{moc}",
-                f"/api/public/companies?registration_number={moc}",
-            ):
-                try:
-                    resp = await get_with_retry(client, path)
-                except (httpx.TransportError, httpx.TimeoutException):
-                    continue
-                if resp.status_code in (401, 403, 404):
-                    continue
-                if resp.status_code >= 400:
-                    continue
-                try:
-                    payload = resp.json()
-                except ValueError:
-                    continue
-                if isinstance(payload, dict):
-                    inner = payload.get("data") or payload.get("company") or payload
-                    if isinstance(inner, dict) and (
-                        inner.get("registration_number")
-                        or inner.get("registrationNumber")
-                        or inner.get("regNo")
-                        or inner.get("name")
-                        or inner.get("name_en")
-                    ):
-                        return inner
-                    rows = _extract_rows(payload)
-                    if rows:
-                        return rows[0]
-        return None
+    async def _csx_report_detail(
+        self, symbol: str, report_id: Any
+    ) -> list[dict[str, Any]]:
+        async with build_http_client(base_url=self.CSX_BASE) as client:
+            try:
+                resp = await get_with_retry(
+                    client,
+                    f"{self.CSX_API}/company/stock/annual-reports/{symbol}/{report_id}",
+                )
+            except (httpx.TransportError, httpx.TimeoutException):
+                return []
+            if resp.status_code >= 400:
+                return []
+            try:
+                payload = resp.json()
+            except ValueError:
+                return []
+        data = payload.get("data") or {}
+        return data.get("attachFiles") or []
 
+    def _record_to_details(self, rec: dict[str, Any], moc: str) -> CompanyDetails:
+        attrs = rec.get("attributes") or {}
+        entity = attrs.get("entity") or {}
+        lei = attrs.get("lei")
+        name = _english_name(entity)
+        legal_form = (entity.get("legalForm") or {}).get("id") or (
+            entity.get("legalForm") or {}
+        ).get("other")
 
-def _extract_rows(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [r for r in payload if isinstance(r, dict)]
-    if isinstance(payload, dict):
-        for key in ("data", "results", "items", "rows", "companies"):
-            v = payload.get(key)
-            if isinstance(v, list):
-                return [r for r in v if isinstance(r, dict)]
-            if isinstance(v, dict):
-                inner = v.get("data") or v.get("items") or v.get("rows")
-                if isinstance(inner, list):
-                    return [r for r in inner if isinstance(r, dict)]
-    return []
-
-
-def _normalize_status(s: Any) -> str | None:
-    if not s:
-        return None
-    raw = str(s)
-    lowered = raw.lower()
-    if "active" in lowered or "operating" in lowered:
-        return "active"
-    if any(tok in lowered for tok in ("dissolved", "ceased", "deregistered", "struck")):
-        return "ceased"
-    return raw
-
-
-def _record_to_details(
-    r: dict[str, Any], moc: str, moc_base: str
-) -> CompanyDetails:
-    display = _pick(r, "name_en", "english_name", "nameEn", "name", "name_km", "title") or ""
-    name = str(display).strip()
-    address = _pick(r, "address_en", "address", "registered_address", "addressEn")
-    legal_form = _pick(r, "legal_form", "company_type", "type", "form")
-    status = _normalize_status(_pick(r, "status", "company_status"))
-    inc_date = _parse_kh_date(
-        _pick(r, "incorporation_date", "registration_date", "registeredOn", "registered_at")
-    )
-    capital = _coerce_float(_pick(r, "capital", "registered_capital", "capital_amount"))
-    capital_ccy = _pick(r, "capital_currency", "currency") or ("KHR" if capital else None)
-    isic = _pick(r, "isic", "business_activity", "main_activity")
-    phone = _pick(r, "phone", "telephone", "contact_phone")
-    email = _pick(r, "email", "contact_email")
-    website = _pick(r, "website", "url")
-    director_name = _pick(r, "director", "legal_representative", "ceo", "chairman")
-    tin = _pick(r, "tin", "vat", "vat_tin", "VAT")
-
-    directors = (
-        [Director(name=str(director_name).strip())] if director_name else []
-    )
-
-    identifiers = [
-        RegistryIdentifier(
-            type=IdentifierType.COMPANY_NUMBER,
-            value=moc,
-            label="MoC Number",
-        )
-    ]
-    if tin:
-        identifiers.append(
+        identifiers = [
             RegistryIdentifier(
-                type=IdentifierType.VAT,
-                value=str(tin).strip(),
-                label="Tax Identification Number",
+                type=IdentifierType.COMPANY_NUMBER, value=moc, label="MoC Number"
             )
+        ]
+        if lei:
+            identifiers.append(
+                RegistryIdentifier(type=IdentifierType.LEI, value=str(lei), label="LEI")
+            )
+
+        return CompanyDetails(
+            id=moc,
+            name=name,
+            country="KH",
+            legal_form=str(legal_form) if legal_form else None,
+            status=_normalize_gleif_status(entity),
+            registered_address=_address_str(entity),
+            identifiers=identifiers,
+            raw=attrs,
+            source_url=f"https://search.gleif.org/#/record/{lei}" if lei else None,
         )
 
-    return CompanyDetails(
-        id=moc,
-        name=name,
-        country="KH",
-        legal_form=str(legal_form) if legal_form else None,
-        status=status,
-        incorporation_date=inc_date,
-        registered_address=str(address) if address else None,
-        capital_amount=capital,
-        capital_currency=str(capital_ccy) if capital_ccy else None,
-        sic_codes=[str(isic)] if isic else [],
-        identifiers=identifiers,
-        directors=directors,
-        website=str(website) if website else None,
-        phone=str(phone) if phone else None,
-        email=str(email) if email else None,
-        raw=r,
-        source_url=f"{moc_base}/search?query={moc}",
-    )
+
+def _report_year(report: dict[str, Any]) -> int | None:
+    current = datetime.utcnow().year
+    title = str(report.get("title") or "")
+    years = [int(m.group(0)) for m in _YEAR_RE.finditer(title)]
+    years = [y for y in years if 1990 <= y <= current]
+    if years:
+        return max(years)
+    published = _parse_kh_date(report.get("date"))
+    if published:
+        return published.year - 1
+    return None
+
+
+def _view_attach_url(
+    csx_base: str, csx_api: str, attach_files: list[dict[str, Any]]
+) -> str | None:
+    if not attach_files:
+        return None
+    english = [a for a in attach_files if str(a.get("boardLang")) == "en"]
+    attach = (english or attach_files)[0]
+    file_name = attach.get("fileName")
+    post_id = attach.get("postId")
+    if not file_name or post_id is None:
+        return None
+    params = {
+        "postId": str(post_id),
+        "fileName": str(file_name),
+        "boardLang": str(attach.get("boardLang") or "en"),
+        "boardId": str(attach.get("boardId") or ""),
+        "fileOrder": str(attach.get("fileOrder", 0)),
+        "originalFileName": str(attach.get("originalFileName") or file_name),
+    }
+    return f"{csx_base}{csx_api}/file/view-attach?{urlencode(params)}"

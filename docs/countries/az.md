@@ -1,4 +1,4 @@
-# 🇦🇿 Azerbaijan — DSX (State Tax Service) commercial taxpayer check
+# 🇦🇿 Azerbaijan — State Tax Service register + Baku Stock Exchange filings
 
 ## Identifier
 
@@ -9,63 +9,71 @@
 
 ## Sources
 
-- https://www.e-taxes.gov.az/ebyn/commersialChek.jsp?vergi_id={voen}
-  — public per-VÖEN HTML lookup, free, no auth.
-- https://e-taxes.gov.az/ebyn/searchTaxPayerByCommersialAction.do
-  — internal form action; not relied on (cookie/session-bound).
-- stat.gov.az — State Statistics Committee bulletins, no API.
-- justice.gov.az — Ministry of Justice; commercial register is **not**
-  freely searchable online (NGOs only).
+- **Company register (name search + VÖEN lookup)** —
+  `POST https://new.e-taxes.gov.az/api/po/authless/public/v1/authless/findTaxpayer`
+  with body
+  `{"tin"|"name": "...", "type": "legalEntity", "serviceCode": "checkLegalName", "isStateRegistry": true}`.
+  This JSON endpoint backs the "Kommersiya qurumlarının dövlət reyestri
+  məlumatlarının verilməsi" service on the new e-taxes SPA. Free, no auth,
+  no cookie, no key. Returns registered name, legal form, charter capital,
+  legal address, legal representative, registration dates and status from
+  the State Register of Commercial Entities.
+- **Filed financial statements** — Baku Stock Exchange
+  (Bakı Fond Birjası, `https://www.bfb.az`). Each listed issuer's audited
+  IFRS annual accounts are published as PDFs on `/emitent/{slug}`. The
+  AZ-locale issuer slug is a transliteration of the registered Azerbaijani
+  name, so the register name maps onto the issuer page. Issuer index:
+  `https://www.bfb.az/bazara-baxis`.
+- **Legacy (dead)**: `www.e-taxes.gov.az/ebyn/commersialChek.jsp` and the
+  `commersialChecker*.jsp` forms now 301-redirect to the `new.e-taxes.gov.az`
+  SPA and no longer serve data — replaced by the `findTaxpayer` API above.
 - **Auth**: None.
 - **Rate limit**: Self-imposed at 30 req/min — government site, no
   published budget.
-- **robots.txt / ToS**: `e-taxes.gov.az/robots.txt` is permissive; site
-  is a public taxpayer-verification utility. We send a clearly
-  identifiable User-Agent and keep volume polite.
+- **robots.txt / ToS**: Public taxpayer-verification / market-disclosure
+  utilities. We send a clearly identifiable User-Agent and keep volume
+  polite.
 
 ## Test companies
 
 - SOCAR (State Oil Company of Azerbaijan Republic) — VÖEN `9900003871`
-- Azercell Telecom — VÖEN `9900025301`
-- PASHA Bank — VÖEN `1700767721`
-- Kapital Bank — VÖEN `9900003611`
+  (register lookup + BSE annual filings)
+- Azercell Telecom — VÖEN `9900022721` (register only; not a BSE issuer)
+- PASHA Bank — VÖEN `1700767721` (register lookup + BSE annual filings)
+- Kapital Bank — VÖEN `9900003611` (register lookup + BSE annual filings)
 
 ## Status
 
-🟡 **Partial — lookup only.**
+🟢 **Live — search, lookup, and financials (listed issuers).**
 
-| Capability  | Status               |
-|-------------|----------------------|
-| Name search | ❌ Not implemented   |
-| VÖEN lookup | ✅ Live (HTML scrape) |
-| Financials  | ❌ Not published     |
-| Health      | ✅ Probes SOCAR VÖEN |
+| Capability  | Status                                                     |
+|-------------|------------------------------------------------------------|
+| Name search | ✅ Live (e-taxes `findTaxpayer` JSON)                       |
+| VÖEN lookup | ✅ Live (e-taxes `findTaxpayer` JSON)                       |
+| Financials  | ✅ Live for BSE-listed issuers; `[]` for non-listed         |
+| Health      | ✅ Probes SOCAR VÖEN via `findTaxpayer`                     |
 
 ## Limitations
 
-- **No public name search.** e-taxes only resolves a known VÖEN. The
-  adapter raises `AdapterNotImplementedError` on `search_by_name`. A
-  follow-up could integrate OpenCorporates' free AZ tier for fuzzy
-  name → VÖEN resolution.
-- **No public financial statements.** Annual accounts are filed with
-  the Ministry of Finance but are not exposed via a free portal.
-  Listed-issuer reports live on the Baku Stock Exchange (BSE) site as
-  PDFs only — out of scope for the free MVP. `fetch_financials` raises
-  `AdapterNotImplementedError`.
-- **HTML scrape is brittle.** The commersialChek.jsp page renders a
-  two-column table with localized labels (Azerbaijani Latin script,
-  occasionally Cyrillic for Russian-set legacy records). The parser
-  matches loosely on both. Encoding fallback covers UTF-8 and
-  windows-1251.
-- **No clean encoding header.** e-taxes has historically served pages
-  without a `charset` declaration; the adapter decodes UTF-8 first,
-  then cp1251 to keep diacritics intact.
+- **Financials cover listed issuers only.** Only the ~60 companies listed
+  on the Baku Stock Exchange publish audited accounts for free. For a
+  taxpayer that is not a BSE issuer, `fetch_financials` returns `[]` (no
+  filings available) — Azerbaijan does not publish financial statements
+  for non-listed companies through any free portal.
+- **Issuer matching is name-based.** BSE issuer pages carry no VÖEN, so
+  the adapter maps a register name to the issuer slug via a
+  transliteration + prefix-tolerant token similarity (handles the genitive
+  endings, e.g. `respublikasının` vs `respublikasi`), scoped so shared
+  legal-form words (ASC, MMC, …) cannot drive a false match. Document
+  URLs are HEAD-verified as downloadable PDFs before being surfaced.
+- **Register returns only headline financials.** `findTaxpayer` exposes
+  charter capital and tax debt but not full balance sheets; the deep
+  numbers come from the BSE IFRS PDFs, parsed downstream.
 
 ## Recommended next steps
 
-1. Wire a free name → VÖEN bridge through OpenCorporates AZ.
-2. Once a Baku Stock Exchange (BSE) document scraper exists, surface
-   listed-issuer PDFs through `fetch_financials` for the ~20 traded
-   companies.
-3. Investigate whether DSX exposes a structured XML feed under e-Devlet
-   for licensed integrators — if so, swap the HTML scrape for it.
+1. Wire the BSE annual-report PDFs into the PDF text-extraction pipeline
+   so the risk engine gets IFRS figures, not just filing metadata.
+2. Also surface BSE semi-annual (`Yarımillik`) and management reports.
+3. Cache the BSE issuer index (it changes rarely) to avoid re-fetching
+   `/bazara-baxis` on every `fetch_financials` call.

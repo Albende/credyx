@@ -110,52 +110,33 @@ async def test_lookup_rejects_unsupported_identifier():
         await adapter.lookup_by_identifier(IdentifierType.LEI, "529900T8BM49AURSDO55")
 
 
-def test_extract_company_record_parses_albanian_card():
-    from packages.adapters.xk.adapter import _extract_company_record
+def test_normalize_company_number_accepts_nui_and_legacy():
+    from packages.adapters.xk.adapter import _normalize_company_number
 
-    html = """
-    <html><body><table>
-      <tr><th>Emri i Biznesit</th><td>Raiffeisen Bank Kosovo J.S.C.</td></tr>
-      <tr><th>Statusi</th><td>Aktiv</td></tr>
-      <tr><th>Forma e Biznesit</th><td>Shoqëri Aksionare</td></tr>
-      <tr><th>Numri i Biznesit</th><td>70123456A</td></tr>
-      <tr><th>Numri Fiskal</th><td>600123456</td></tr>
-      <tr><th>Data e Regjistrimit</th><td>01/01/2003</td></tr>
-      <tr><th>Adresa</th><td>Rruga UÇK 51, Prishtinë</td></tr>
-      <tr><th>Kapitali</th><td>63.000.000 EUR</td></tr>
-    </table></body></html>
-    """
-    record = _extract_company_record(html)
-    assert record["name"].startswith("Raiffeisen Bank Kosovo")
-    assert record["status_raw"] == "Aktiv"
-    assert record["legal_form"] == "Shoqëri Aksionare"
-    assert record["ubi"] == "70123456A"
-    assert record["nf"] == "600123456"
-    assert "Prishtinë" in record["address"]
-    assert record["capital"].startswith("63")
+    assert _normalize_company_number("810485145") == "810485145"
+    assert _normalize_company_number(" 810 485 145 ") == "810485145"
+    assert _normalize_company_number("70123456A") == "70123456A"
+    assert _normalize_company_number("71018482") == "71018482"
 
 
-def test_extract_search_rows_finds_ubi_anchored_row():
-    from packages.adapters.xk.adapter import _extract_search_rows
+def test_normalize_company_number_rejects_garbage():
+    from packages.adapters.xk.adapter import _normalize_company_number
 
-    html = """
-    <html><body><table>
-      <tr><th>Emri</th><th>Numri i Biznesit</th><th>Adresa</th><th>Statusi</th></tr>
-      <tr>
-        <td>Raiffeisen Bank Kosovo J.S.C.</td>
-        <td>70123456A</td>
-        <td>Rruga UÇK, Prishtinë</td>
-        <td>Aktiv</td>
-      </tr>
-    </table></body></html>
-    """
-    rows = _extract_search_rows(html)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["ubi"] == "70123456A"
-    assert "Raiffeisen" in row["name"]
-    assert "Prishtinë" in row["address"]
-    assert row["status_raw"] == "Aktiv"
+    with pytest.raises(InvalidIdentifierError):
+        _normalize_company_number("12345")
+    with pytest.raises(InvalidIdentifierError):
+        _normalize_company_number("ABCDEFGHI")
+
+
+def test_compute_key_matches_reference_vector():
+    from packages.adapters.xk.adapter import _compute_key
+
+    # AES-128-CBC(key=IV="8056483646328769", PKCS7) of a fixed timestamp,
+    # base64-encoded — reproduces the ARBK front-end signing scheme.
+    assert (
+        _compute_key("2026-07-20T23:33:41.158384Z")
+        == "0AOF/sp9IOFVoyDYwofa3QsEoRxJ/zuamHBFfhQV6XE="
+    )
 
 
 @pytest.mark.asyncio
@@ -177,8 +158,9 @@ async def test_health_check_live():
 async def test_search_raiffeisen_live():
     adapter = XKAdapter()
     matches = await adapter.search_by_name("Raiffeisen", limit=5)
-    # ARBK occasionally JS-renders the result list; only assert shape.
     assert isinstance(matches, list)
+    assert matches, "expected at least one Raiffeisen match from ARBK export"
     for m in matches:
         assert m.country == "XK"
         assert m.name
+        assert m.identifiers

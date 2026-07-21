@@ -1,9 +1,10 @@
-# Ecuador — SUPERCIAS + SRI
+# Ecuador — GLEIF (SUPERCIAS / SRI geo-blocked)
 
 ## Identifier
 
 - Type: `VAT` (primary — RUC doubles as the Ecuadorian corporate tax /
-  VAT identifier) with `COMPANY_NUMBER` exposed as an alias.
+  VAT identifier) with `COMPANY_NUMBER` exposed as an alias. `LEI` is also
+  accepted for lookup, since the live source is the LEI registry.
 - Format: **RUC** (Registro Único de Contribuyentes). **13 digits**,
   layout `PPCCCCCCCCDDD001`:
   - `PP` (digits 1–2): province code (01–24).
@@ -14,83 +15,103 @@
     is always `001`.
 - The adapter accepts every common rendering — `1790010937001`,
   `179.001.0937-001`, `EC 1790010937001` — and validates only on
-  length + digit-only content. SUPERCIAS itself is the source of truth
-  on RUC existence; we deliberately do not enforce a province-code
-  range, because several legacy public-sector RUCs predate the modern
-  banding.
+  length + digit-only content. We deliberately do not enforce a
+  province-code range, because several legacy public-sector RUCs predate
+  the modern banding.
 
 ## Sources
 
+### Live source — GLEIF
+
+Registry data is served from **GLEIF** (Global Legal Entity Identifier
+Foundation) — `https://api.gleif.org/api/v1`. Free, no auth, JSON:API.
+This is the only free registry-grade source for Ecuadorian companies
+reachable from outside Ecuador (see the blocked-source note below).
+
+- **Search by name**:
+  `GET /lei-records?filter[entity.legalName]={name}&filter[entity.legalAddress.country]=EC`
+  (substring match). Falls back to `filter[fulltext]={name}&filter[entity.legalAddress.country]=EC`
+  when the legal-name filter is empty.
+- **Lookup by RUC**:
+  `GET /lei-records?filter[entity.registeredAs]={ruc}&filter[entity.legalAddress.country]=EC`.
+  The Ecuadorian RUC is carried in `entity.registeredAs` for most
+  supervised sociedades. A minority of entries (some banks, e.g. Banco
+  Pichincha) carry no RUC in GLEIF — look those up by LEI instead.
+- **Lookup by LEI**: `GET /lei-records?filter[lei]={lei}`.
+- Returns legal name, entity status, legal form (ELF code), registered
+  address, incorporation date (`entity.creationDate`), and the LEI.
+- GLEIF holds ~137 Ecuadorian entities (mostly larger companies, banks,
+  exporters). It is **not** exhaustive coverage of the Ecuadorian
+  registry — it is the reachable subset.
+- **Rate limit**: generous public API; we self-throttle at 60 req/min.
+
+### Blocked / unreachable sources (documented, not used)
+
+Verified 2026-07 from non-Ecuador egress; retried with curl, httpx,
+FlareSolverr, and a real headed Chrome:
+
 - **SUPERCIAS** (Superintendencia de Compañías, Valores y Seguros) —
-  `https://www.supercias.gob.ec/` / Portal de Consultas at
-  `https://appscvsmovil.supercias.gob.ec/portalConsultas/`.
-  - **Auth**: none. **Cost**: free.
-  - **Endpoints used**:
-    - `GET /PortalInformacion/consulta/companias/{ruc}` — direct
-      lookup. Returns company status, legal form, capital, registered
-      address, principal CIIU.
-    - `GET /PortalInformacion/consulta/companias/buscar?expresion={name}&tipo=razon_social`
-      — name search.
-    - `GET /PortalInformacion/consulta/informacion_economica?ruc={ruc}`
-      — catalog of filed annual reports ("Información Económica"),
-      including links to free PDF/Excel downloads.
-  - Both lookup and search back the public Consultas web form. The
-    JSON envelopes shift between deployments, so the adapter accepts
-    several common keys (`companias`, `data`, `items`, `registros`,
-    top-level array) and falls back to a defensive HTML parse of the
-    portal's table layout when JSON is not returned. If neither
-    parse succeeds, `AdapterNotImplementedError` is raised — never
-    invent.
-  - **Rate limit**: undocumented; we self-throttle at 30 req/min.
+  current consulta portal at
+  `https://appscvsgen.supercias.gob.ec/consultaCompanias/` and
+  `https://appscvssoc.supercias.gob.ec/consultaCompanias/`. Every
+  `/consultaCompanias/*` request returns an **"Unauthorized Request
+  Blocked / Actividad no autorizada"** interstitial (an Ecuador-only
+  edge/anti-automation rule; a real headed Chrome from a non-EC IP is
+  blocked identically, with no solvable challenge or cookie). The legacy
+  mobile host `appscvsmovil.supercias.gob.ec` no longer routes at all.
+  SUPERCIAS is the authoritative registry and the home of the free
+  "Información Económica" filed-accounts catalog — reachable only from
+  inside Ecuador (or via an EC egress proxy, which the MVP does not use).
 - **SRI** (Servicio de Rentas Internas) —
-  `https://srienlinea.sri.gob.ec/sri-en-linea/SriRucWeb/ConsultaRuc/`
-  - Public RUC validator. Useful as a coverage cross-check; not yet
-    wired in because SUPERCIAS already returns more structured data
-    for the sociedad subset that matters for credit risk.
-- **Bolsa de Valores de Quito (BVQ)** —
-  `https://www.bolsadequito.com/` — listed-company filings.
-- **Bolsa de Valores de Guayaquil (BVG)** —
-  `https://www.bolsadevaloresguayaquil.com/` — listed-company filings.
+  `https://srienlinea.sri.gob.ec/…/obtenerPorNumerosRuc` — TLS handshake
+  is dropped from non-EC egress (connect times out).
+- **datosabiertos.gob.ec** and **superbancos.gob.ec** — return `403`
+  from non-EC egress.
+- **Bolsa de Valores de Quito** (`https://www.bolsadequito.com/`) is
+  reachable but is a static Joomla CMS: it exposes only a single
+  downloadable issuer list and full-text-searchable prospectus PDFs —
+  no per-company structured registry or financial feed keyed by RUC.
+  **Bolsa de Valores de Guayaquil** returns `404` on its published host.
 
 ## Capabilities
 
 | Capability | Status |
 |------------|--------|
-| Search by name | Live (SUPERCIAS portal) |
-| Lookup by RUC (`VAT` / `COMPANY_NUMBER`) | Live (SUPERCIAS portal) |
-| Financials | Live — SUPERCIAS Información Económica catalog (free PDF/Excel) |
+| Search by name | Live (GLEIF, country=EC) |
+| Lookup by RUC (`VAT` / `COMPANY_NUMBER`) | Live (GLEIF `registeredAs`; RUC-carrying entities) |
+| Lookup by LEI | Live (GLEIF) |
+| Financials | **Unavailable key-free from non-EC egress** — `fetch_financials` raises `AdapterNotImplementedError`. No free source of filed Ecuadorian financial statements is reachable from outside Ecuador. |
 
-## Test companies (real)
+## Test companies (real, GLEIF-verified)
 
-- **Banco Pichincha C.A.** — RUC `1790010937001` — largest private bank.
-- **Corporación Favorita C.A.** — RUC `1790016919001` — leading retailer.
-- **Cervecería Nacional CN S.A.** — RUC `1790000017001` — brewery
-  (AB InBev subsidiary).
-- **Holcim Ecuador S.A.** — RUC `0990000180001` — cement (Holcim Group).
+- **OPERADORA Y PROCESADORA DE PRODUCTOS MARINOS OMARSA SA** — RUC
+  `0990608504001`, LEI `984500B3EA55BF13F406` — shrimp exporter.
+  Works for search **and** RUC lookup.
+- **Banco Pichincha C.A.** — LEI `549300CO09CR3FNOZ392` — largest private
+  bank. Found by name search; **no RUC in GLEIF**, so look up by LEI.
+- **Banco Internacional S.A.** — RUC `1790098354001`,
+  LEI `549300XHJYFMEFOFGN31`.
+- **Banco Bolivariano C.A.** — RUC `0990379017001`,
+  LEI `254900WSPPR3LTYF4B40`.
 
 ## Status
 
-Live for SUPERCIAS lookup, name search, and free annual-report
-catalog. Financials are surfaced as `FinancialFiling` rows pointing
-at the SUPERCIAS-hosted documents; PDF text extraction is a Phase-2
-addition that plugs into the shared pipeline once available.
+Live for name search and RUC/LEI lookup via GLEIF. Financials are not
+available from a free, non-EC-reachable source and the adapter raises
+rather than fabricate (no-mock rule).
 
 ## Phase-2 follow-ups
 
-1. **PDF parsing**: SUPERCIAS Información Económica is mostly PDFs.
-   Once the project-wide PDF pipeline ships (see CLAUDE.md
-   cross-cutting infra), pass the extracted text per year to the
-   LLM via `pdf_text_excerpts`.
-2. **CIIU enrichment**: SUPERCIAS records carry a primary CIIU 4.0
-   code; cross-reference INEC's Ecuadorian CIIU dictionary for the
-   industry-benchmark table.
-3. **SRI validation**: if a RUC is missing from SUPERCIAS but
-   present in SRI it almost always represents a natural-person or
-   public-sector entity outside SUPERCIAS's supervisory scope. Wire
-   the SRI consolidated endpoint as a secondary lookup to label
-   those rather than return `null`.
-4. **BVQ / BVG filings**: scrape per-issuer prospectus and quarterly
-   filings for the ~30 listed companies. Brittle scrape — gate
-   behind the Playwright pool.
-5. **Sanctions/PEP**: wire `OpenSanctionsClient` to screen every
-   Ecuadorian principal and director returned by SUPERCIAS.
+1. **EC-egress access to SUPERCIAS.** With an Ecuador-based proxy (or when
+   run from inside EC), wire the SUPERCIAS consulta portal for exhaustive
+   registry coverage and the "Información Económica" filed-accounts catalog
+   (free PDF/Excel annual reports) to unblock `fetch_financials`. Route it
+   through `fetch_with_bot_bypass` and gate document parsing behind the
+   shared PDF pipeline.
+2. **SRI validation.** From EC egress, use the SRI consolidated endpoint to
+   label RUCs absent from GLEIF (natural-person / public-sector entities).
+3. **Securities-exchange filings.** Scrape per-issuer prospectus and
+   quarterly filings from BVQ/BVG for the ~30 listed issuers; brittle
+   scrape — gate behind the Playwright pool.
+4. **Sanctions/PEP.** Wire `OpenSanctionsClient` to screen Ecuadorian
+   principals once directors are available (GLEIF does not expose them).

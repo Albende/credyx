@@ -3,16 +3,19 @@
 ## Identifier
 
 - Primary type: `COMPANY_NUMBER`
-- Format: **Numri Unik i Biznesit (UBI / NRB)** — 8 digits followed by
-  a single uppercase letter (e.g. `70123456A`). Issued by ARBK at
-  registration; stable for the life of the entity.
+- Format: **Numri Unik Identifikues (NUI)** — the business number printed
+  on the register. Modern entities carry a 9-digit NUI (e.g. `810485145`);
+  legacy entities carry an 8-digit number, occasionally with a trailing
+  letter (e.g. `70123456A`). Issued by ARBK at registration; stable for the
+  life of the entity. The adapter accepts both shapes and matches them
+  against the ARBK bulk export verbatim.
 - Secondary type: `VAT`
-- Format: **Numri Fiskal (NF)** — 9 digits (`\d{9}`). The fiscal
-  number is issued by the Tax Administration of Kosovo (ATK) and
-  doubles as the VAT registration. Under the EU VAT-prefix convention
-  it is rendered `XK` + NF; the adapter strips the prefix when
-  present. UBI and NF are distinct numbers and the adapter accepts
-  either.
+- Format: **Numri Fiskal (NF)** — 9 digits (`\d{9}`), issued by the Tax
+  Administration of Kosovo (ATK) and doubling as the VAT registration.
+  Under the EU VAT-prefix convention it is rendered `XK` + NF; the adapter
+  strips the prefix when present. **The free ARBK bulk export is keyed by
+  NUI only and does not expose the NF, so `VAT` lookup returns `None`** —
+  use `COMPANY_NUMBER` for identifier lookups.
 
 > Note on `XK`: ISO 3166-1 has not formally assigned a code to Kosovo,
 > but `XK` is a user-assigned code used by the European Commission, the
@@ -22,15 +25,41 @@
 ## Sources
 
 - https://arbk.rks-gov.net/ — Kosovo Business Registration Agency,
-  operated by the Ministry of Industry, Entrepreneurship and Trade
-  (MINT). Public free portal supporting search by business name, UBI,
-  or NF. UI in Albanian and Serbian, with partial English.
-- **Auth**: None.
-- **Rate limit**: Self-imposed at 30 req/min — government site, no
-  published budget.
-- **robots.txt / ToS**: arbk.rks-gov.net is a public registry-search
-  utility intended for third-party use. The adapter sends a clearly
+  operated by the Ministry of Trade and Industry (MTI). Since 2024 the
+  portal is a React single-page app backed by a JSON API under
+  `/api/api/`. The adapter uses two of its endpoints:
+  - `Services/EksportoBiznesetJson?Gjuha=1` — the agency's own bulk
+    export: a ZIP containing `Bizneset.json`, the full active + historic
+    register (~269k businesses) keyed by NUI, with name, legal form,
+    NACE activity, sector, city, status, and employee band. **Search and
+    lookup run against this cached dump.**
+  - `Services/TeDhenatBiznesit?nRegjistriId=N` — rich per-company detail
+    (address, capital, owners, representatives, NACE). Keyed by a
+    sequential internal id only obtainable from the Turnstile-walled
+    search, so used only as a liveness probe in `health_check`.
+- **Auth / signed header**: no API key and no registration. Every call
+  carries a `key` header the SPA derives per request: `GET
+  /api/api/Home/GetDate` returns the server time, which is AES-128-CBC
+  encrypted (key = IV = the ASCII literal `8056483646328769`, PKCS7) and
+  base64-encoded. The adapter reproduces this in `_compute_key`.
+- **Search endpoint is Cloudflare-Turnstile walled.**
+  `Services/KerkoBiznesin` requires a Turnstile token minted in a browser
+  and rejects any forged token with 401 — unusable server-side. The bulk
+  export is the key-free substitute.
+- **Rate limit**: Self-imposed at 30 req/min. The 9 MB export is cached
+  in-process for 12 h so name search and lookup do not re-download it.
+- **robots.txt / ToS**: the bulk export is a public, agency-published data
+  product intended for third-party reuse. The adapter sends a clearly
   identifiable User-Agent and keeps volume polite.
+
+## Encoding caveat
+
+The `EksportoBiznesetJson` payload has lost its non-ASCII letters at the
+source — Albanian/Serbian diacritics (ë, ç, š, đ) arrive as the Unicode
+replacement character `�` (e.g. `Prishtin�`, `Shoq�ri aksionare`). This is
+a defect in ARBK's export, not the adapter. Name matching folds both query
+and target to bare ASCII so lookups survive it; stored values keep the
+source text as-is rather than guess the original letters.
 
 ## Test companies
 
@@ -41,55 +70,60 @@
 - Banka Ekonomike Sh.A. — domestic commercial bank.
 - ProCredit Bank Kosovo Sh.A. — SME-focused commercial bank.
 
-(Exact UBI/NF values are not committed to the repo; integration tests
-search by name and validate result shape rather than asserting a
-specific identifier.)
+Verified live (July 2026) from the ARBK export:
+
+- Raiffeisen Bank Kosovo J.S.C. SH.A. — NUI `810485145` (active,
+  Prishtinë, NACE 6492).
+- ProCredit Bank SH.A. — NUI `810487191` (active).
+
+Integration tests search by name and validate result shape; the unit
+tests pin the `_compute_key` signing vector so the API contract is
+guarded without network access.
 
 ## Status
 
-🟡 **Partial — registry only.**
+🟡 **Partial — registry only (search + lookup live, no financials).**
 
-| Capability   | Status                              |
-|--------------|-------------------------------------|
-| Name search  | ⚠️ Best-effort HTML scrape          |
-| UBI lookup   | ✅ Live (HTML scrape)               |
-| NF lookup    | ✅ Live (HTML scrape)               |
-| Financials   | ❌ Not published in free form       |
-| Health       | ✅ Probes arbk.rks-gov.net          |
+| Capability        | Status                                    |
+|-------------------|-------------------------------------------|
+| Name search       | ✅ Live via ARBK bulk export (JSON)       |
+| COMPANY_NUMBER    | ✅ Live via ARBK bulk export (JSON)       |
+| VAT (NF) lookup   | ⚪ Not resolvable — NF absent from export  |
+| Financials        | ❌ No free machine-readable source exists  |
+| Health            | ✅ Probes arbk.rks-gov.net `/api/api`     |
 
 ## Limitations
 
-- **No public financial statements.** Audited annual accounts for
-  larger entities are filed with the Kosovo Financial Reporting
-  Council (KKRF / KCFR), but the published archive is PDF-only behind
-  a session-bound page and not amenable to bulk machine-readable
-  retrieval. `fetch_financials` returns `[]` rather than fabricated
-  data.
-- **HTML scrape is brittle.** ARBK renders the company card as a
-  two-column label/value table; the parser matches labels in Albanian
-  (Emri i Biznesit, Statusi, Forma e Biznesit, Numri i Biznesit, Numri
-  Fiskal, …), Serbian (Naziv, Stanje, Pravna Forma, …), and English.
-  Diacritics (ë, ç, š, đ) are preserved through UTF-8 decoding with
-  cp1250 fallback.
-- **Search-results page may be JavaScript-driven.** The free search
-  endpoint occasionally renders results via client-side JS, in which
-  case the adapter returns an empty list. The integration test only
-  asserts the call returns a well-formed shape, not that it is
-  non-empty.
-- **Currency defaults to EUR.** Kosovo unilaterally adopted the euro
-  in 2002; capital amounts on ARBK are denominated in EUR.
+- **No public financial statements — anywhere free and machine-readable.**
+  Verified July 2026: ARBK exposes no financial data; the Central Bank of
+  Kosovo (bqk-kos.org) publishes only its own statements and sector
+  aggregates, not individual banks' filings; the Kosovo Council for
+  Financial Reporting (KKRF / POB) registers auditors but does not publish
+  filed statements; Kosovo has no stock exchange; and the ATK open-data
+  programme covers taxpayer registration, not accounts. Commercial banks
+  publish audited statements only on their own websites (no common
+  registry). `fetch_financials` therefore returns `[]` rather than
+  fabricate data or scrape per-company sites.
+- **VAT (NF) lookup unsupported.** The free bulk export is keyed by NUI and
+  omits the fiscal number, so `lookup_by_identifier(VAT, …)` returns
+  `None`. The `TeDhenatBiznesit` detail endpoint carries the NF but is
+  reachable only via a sequential id minted by the Turnstile-walled search.
+- **Lookup detail is export-grade.** Because the rich `TeDhenatBiznesit`
+  endpoint is gated behind the Turnstile search, `lookup_by_identifier`
+  returns what the bulk export carries — name, legal form, status, city,
+  NACE code, sector, and employee band — not registered street address,
+  share capital, or directors.
+- **Currency defaults to EUR.** Kosovo unilaterally adopted the euro in
+  2002; Kosovar company figures are denominated in EUR.
 
 ## Recommended next steps
 
-1. Add a Playwright fallback through
-   `packages/adapters/_base/browser.py` (once that infrastructure
-   lands) to harden `search_by_name` when ARBK renders results
-   client-side.
-2. Cross-reference each UBI/NF against GLEIF (very few Kosovo LEIs
-   exist) and OpenSanctions on lookup to surface sanctions/PEP hits
-   up-front.
-3. Investigate whether KKRF / KCFR exposes a structured feed of
-   audited annual reports for "subjekt me interes publik" (public-
-   interest entities); if so, wire a financials adapter on top.
-4. Pull the ATK (Tax Administration) public VAT-validity check as a
-   second liveness signal when ARBK is down.
+1. Solve `Services/KerkoBiznesin`'s Cloudflare Turnstile via a headless
+   browser (`packages/adapters/_base/browser.py`) to obtain the sequential
+   `nRegjistriId`, then call `Services/TeDhenatBiznesit` to enrich
+   `lookup_by_identifier` with address, capital, owners, and directors.
+2. Cross-reference each NUI/NF against GLEIF (very few Kosovo LEIs exist)
+   and OpenSanctions on lookup to surface sanctions/PEP hits up-front.
+3. For the banking subset, wire per-bank audited statements from each
+   bank's own site (BQK links but does not host them) if bank-level credit
+   analysis becomes a priority — there is no general registry to build on.

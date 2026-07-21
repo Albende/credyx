@@ -5,37 +5,35 @@ import pytest
 from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.ba import BAAdapter
 from packages.adapters.ba.adapter import (
-    _normalize_jib,
-    _normalize_mb,
-    _parse_ba_date,
+    _legal_form_from_name,
+    _normalize_code,
     _parse_amount,
+    _parse_ba_date,
+    _status_from_name,
 )
 from packages.shared.models import AdapterStatus, IdentifierType
 
 
-def test_normalize_jib_ok():
-    assert _normalize_jib("4200211100005") == "4200211100005"
-    assert _normalize_jib(" 4200211100005 ") == "4200211100005"
+def test_normalize_code_ok():
+    assert _normalize_code("TLKM") == "TLKM"
+    assert _normalize_code(" tlkm ") == "TLKM"
 
 
-def test_normalize_jib_rejects_short():
+def test_normalize_code_rejects_bad():
     with pytest.raises(InvalidIdentifierError):
-        _normalize_jib("12345")
-
-
-def test_normalize_jib_rejects_non_digit():
+        _normalize_code("has space")
     with pytest.raises(InvalidIdentifierError):
-        _normalize_jib("420021110000A")
+        _normalize_code("")
 
 
-def test_normalize_mb_ok():
-    assert _normalize_mb("1234567") == "1234567"
-    assert _normalize_mb("1234567890123") == "1234567890123"
+def test_status_from_name():
+    assert _status_from_name("Foo a.d. - u stečaju") == "Bankruptcy (u stečaju)"
+    assert _status_from_name("Telekom Srpske a.d. Banja Luka") == "Listed"
 
 
-def test_normalize_mb_rejects():
-    with pytest.raises(InvalidIdentifierError):
-        _normalize_mb("123")
+def test_legal_form_from_name():
+    assert _legal_form_from_name("Telekom Srpske a.d. Banja Luka") is not None
+    assert _legal_form_from_name("Nekakvo Something") is None
 
 
 def test_parse_ba_date_dot_format():
@@ -49,6 +47,7 @@ def test_parse_ba_date_none():
 
 
 def test_parse_amount_local_format():
+    assert _parse_amount("1.716.946.086") == 1716946086.0
     assert _parse_amount("1.234.567,89 KM") == 1234567.89
     assert _parse_amount(None) is None
 
@@ -56,7 +55,7 @@ def test_parse_amount_local_format():
 def test_adapter_metadata():
     a = BAAdapter()
     assert a.country_code == "BA"
-    assert IdentifierType.VAT in a.identifier_types
+    assert a.primary_identifier == IdentifierType.COMPANY_NUMBER
     assert IdentifierType.COMPANY_NUMBER in a.identifier_types
     assert a.requires_api_key is False
     assert a.rate_limit_per_minute == 30
@@ -72,49 +71,42 @@ async def test_health_check_reachable():
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_search_bh_telecom():
+async def test_search_telekom():
     adapter = BAAdapter()
-    matches = await adapter.search_by_name("BH Telecom", limit=5)
-    # The bizreg portal can return zero rows under load; assert the call shape.
+    matches = await adapter.search_by_name("telekom", limit=5)
     assert isinstance(matches, list)
+    assert any(m.id == "TLKM" for m in matches)
     for m in matches:
         assert m.country == "BA"
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
-async def test_lookup_invalid_jib_raises():
+async def test_lookup_wrong_type_raises():
     adapter = BAAdapter()
     with pytest.raises(InvalidIdentifierError):
-        await adapter.lookup_by_identifier(IdentifierType.VAT, "not-a-jib")
+        await adapter.lookup_by_identifier(IdentifierType.VAT, "TLKM")
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_bh_telecom():
+async def test_lookup_telekom():
     adapter = BAAdapter()
-    # Lookup may return None if the public portal is rate-limiting or temporarily
-    # blocked — we only assert the contract.
     details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "4200211100005"
+        IdentifierType.COMPANY_NUMBER, "TLKM"
     )
-    if details is not None:
-        assert details.country == "BA"
-        assert any(i.value == "4200211100005" for i in details.identifiers)
+    assert details is not None
+    assert details.country == "BA"
+    assert any(i.value == "TLKM" for i in details.identifiers)
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_non_listed_returns_empty():
+@pytest.mark.integration
+async def test_fetch_financials_listed_has_real_data():
     adapter = BAAdapter()
-    # A well-formed JIB that is not in the SASE listed set.
-    out = await adapter.fetch_financials("1234567890123", years=3)
-    assert out == []
-
-
-@pytest.mark.asyncio
-async def test_fetch_financials_listed_returns_pointers():
-    adapter = BAAdapter()
-    out = await adapter.fetch_financials("4200211100005", years=3)
-    assert len(out) == 3
+    out = await adapter.fetch_financials("TLKM", years=3)
+    assert len(out) >= 1
     assert all(f.currency == "BAM" for f in out)
-    assert all("sase.ba" in (f.source_url or "") for f in out)
+    assert all("blberza.com" in (f.source_url or "") for f in out)
+    latest = out[0]
+    assert latest.structured_data is not None
+    assert latest.structured_data["balance_sheet"]["total_assets"] > 0

@@ -1,16 +1,30 @@
-"""Azerbaijan adapter — e-taxes.gov.az public VÖEN lookup.
+"""Azerbaijan adapter — State Tax Service (DVX) register + Baku Stock Exchange.
 
 Source coverage:
 
-* https://www.e-taxes.gov.az/ebyn/commersialChek.jsp?vergi_id={voen} —
-  the public "commercial taxpayer check" page operated by the State Tax
-  Service (DSX). Returns an HTML fragment with the taxpayer name,
-  status (active/closed), registered address and registration date.
-  No authentication, no JSON contract — pure HTML scrape.
-* State Statistics Committee (stat.gov.az) and Ministry of Justice
-  (justice.gov.az) provide bulletins / NGO registers, but the
-  commercial register has no public search endpoint and financial
-  statements are not published online for non-listed companies.
+* Company register (name search + VÖEN lookup) — the public
+  ``findTaxpayer`` JSON endpoint that backs the "Kommersiya qurumlarının
+  dövlət reyestri məlumatlarının verilməsi" service on the new e-taxes
+  single-page app::
+
+      POST https://new.e-taxes.gov.az/api/po/authless/public/v1/authless/findTaxpayer
+      {"tin": "9900003871", "type": "legalEntity",
+       "serviceCode": "checkLegalName", "isStateRegistry": true}
+
+  Send ``name`` instead of ``tin`` for a name search. No authentication,
+  no cookie, no key. Returns the registered name, legal form, charter
+  capital, legal address, representative, registration dates and status
+  straight from the State Register of Commercial Entities. The legacy
+  ``commersialChek.jsp`` HTML page that this adapter used to scrape now
+  301-redirects to the SPA and no longer serves data.
+
+* Filed financial statements — the Baku Stock Exchange (Bakı Fond Birjası,
+  ``bfb.az``) publishes each listed issuer's audited IFRS annual accounts
+  as PDFs on ``/emitent/{slug}``. The AZ-locale issuer slug is a
+  transliteration of the registered Azerbaijani name, so a taxpayer's
+  register name maps onto the issuer page without needing a paid lookup.
+  Non-listed companies do not publish accounts anywhere free, so
+  ``fetch_financials`` returns an empty list for them.
 
 Identifier:
 - VAT → VÖEN (Vergi Ödəyicisinin Eyniləşdirmə Nömrəsi). Always 10 digits.
@@ -23,20 +37,20 @@ import logging
 import re
 from datetime import date, datetime
 from html import unescape
-from html.parser import HTMLParser
 from typing import Any
 
+import httpx
+
 from packages.adapters._base.adapter import CountryAdapter
-from packages.adapters._base.errors import (
-    AdapterNotImplementedError,
-    InvalidIdentifierError,
-)
+from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters._base.http import build_http_client, get_with_retry
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    Director,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -49,54 +63,27 @@ _VOEN_RE = re.compile(r"^\d{10}$")
 # A well-known active taxpayer used as a liveness probe — SOCAR.
 _HEALTH_PROBE_VOEN = "9900003871"
 
-# Field labels the public page may render in Azerbaijani Latin script.
-# Russian/Cyrillic labels are also possible; we keep matchers loose.
-_LABEL_NAME = (
-    "vergi ödəyicisinin adı",
-    "vergi odeyicisinin adi",
-    "ad",
-    "наименование",
-    "название",
-    "name",
-)
-_LABEL_STATUS = (
-    "vəziyyət",
-    "veziyyet",
-    "status",
-    "статус",
-    "состояние",
-)
-_LABEL_ADDRESS = (
-    "ünvan",
-    "unvan",
-    "ünvanı",
-    "адрес",
-    "address",
-    "юридический адрес",
-)
-_LABEL_REG_DATE = (
-    "qeydiyyat tarixi",
-    "qeydiyyata alınma tarixi",
-    "дата регистрации",
-    "registration date",
-)
-_LABEL_LEGAL_FORM = (
-    "təşkilati-hüquqi forma",
-    "teshkilati huquqi forma",
-    "организационно-правовая форма",
-    "legal form",
+# Azerbaijani Latin letters that carry diacritics, mapped to the ASCII
+# forms the Baku Stock Exchange uses when it builds issuer-page slugs.
+_AZ_TRANSLIT = str.maketrans(
+    {
+        "ə": "e", "Ə": "e",
+        "ş": "s", "Ş": "s",
+        "ç": "c", "Ç": "c",
+        "ğ": "g", "Ğ": "g",
+        "ı": "i", "İ": "i",
+        "ö": "o", "Ö": "o",
+        "ü": "u", "Ü": "u",
+    }
 )
 
-_STATUS_ACTIVE_TOKENS = ("fəal", "aktiv", "fealdir", "действующ", "active")
-_STATUS_INACTIVE_TOKENS = (
-    "ləğv",
-    "bağlan",
-    "qeyri-fəal",
-    "ликвидир",
-    "закрыт",
-    "недейств",
-    "inactive",
-    "closed",
+# Legal-form words carried by almost every registered name; they must not
+# drive the issuer match, only the distinctive words should.
+_SLUG_STOPWORDS = frozenset(
+    {
+        "aciq", "acig", "qapali", "sehmdar", "cemiyyeti", "cemiyyati",
+        "mehdud", "mesuliyyetli", "asc", "qsc", "mmc", "sc",
+    }
 )
 
 
@@ -112,7 +99,7 @@ def _normalize_voen(value: str) -> str:
 
 
 def _parse_az_date(value: str | None) -> date | None:
-    """e-taxes renders dates as DD.MM.YYYY; tolerate ISO and slashes too."""
+    """The register renders dates as ISO; tolerate DD.MM.YYYY and slashes."""
     if not value:
         return None
     s = value.strip()
@@ -128,15 +115,28 @@ def _parse_az_date(value: str | None) -> date | None:
     return None
 
 
-def _classify_status(raw: str | None) -> str | None:
-    if not raw:
-        return None
-    low = raw.lower()
-    if any(token in low for token in _STATUS_INACTIVE_TOKENS):
-        return "inactive"
-    if any(token in low for token in _STATUS_ACTIVE_TOKENS):
-        return "active"
-    return raw.strip() or None
+def _slugify_az(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.translate(_AZ_TRANSLIT).lower()).strip("-")
+
+
+def _distinctive_tokens(slug: str) -> set[str]:
+    return {t for t in slug.split("-") if t and t not in _SLUG_STOPWORDS}
+
+
+def _slug_similarity(a: set[str], b: set[str]) -> float:
+    """Prefix-tolerant Jaccard — Azerbaijani genitive endings differ."""
+    if not a or not b:
+        return 0.0
+    matched = 0
+    for at in a:
+        for bt in b:
+            if at == bt or (
+                min(len(at), len(bt)) >= 5 and (at.startswith(bt) or bt.startswith(at))
+            ):
+                matched += 1
+                break
+    union = len(a) + len(b) - matched
+    return matched / union if union else 0.0
 
 
 class AZAdapter(CountryAdapter):
@@ -148,84 +148,96 @@ class AZAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    BASE_URL = "https://www.e-taxes.gov.az"
-    LOOKUP_PATH = "/ebyn/commersialChek.jsp"
+    ETAXES_BASE = "https://new.e-taxes.gov.az"
+    FIND_TAXPAYER_PATH = "/api/po/authless/public/v1/authless/findTaxpayer"
+    SERVICE_URL = (
+        "https://new.e-taxes.gov.az/etaxes/services/legal-entity-info"
+    )
 
-    def _client(self):
+    BSE_BASE = "https://www.bfb.az"
+    BSE_INDEX_PATH = "/bazara-baxis"
+    BSE_ISSUER_PATH = "/emitent/"
+
+    def _api_client(self) -> httpx.AsyncClient:
         return build_http_client(
-            base_url=self.BASE_URL,
+            base_url=self.ETAXES_BASE,
             headers={
-                "Accept": "text/html,application/xhtml+xml",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
                 "Accept-Language": "az,en;q=0.7,ru;q=0.5",
+                "Origin": self.ETAXES_BASE,
+                "Referer": self.SERVICE_URL,
             },
-            timeout=25.0,
+            timeout=30.0,
         )
 
-    async def health_check(self) -> AdapterHealth:
-        try:
-            async with self._client() as client:
-                resp = await get_with_retry(
-                    client,
-                    self.LOOKUP_PATH,
-                    params={"vergi_id": _HEALTH_PROBE_VOEN},
-                )
-                resp.raise_for_status()
-                page_text = _decode_response(resp)
-        except Exception as exc:
-            return AdapterHealth(
-                country_code=self.country_code,
-                name=self.country_name,
-                status=AdapterStatus.ERROR,
-                capabilities={
-                    "search": False,
-                    "lookup": False,
-                    "financials": False,
-                },
-                requires_api_key=False,
-                api_key_present=True,
-                rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=str(exc)[:200],
-            )
-        record = _extract_taxpayer_record(page_text)
-        if not record.get("name"):
-            return AdapterHealth(
-                country_code=self.country_code,
-                name=self.country_name,
-                status=AdapterStatus.DEGRADED,
-                capabilities={
-                    "search": False,
-                    "lookup": False,
-                    "financials": False,
-                },
-                requires_api_key=False,
-                api_key_present=True,
-                rate_limit_per_minute=self.rate_limit_per_minute,
-                notes="e-taxes responded but probe VÖEN returned no name; "
-                "page markup may have changed.",
-            )
-        return AdapterHealth(
-            country_code=self.country_code,
-            name=self.country_name,
-            status=AdapterStatus.OK,
-            capabilities={
-                "search": False,
-                "lookup": True,
-                "financials": False,
-            },
-            requires_api_key=False,
-            api_key_present=True,
-            rate_limit_per_minute=self.rate_limit_per_minute,
-            notes="Lookup only — e-taxes does not expose name search or "
-            "filed financial statements publicly.",
+    def _bse_client(self) -> httpx.AsyncClient:
+        return build_http_client(
+            base_url=self.BSE_BASE,
+            headers={"Accept": "text/html,application/xhtml+xml"},
+            timeout=30.0,
+        )
+
+    async def _find_taxpayer(
+        self, client: httpx.AsyncClient, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        body = {
+            "type": "legalEntity",
+            "serviceCode": "checkLegalName",
+            "isStateRegistry": True,
+            **payload,
+        }
+        resp = await client.post(self.FIND_TAXPAYER_PATH, json=body)
+        if resp.status_code in (400, 404):
+            return []
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("applicationErrorCode"):
+            return []
+        return data.get("taxpayers", [])
+
+    @staticmethod
+    def _status_label(taxpayer: dict[str, Any]) -> str | None:
+        status = (
+            taxpayer.get("legalTaxpayerStatus", {}).get("taxpayerStatus")
+            or taxpayer.get("taxpayerStatus")
+        )
+        if status:
+            name = status.get("name", {})
+            label = name.get("en") or name.get("az")
+            if label:
+                return label
+        active = taxpayer.get("active")
+        if active is True:
+            return "active"
+        if active is False:
+            return "inactive"
+        return None
+
+    def _to_match(self, taxpayer: dict[str, Any]) -> CompanyMatch:
+        tin = str(taxpayer.get("tin", ""))
+        lts = taxpayer.get("legalTaxpayerStatus", {})
+        return CompanyMatch(
+            id=tin,
+            name=taxpayer.get("name", ""),
+            country=self.country_code,
+            identifiers=[
+                RegistryIdentifier(type=IdentifierType.VAT, value=tin, label="VÖEN"),
+            ],
+            address=lts.get("legalAddress"),
+            status=self._status_label(taxpayer),
+            source_url=self.SERVICE_URL,
         )
 
     async def search_by_name(
         self, name: str, limit: int = 10
     ) -> list[CompanyMatch]:
-        raise AdapterNotImplementedError(
-            "AZ e-taxes does not expose name search publicly; "
-            "look up by VÖEN (10-digit tax ID) instead."
-        )
+        query = name.strip()
+        if not query:
+            return []
+        async with self._api_client() as client:
+            taxpayers = await self._find_taxpayer(client, {"name": query})
+        return [self._to_match(t) for t in taxpayers[:limit]]
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -235,172 +247,185 @@ class AZAdapter(CountryAdapter):
                 f"Azerbaijan adapter only supports VAT (VÖEN), got {id_type}"
             )
         voen = _normalize_voen(value)
-        async with self._client() as client:
-            resp = await get_with_retry(
-                client,
-                self.LOOKUP_PATH,
-                params={"vergi_id": voen},
-            )
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
-
-        record = _extract_taxpayer_record(page_text)
-        if not record.get("name"):
-            # Page rendered but no taxpayer found — distinguish "unknown VÖEN"
-            # from a markup change. e-taxes shows a localized "no record" line.
-            low = page_text.lower()
-            if any(
-                token in low
-                for token in ("tapılmadı", "tapilmadi", "не найден", "not found")
-            ):
-                return None
+        async with self._api_client() as client:
+            taxpayers = await self._find_taxpayer(client, {"tin": voen})
+        if not taxpayers:
             return None
 
-        source_url = (
-            f"{self.BASE_URL}{self.LOOKUP_PATH}?vergi_id={voen}"
+        taxpayer = taxpayers[0]
+        lts = taxpayer.get("legalTaxpayerStatus", {})
+        legal_form = lts.get("legalForm", {}).get("name", {})
+        representative = lts.get("legitimate")
+        directors = (
+            [Director(name=representative, role="Legal representative")]
+            if representative
+            else []
         )
 
         return CompanyDetails(
             id=voen,
-            name=record["name"],
+            name=taxpayer.get("name") or lts.get("name", ""),
             country=self.country_code,
-            legal_form=record.get("legal_form"),
-            status=_classify_status(record.get("status_raw")),
-            incorporation_date=_parse_az_date(record.get("registration_date")),
-            registered_address=record.get("address"),
-            capital_amount=None,
+            legal_form=legal_form.get("en") or legal_form.get("az"),
+            status=self._status_label(taxpayer),
+            incorporation_date=_parse_az_date(lts.get("stateRegisteredAt")),
+            registered_address=lts.get("legalAddress"),
+            capital_amount=lts.get("charterCapital"),
             capital_currency="AZN",
+            directors=directors,
             identifiers=[
-                RegistryIdentifier(
-                    type=IdentifierType.VAT,
-                    value=voen,
-                    label="VÖEN",
-                ),
+                RegistryIdentifier(type=IdentifierType.VAT, value=voen, label="VÖEN"),
             ],
             raw={
-                "source": "e-taxes.gov.az/commersialChek",
-                "fields": record,
+                "source": "new.e-taxes.gov.az/findTaxpayer",
+                "taxpayer": taxpayer,
             },
-            source_url=source_url,
+            source_url=self.SERVICE_URL,
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        raise AdapterNotImplementedError(
-            "Azerbaijan financial statements are not published publicly. "
-            "Listed-issuer reports live on the Baku Stock Exchange (BSE) "
-            "site only as PDFs and are out of scope for the free MVP."
-        )
+        voen = _normalize_voen(company_id)
+        async with self._api_client() as api:
+            taxpayers = await self._find_taxpayer(api, {"tin": voen})
+        if not taxpayers:
+            return []
+        name = taxpayers[0].get("name", "")
+        if not name:
+            return []
 
+        async with self._bse_client() as bse:
+            slug = await self._match_issuer_slug(bse, name)
+            if not slug:
+                return []
+            resp = await get_with_retry(bse, f"{self.BSE_ISSUER_PATH}{slug}")
+            if resp.status_code != 200:
+                return []
+            page = resp.text
+            issuer_url = f"{self.BSE_BASE}{self.BSE_ISSUER_PATH}{slug}"
+            reports = _extract_annual_reports(page)
+            filings: list[FinancialFiling] = []
+            for year, doc_url in reports[:years]:
+                document_url = doc_url if await _document_downloads(bse, doc_url) else None
+                filings.append(
+                    FinancialFiling(
+                        company_id=voen,
+                        year=year,
+                        type=FilingType.ANNUAL_REPORT,
+                        currency="AZN",
+                        document_url=document_url,
+                        document_format="pdf" if document_url else None,
+                        source_url=issuer_url,
+                    )
+                )
+        return filings
 
-def _decode_response(resp) -> str:
-    """Decode the response body as text, defaulting to UTF-8.
+    async def _match_issuer_slug(
+        self, client: httpx.AsyncClient, name: str
+    ) -> str | None:
+        resp = await get_with_retry(client, self.BSE_INDEX_PATH)
+        if resp.status_code != 200:
+            return None
+        candidates = {
+            m.group(1)
+            for m in re.finditer(r"/emitent/([a-z0-9-]+)", resp.text)
+        }
+        if not candidates:
+            return None
+        target = _distinctive_tokens(_slugify_az(name))
+        if not target:
+            return None
+        best_slug, best_score = None, 0.0
+        for slug in candidates:
+            score = _slug_similarity(target, _distinctive_tokens(slug))
+            if score > best_score:
+                best_slug, best_score = slug, score
+        return best_slug if best_score >= 0.6 else None
 
-    e-taxes.gov.az has historically served pages as windows-1251 / cp1251
-    without a charset header; httpx then falls back to latin-1, which
-    mangles Azerbaijani diacritics and Cyrillic. We try UTF-8 first, then
-    cp1251, before letting httpx guess.
-    """
-    body = resp.content
-    if not body:
-        return ""
-    for encoding in ("utf-8", "cp1251", "windows-1251"):
+    async def health_check(self) -> AdapterHealth:
         try:
-            return body.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return resp.text
-
-
-class _TableParser(HTMLParser):
-    """Flatten every <td>/<th> cell into a list of stripped text strings.
-
-    The e-taxes page renders the taxpayer record as a two-column table:
-    label on the left, value on the right. We sweep all cells and then
-    walk pairwise.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.cells: list[str] = []
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag in ("td", "th"):
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self.cells.append(text)
-            self._in_cell -= 1
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-def _match_label(cell: str, candidates: tuple[str, ...]) -> bool:
-    low = cell.lower().strip().rstrip(":").strip()
-    return any(label in low for label in candidates)
-
-
-def _extract_taxpayer_record(html: str) -> dict[str, Any]:
-    """Pull the taxpayer fields out of the commersialChek.jsp HTML."""
-    if not html:
-        return {}
-
-    parser = _TableParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("AZ e-taxes HTML parse failed: %s", exc)
-        return {}
-
-    cells = [c for c in parser.cells if c]
-    record: dict[str, Any] = {}
-    for label_cell, value_cell in zip(cells, cells[1:]):
-        if not value_cell:
-            continue
-        if "name" not in record and _match_label(label_cell, _LABEL_NAME):
-            record["name"] = value_cell
-        elif "status_raw" not in record and _match_label(
-            label_cell, _LABEL_STATUS
-        ):
-            record["status_raw"] = value_cell
-        elif "address" not in record and _match_label(
-            label_cell, _LABEL_ADDRESS
-        ):
-            record["address"] = value_cell
-        elif "registration_date" not in record and _match_label(
-            label_cell, _LABEL_REG_DATE
-        ):
-            record["registration_date"] = value_cell
-        elif "legal_form" not in record and _match_label(
-            label_cell, _LABEL_LEGAL_FORM
-        ):
-            record["legal_form"] = value_cell
-
-    if "name" not in record:
-        # Fallback: scan flattened text for a heading-style "Adı: …" pattern.
-        flat = re.sub(r"<[^>]+>", " ", html)
-        flat = unescape(re.sub(r"\s+", " ", flat)).strip()
-        m = re.search(
-            r"(?:vergi\s+ödəyicisinin\s+adı|ad[ıi])\s*[:\-]\s*([^\n\r<]+?)\s{2,}",
-            flat,
-            re.IGNORECASE,
+            async with self._api_client() as client:
+                taxpayers = await self._find_taxpayer(
+                    client, {"tin": _HEALTH_PROBE_VOEN}
+                )
+        except Exception as exc:
+            return AdapterHealth(
+                country_code=self.country_code,
+                name=self.country_name,
+                status=AdapterStatus.ERROR,
+                capabilities={"search": False, "lookup": False, "financials": False},
+                requires_api_key=False,
+                api_key_present=True,
+                rate_limit_per_minute=self.rate_limit_per_minute,
+                notes=str(exc)[:200],
+            )
+        if not taxpayers or not taxpayers[0].get("name"):
+            return AdapterHealth(
+                country_code=self.country_code,
+                name=self.country_name,
+                status=AdapterStatus.DEGRADED,
+                capabilities={"search": False, "lookup": False, "financials": False},
+                requires_api_key=False,
+                api_key_present=True,
+                rate_limit_per_minute=self.rate_limit_per_minute,
+                notes="e-taxes findTaxpayer responded but probe VÖEN returned "
+                "no name; the API contract may have changed.",
+            )
+        return AdapterHealth(
+            country_code=self.country_code,
+            name=self.country_name,
+            status=AdapterStatus.OK,
+            capabilities={"search": True, "lookup": True, "financials": True},
+            requires_api_key=False,
+            api_key_present=True,
+            rate_limit_per_minute=self.rate_limit_per_minute,
+            notes="Register search + VÖEN lookup via e-taxes findTaxpayer; "
+            "financials via Baku Stock Exchange issuer filings (listed only).",
         )
-        if m:
-            record["name"] = m.group(1).strip()
-    return record
+
+
+async def _document_downloads(client: httpx.AsyncClient, url: str) -> bool:
+    try:
+        resp = await client.head(url, follow_redirects=True)
+    except (httpx.TransportError, httpx.TimeoutException):
+        return False
+    if resp.status_code != 200:
+        return False
+    return "pdf" in resp.headers.get("Content-Type", "").lower()
+
+
+_ANNUAL_HEADING = "İllik maliyyə hesabatları"
+_DOC_CARD_RE = re.compile(
+    r'doc-card"\s+title="(?P<title>[^"]*)".*?href="(?P<href>[^"]+?\.pdf[^"]*)"',
+    re.IGNORECASE | re.DOTALL,
+)
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _extract_annual_reports(html: str) -> list[tuple[int, str]]:
+    """Pull ``(year, pdf_url)`` pairs from the issuer's annual-report block.
+
+    The Baku Stock Exchange issuer page renders each filing as a
+    ``doc-card`` whose ``title`` carries the year ("2024 İllik Maliyyə
+    hesabatı"). We scope to the "İllik maliyyə hesabatları" section so
+    semi-annual and other documents are ignored, then keep the newest
+    year per document.
+    """
+    start = html.find(_ANNUAL_HEADING)
+    if start == -1:
+        return []
+    nxt = html.find("<h5", start + len(_ANNUAL_HEADING))
+    block = html[start : nxt if nxt != -1 else len(html)]
+
+    by_year: dict[int, str] = {}
+    for card in _DOC_CARD_RE.finditer(block):
+        year_match = _YEAR_RE.search(card.group("title"))
+        if not year_match:
+            continue
+        year = int(year_match.group(0))
+        url = unescape(card.group("href")).strip()
+        if not url.startswith("http"):
+            url = f"{AZAdapter.BSE_BASE}{url}"
+        by_year.setdefault(year, url)
+    return sorted(by_year.items(), key=lambda pair: pair[0], reverse=True)

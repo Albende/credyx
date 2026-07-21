@@ -87,18 +87,32 @@ OVERRIDES: dict[str, tuple[str, str]] = {
     # Name-only (docs list no free identifier) — search coverage only:
     "AE": ("Emaar Properties", None),
     "AO": ("Sonangol", None),
-    "BA": ("Elektroprivreda BiH", None),
     "CD": ("SCTP", None),
     "CI": ("Orange Cote d'Ivoire", None),
     "CM": ("SAFACAM", None),
     "ET": ("Ethiopian Airlines", None),
-    "ME": ("Crnogorski Telekom", None),
     "MG": ("Telma", None),
     "MZ": ("Hidroelectrica de Cahora Bassa", None),
-    "PY": ("Banco Continental", None),
     "SC": ("SACOS Group", None),
-    "UZ": ("Uzbekneftegaz", None),
     "XK": ("Raiffeisen Bank Kosovo", None),
+    # ---- Final verified overrides (last = wins over any duplicate above) ----
+    "BO": ("Banco Mercantil", "1020557029"),
+    "LT": ("Telia Lietuva", "121215434"),
+    # Wave-3 verified local test companies:
+    "AT": ("OMV", "93363z"),
+    "AZ": ("SOCAR", "9900003871"),
+    "BA": ("Telekom Srpske", "TLKM"),
+    "CY": ("Logicom", "HE28390"),
+    "DO": ("Banco Popular Dominicano", "101010632"),
+    "DZ": ("Saidal", "SAI"),
+    "IS": ("Marel", "620483-0369"),
+    "KH": ("ACLEDA", "00003077"),
+    "LU": ("ArcelorMittal", "82454"),
+    "MA": ("Maroc Telecom", "254900LH0G1ZIZ78Y462"),
+    "ME": ("Crnogorski Telekom", "02289377"),
+    "NG": ("Dangote Cement", "208767"),
+    "PY": ("CODIPSA", "codipsa-2"),
+    "UZ": ("Hamkorbank", "200242936"),
 }
 
 

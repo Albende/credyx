@@ -1,22 +1,25 @@
-"""Cyprus adapter — DRCOR (Department of Registrar of Companies and Official
-Receiver) public search + VIES VAT validation.
+"""Cyprus adapter — DRCOR (Department of Registrar of Companies and
+Intellectual Property) public search + GLEIF/ESEF filings + VIES VAT.
 
-Public free DRCOR search:
-    https://efiling.drcor.mcit.gov.cy/DrcorPublic/SearchForm.aspx
+DRCOR public search (free, no auth, no JS):
     https://efiling.drcor.mcit.gov.cy/DrcorPublic/SearchResults.aspx
-    https://efiling.drcor.mcit.gov.cy/DrcorPublic/ViewOrganisation.aspx?id={internal_id}
+The public results page is a plain GET keyed by query string — the search
+form's ``__doPostBack`` merely 302-redirects to that URL, so we skip the
+ASP.NET ViewState round-trip entirely and request SearchResults directly.
+Results are a GridView; each row carries the (Latin) company name, the HE
+registration number, organisation type, name status and organisation
+status. Per-row detail pages sit behind a session-bound ``Select`` postback
+that the public endpoint rejects, so we read everything from the row.
 
-DRCOR is an ASP.NET WebForms application: name search and ID search both need
-a POST that echoes `__VIEWSTATE`, `__VIEWSTATEGENERATOR`, and `__EVENTVALIDATION`
-back from a prior GET on the form page. We do exactly that with httpx; no
-Playwright, no JS execution.
+Financial filings come from the EU ESEF pipeline, entirely free and
+key-free:
+    HE number  ->  GLEIF ``registeredAs``  ->  LEI
+    LEI        ->  filings.xbrl.org JSON:API  ->  ESEF annual reports
+filings.xbrl.org hosts the actual iXBRL report packages (downloadable
+``.zip``) for Cyprus-domiciled listed issuers. DRCOR's own e-filings are
+paywalled and never used here.
 
-VAT lookups go through the EU VIES SOAP endpoint:
-    https://ec.europa.eu/taxation_customs/vies/services/checkVatService
-
-Filings are not freely available — DRCOR offers per-document electronic filings
-only via authenticated paid access; we therefore return [] from
-``fetch_financials``.
+VAT lookups go through the EU VIES SOAP endpoint.
 
 Identifiers:
 - HE Number: ``HE`` + digits (up to 9). Stored normalized as bare digits,
@@ -27,16 +30,14 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+import unicodedata
+from datetime import date, datetime
 from html import unescape
 from typing import Any
-
-import httpx
 
 from packages.adapters._base.adapter import CountryAdapter
 from packages.adapters._base.errors import (
     AdapterError,
-    AdapterNotImplementedError,
     InvalidIdentifierError,
 )
 from packages.adapters._base.http import build_http_client, get_with_retry
@@ -45,6 +46,7 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
@@ -56,10 +58,24 @@ _HE_RE = re.compile(r"^\d{1,9}$")
 _VAT_RE = re.compile(r"^\d{8}[A-Z]$")
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
-_HIDDEN_INPUT_RE = re.compile(
-    r'<input[^>]+name="(__VIEWSTATE|__VIEWSTATEGENERATOR|__EVENTVALIDATION)"[^>]*value="([^"]*)"',
-    re.IGNORECASE,
-)
+
+_ORG_STATUS_MAP = {
+    "εγγεγραμμ": "active",
+    "διαλυθ": "dissolved",
+    "διαλυμ": "dissolved",
+    "διαγρα": "struck_off",
+    "εκκαθαρ": "in_liquidation",
+    "αναστ": "suspended",
+    "παυση": "ceased",
+}
+_ORG_TYPE_MAP = {
+    "εταιρεια": "Company",
+    "αλλοδαπη": "Overseas company",
+    "συνεταιρισμ": "Partnership",
+    "εμπορικη επωνυμια": "Business name",
+}
+_CURRENT_NAME_MARKERS = ("τελευταιο",)
+_COMPANY_TYPE_CODE = "ηε"
 
 
 def _normalize_he(value: str) -> str:
@@ -90,6 +106,40 @@ def _strip_html(fragment: str) -> str:
     return _WS_RE.sub(" ", text).strip()
 
 
+def _greek_key(text: str) -> str:
+    lowered = unescape(text).lower().strip()
+    decomposed = unicodedata.normalize("NFD", lowered)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return _WS_RE.sub(" ", stripped)
+
+
+def _map_org_status(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    key = _greek_key(raw)
+    for prefix, mapped in _ORG_STATUS_MAP.items():
+        if key.startswith(prefix):
+            return mapped
+    return raw
+
+
+def _map_org_type(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    key = _greek_key(raw)
+    for needle, mapped in _ORG_TYPE_MAP.items():
+        if needle in key:
+            return mapped
+    return raw
+
+
+def _is_current_name(name_status: str | None) -> bool:
+    if not name_status:
+        return False
+    key = _greek_key(name_status)
+    return any(marker in key for marker in _CURRENT_NAME_MARKERS)
+
+
 class CYAdapter(CountryAdapter):
     country_code = "CY"
     country_name = "Cyprus"
@@ -99,23 +149,26 @@ class CYAdapter(CountryAdapter):
     rate_limit_per_minute = 30
 
     DRCOR_BASE = "https://efiling.drcor.mcit.gov.cy"
-    SEARCH_FORM = "/DrcorPublic/SearchForm.aspx?sc=0"
     SEARCH_RESULTS = "/DrcorPublic/SearchResults.aspx"
-    VIEW_ORG = "/DrcorPublic/ViewOrganisation.aspx"
+
+    GLEIF_BASE = "https://api.gleif.org/api/v1"
+    XBRL_FILINGS_BASE = "https://filings.xbrl.org"
 
     VIES_URL = "https://ec.europa.eu/taxation_customs/vies/services/checkVatService"
 
     async def health_check(self) -> AdapterHealth:
         try:
             async with build_http_client(base_url=self.DRCOR_BASE) as client:
-                resp = await get_with_retry(client, self.SEARCH_FORM)
+                resp = await get_with_retry(
+                    client, self._results_url(name="%", number="165")
+                )
                 if resp.status_code >= 400:
                     raise AdapterError(
-                        f"DRCOR search form returned {resp.status_code}"
+                        f"DRCOR search returned {resp.status_code}"
                     )
-                if "__VIEWSTATE" not in resp.text:
+                if "GridView1" not in resp.text:
                     raise AdapterError(
-                        "DRCOR search form missing __VIEWSTATE — page shape changed"
+                        "DRCOR results missing GridView1 — page shape changed"
                     )
         except Exception as exc:
             return AdapterHealth(
@@ -129,16 +182,17 @@ class CYAdapter(CountryAdapter):
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
+            capabilities={"search": True, "lookup": True, "financials": True},
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "DRCOR scrape for name/HE lookup; VIES SOAP for VAT. "
-                "Filings not freely available."
+                "DRCOR public GET for name/HE lookup; VIES SOAP for VAT; "
+                "ESEF filings via GLEIF -> filings.xbrl.org."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
-        return await self._drcor_search(name=name, he_number=None, limit=limit)
+        html_text = await self._drcor_get(name=name.strip(), number="%")
+        return _parse_search_results(html_text, limit=limit)
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
@@ -156,87 +210,56 @@ class CYAdapter(CountryAdapter):
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # DRCOR e-filings require an authenticated paid account; nothing free
-        # and machine-readable exists. Per project rules, prefer empty over
-        # mock data.
-        return []
+        he = _normalize_he(company_id)
+        lei = await self._gleif_lei_for_he(he.lstrip("0") or "0")
+        if not lei:
+            return []
+        return await self._xbrl_filings_for_lei(lei, he=he, years=years)
 
-    async def _drcor_search(
-        self,
-        *,
-        name: str | None,
-        he_number: str | None,
-        limit: int,
-    ) -> list[CompanyMatch]:
+    def _results_url(self, *, name: str, number: str) -> str:
+        from urllib.parse import quote
+
+        return (
+            f"{self.SEARCH_RESULTS}?name={quote(name)}&number={quote(number)}"
+            "&searchtype=optStartMatch&index=1&tname=%25&sc=0"
+        )
+
+    async def _drcor_get(self, *, name: str, number: str) -> str:
         async with build_http_client(base_url=self.DRCOR_BASE) as client:
-            form_resp = await get_with_retry(client, self.SEARCH_FORM)
-            form_resp.raise_for_status()
-            hidden = _extract_hidden_fields(form_resp.text)
-            if "__VIEWSTATE" not in hidden:
-                raise AdapterNotImplementedError(
-                    "DRCOR search form shape unrecognized"
-                )
-
-            payload = {
-                **hidden,
-                "ctl00$cphMaster$ddlOrgType": "0",
-                "ctl00$cphMaster$txtName": name or "",
-                "ctl00$cphMaster$txtNumber": he_number or "",
-                "ctl00$cphMaster$rbStartMatch": "optStartMatch",
-                "ctl00$cphMaster$ddlOrgState": "0",
-                "ctl00$cphMaster$btnSearch": "Search",
-            }
-            results_resp = await client.post(
-                self.SEARCH_RESULTS,
-                data=payload,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": f"{self.DRCOR_BASE}{self.SEARCH_FORM}",
-                },
-            )
-            if results_resp.status_code >= 400:
-                raise AdapterError(
-                    f"DRCOR search returned {results_resp.status_code}"
-                )
-            html_text = results_resp.text
-
-        return _parse_search_results(html_text, limit=limit)
+            resp = await get_with_retry(client, self._results_url(name=name, number=number))
+            if resp.status_code >= 400:
+                raise AdapterError(f"DRCOR search returned {resp.status_code}")
+            return resp.text
 
     async def _drcor_lookup_by_he(self, he: str) -> CompanyDetails | None:
-        matches = await self._drcor_search(name=None, he_number=he, limit=5)
-        target_id = he.lstrip("0") or "0"
-        match = None
-        for m in matches:
-            if (m.id or "").lstrip("0") == target_id:
-                match = m
-                break
-        if match is None:
+        target = he.lstrip("0") or "0"
+        html_text = await self._drcor_get(name="%", number=target)
+        rows = _parse_result_rows(html_text)
+        rows = [
+            r
+            for r in rows
+            if (r["number"] or "").lstrip("0") == target
+            and _greek_key(r["type_code"] or "") == _COMPANY_TYPE_CODE
+        ]
+        if not rows:
             return None
 
-        internal_id = (match.source_url or "").split("id=")[-1] if "id=" in (
-            match.source_url or ""
-        ) else None
-        raw: dict[str, Any] = {"match": match.model_dump(mode="json")}
-        org_html: str | None = None
-        if internal_id:
-            async with build_http_client(base_url=self.DRCOR_BASE) as client:
-                org_resp = await get_with_retry(
-                    client, f"{self.VIEW_ORG}?id={internal_id}&lang=EN"
-                )
-                if org_resp.status_code < 400:
-                    org_html = org_resp.text
-                    raw["org_html_bytes"] = len(org_html)
+        current = next((r for r in rows if _is_current_name(r["name_status"])), rows[0])
+        previous_names = [
+            r["name"]
+            for r in rows
+            if r["name"] and r["name"] != current["name"]
+        ]
+        raw: dict[str, Any] = {"rows": rows}
+        if previous_names:
+            raw["previous_names"] = previous_names
 
-        details_extra = _parse_view_organisation(org_html) if org_html else {}
         return CompanyDetails(
             id=he,
-            name=match.name,
+            name=current["name"],
             country="CY",
-            legal_form=details_extra.get("legal_form"),
-            status=details_extra.get("status") or match.status,
-            incorporation_date=details_extra.get("incorporation_date"),
-            registered_address=details_extra.get("registered_address")
-            or match.address,
+            legal_form=_map_org_type(current["org_type"]),
+            status=_map_org_status(current["org_status"]),
             identifiers=[
                 RegistryIdentifier(
                     type=IdentifierType.COMPANY_NUMBER,
@@ -245,8 +268,85 @@ class CYAdapter(CountryAdapter):
                 ),
             ],
             raw=raw,
-            source_url=match.source_url,
+            source_url=(
+                f"{self.DRCOR_BASE}{self._results_url(name='%', number=target)}"
+            ),
         )
+
+    async def _gleif_lei_for_he(self, he_digits: str) -> str | None:
+        params = {
+            "filter[entity.registeredAs]": he_digits,
+            "filter[entity.legalAddress.country]": "CY",
+            "page[size]": 10,
+        }
+        async with build_http_client(
+            base_url=self.GLEIF_BASE,
+            headers={"Accept": "application/vnd.api+json"},
+        ) as client:
+            resp = await get_with_retry(client, "/lei-records", params=params)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            payload = resp.json()
+
+        for record in payload.get("data") or []:
+            entity = (record.get("attributes") or {}).get("entity") or {}
+            registered_as = entity.get("registeredAs") or ""
+            if re.sub(r"\D", "", registered_as) == he_digits:
+                lei = record.get("id")
+                if lei:
+                    return str(lei)
+        return None
+
+    async def _xbrl_filings_for_lei(
+        self, lei: str, *, he: str, years: int
+    ) -> list[FinancialFiling]:
+        params = {
+            "filter[entity.identifier]": lei,
+            "sort": "-period_end",
+            "page[size]": max(1, min(int(years) * 2, 20)),
+        }
+        async with build_http_client(
+            base_url=self.XBRL_FILINGS_BASE,
+            headers={"Accept": "application/vnd.api+json"},
+        ) as client:
+            resp = await get_with_retry(client, "/api/filings", params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+
+        filings: list[FinancialFiling] = []
+        seen_years: set[int] = set()
+        for record in payload.get("data") or []:
+            attrs = record.get("attributes") or {}
+            period_end = _parse_iso_date(attrs.get("period_end"))
+            if not period_end or period_end.year in seen_years:
+                continue
+            seen_years.add(period_end.year)
+            package_url = attrs.get("package_url")
+            viewer_url = attrs.get("viewer_url") or attrs.get("report_url")
+            filings.append(
+                FinancialFiling(
+                    company_id=he,
+                    year=period_end.year,
+                    type=FilingType.ANNUAL_REPORT,
+                    period_end=period_end,
+                    currency="EUR",
+                    document_url=(
+                        f"{self.XBRL_FILINGS_BASE}{package_url}"
+                        if package_url
+                        else None
+                    ),
+                    document_format="xbrl",
+                    source_url=(
+                        f"{self.XBRL_FILINGS_BASE}{viewer_url}"
+                        if viewer_url
+                        else f"{self.XBRL_FILINGS_BASE}/#/?entity={lei}"
+                    ),
+                )
+            )
+            if len(filings) >= years:
+                break
+        return filings
 
     async def _vies_lookup(self, vat: str) -> CompanyDetails | None:
         envelope = (
@@ -273,9 +373,7 @@ class CYAdapter(CountryAdapter):
             if resp.status_code >= 500:
                 raise AdapterError(f"VIES returned {resp.status_code}")
             if resp.status_code == 400 or "INVALID_INPUT" in resp.text:
-                raise InvalidIdentifierError(
-                    f"VIES rejected VAT CY{vat}"
-                )
+                raise InvalidIdentifierError(f"VIES rejected VAT CY{vat}")
             resp.raise_for_status()
             body = resp.text
 
@@ -302,74 +400,73 @@ class CYAdapter(CountryAdapter):
         )
 
 
-def _extract_hidden_fields(html_text: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for m in _HIDDEN_INPUT_RE.finditer(html_text):
-        fields[m.group(1)] = unescape(m.group(2))
-    return fields
-
-
-_ROW_RE = re.compile(
-    r"<tr[^>]*>(?P<row>.*?)</tr>", re.IGNORECASE | re.DOTALL
+_BASKET_ROW_RE = re.compile(
+    r'<tr[^>]*class="[^"]*basket[^"]*"[^>]*>(?P<row>.*?)</tr>',
+    re.IGNORECASE | re.DOTALL,
 )
 _CELL_RE = re.compile(r"<td[^>]*>(?P<cell>.*?)</td>", re.IGNORECASE | re.DOTALL)
-_ORG_LINK_RE = re.compile(
-    r'href="ViewOrganisation\.aspx\?id=([^"&]+)[^"]*"',
-    re.IGNORECASE,
-)
+
+
+def _parse_result_rows(html_text: str) -> list[dict[str, str | None]]:
+    rows: list[dict[str, str | None]] = []
+    for row_match in _BASKET_ROW_RE.finditer(html_text):
+        cells = [_strip_html(c.group("cell")) for c in _CELL_RE.finditer(row_match.group("row"))]
+        if len(cells) < 7:
+            continue
+        name = cells[1]
+        number = cells[3]
+        if not name or not re.fullmatch(r"\d{1,9}", number or ""):
+            continue
+        rows.append(
+            {
+                "name": name,
+                "type_code": cells[2] or None,
+                "number": number,
+                "org_type": cells[4] or None,
+                "name_status": cells[5] or None,
+                "org_status": cells[6] or None,
+            }
+        )
+    return rows
 
 
 def _parse_search_results(html_text: str, *, limit: int) -> list[CompanyMatch]:
+    by_key: dict[str, dict[str, str | None]] = {}
+    order: list[str] = []
+    for row in _parse_result_rows(html_text):
+        bare = (row["number"] or "").lstrip("0") or "0"
+        key = f"{_greek_key(row['type_code'] or '')}:{bare}"
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = row
+            order.append(key)
+        elif _is_current_name(row["name_status"]) and not _is_current_name(
+            existing["name_status"]
+        ):
+            by_key[key] = row
+
     matches: list[CompanyMatch] = []
-    seen_ids: set[str] = set()
-    for row_match in _ROW_RE.finditer(html_text):
-        row = row_match.group("row")
-        link_match = _ORG_LINK_RE.search(row)
-        if not link_match:
-            continue
-        internal_id = link_match.group(1)
-        cells = [_strip_html(c.group("cell")) for c in _CELL_RE.finditer(row)]
-        cells = [c for c in cells if c]
-        if not cells:
-            continue
-        he_number: str | None = None
-        name: str | None = None
-        org_type: str | None = None
-        status: str | None = None
-        for cell in cells:
-            if he_number is None and re.fullmatch(r"\d{1,9}", cell):
-                he_number = cell
-                continue
-            if name is None and any(ch.isalpha() for ch in cell):
-                name = cell
-                continue
-            if org_type is None and len(cell) <= 40 and any(ch.isalpha() for ch in cell):
-                org_type = cell
-                continue
-            if status is None:
-                status = cell
-        if not he_number or not name:
-            continue
-        bare = he_number.lstrip("0") or "0"
-        if bare in seen_ids:
-            continue
-        seen_ids.add(bare)
+    for key in order:
+        row = by_key[key]
+        number = row["number"] or ""
+        bare = number.lstrip("0") or "0"
         matches.append(
             CompanyMatch(
-                id=he_number.zfill(9),
-                name=name,
+                id=number.zfill(9),
+                name=row["name"],
                 country="CY",
                 identifiers=[
                     RegistryIdentifier(
                         type=IdentifierType.COMPANY_NUMBER,
-                        value=f"HE{int(he_number)}",
+                        value=f"HE{int(number)}",
                         label="HE Number",
                     ),
                 ],
-                status=status,
+                status=_map_org_status(row["org_status"]),
                 source_url=(
-                    f"https://efiling.drcor.mcit.gov.cy/DrcorPublic/"
-                    f"ViewOrganisation.aspx?id={internal_id}&lang=EN"
+                    "https://efiling.drcor.mcit.gov.cy/DrcorPublic/"
+                    f"SearchResults.aspx?name=%25&number={bare}"
+                    "&searchtype=optStartMatch&index=1&tname=%25&sc=0"
                 ),
             )
         )
@@ -378,43 +475,13 @@ def _parse_search_results(html_text: str, *, limit: int) -> list[CompanyMatch]:
     return matches
 
 
-_VIEW_FIELD_RE = re.compile(
-    r"<span[^>]*id=\"[^\"]*lbl([A-Za-z]+)\"[^>]*>(.*?)</span>",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _parse_view_organisation(html_text: str | None) -> dict[str, Any]:
-    if not html_text:
-        return {}
-    fields: dict[str, str] = {}
-    for m in _VIEW_FIELD_RE.finditer(html_text):
-        key = m.group(1).lower()
-        val = _strip_html(m.group(2))
-        if val and key not in fields:
-            fields[key] = val
-
-    incorporation = _parse_date_eu(fields.get("registrationdate") or fields.get("regdate"))
-    return {
-        "legal_form": fields.get("organisationtype") or fields.get("orgtype"),
-        "status": fields.get("organisationstatus") or fields.get("orgstatus"),
-        "incorporation_date": incorporation,
-        "registered_address": fields.get("address") or fields.get("registeredaddress"),
-    }
-
-
-def _parse_date_eu(s: str | None) -> date | None:
+def _parse_iso_date(s: str | None) -> date | None:
     if not s:
         return None
-    s = s.strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-        try:
-            from datetime import datetime as _dt
-
-            return _dt.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
+    try:
+        return datetime.strptime(s.strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _xml_text(body: str, tag: str) -> str | None:

@@ -1,41 +1,46 @@
-"""Armenia adapter — e-Register.am State Register of Legal Entities.
+"""Armenia adapter — State Register of Legal Entities (e-register.moj.am).
 
 Source coverage:
 
-* https://www.e-register.am/ — the State Register of Legal Entities of
-  the Republic of Armenia (operated by the Ministry of Justice). It
-  publishes a free per-company HTML view keyed by either the
-  state-registry serial number or the taxpayer identification number
-  (TIN, locally ՀՎՀՀ — 8 digits). Available in Armenian, Russian, and
-  English; the English/Russian endpoints expose the same record under
-  ``/company/{lang}/{id}``-style paths. No authentication.
-* https://src.am/ — State Revenue Committee VAT/TIN validator. Useful as
-  a sanity probe; does not return structured registry data we can rely
-  on without scraping a session-bound page.
-* https://amx.am/ — Armenia Securities Exchange (NASDAQ OMX Armenia /
-  AMX). Lists ~10 traded equities; filings are PDF-only and out of
-  scope for the free MVP.
+* https://e-register.moj.am/ — the State Register of Legal Entities of the
+  Republic of Armenia, operated by the Ministry of Justice. It replaced the
+  old ``e-register.am`` portal (which now redirects here). The public search
+  is server-rendered: ``/en/search/companies?query=...`` returns an HTML list
+  of matching companies, each linking to a per-company card at
+  ``/en/companies/{unique_id}``. The card exposes the state registration
+  number, registration date, tax id (TIN / ՀՎՀՀ), the internal unique
+  identifier, and the registered address. No authentication. The search index
+  matches on company name, TIN, and registration number, so all three can be
+  resolved through the same endpoint.
+* https://amx.am/ (Armenia Securities Exchange) and https://cda.am/ (Central
+  Depository) host listed-issuer financial statements but are served behind a
+  Cloudflare edge that IP-bans this environment. https://azdarar.am/ (the
+  official public-notifications bulletin where joint-stock companies publish
+  audited statements) and https://cba.am/ (Central Bank, bank statements) are
+  geo-restricted to Armenia. None are usable as a free financial-statements
+  feed from outside Armenia, so ``fetch_financials`` raises
+  ``AdapterNotImplementedError`` rather than fabricating data.
+
+Note on coverage: banks and other financial institutions (Ardshinbank,
+Ameriabank, etc.) are licensed and supervised through the Central Bank and do
+not appear in this Ministry-of-Justice register search. Non-financial
+companies — LLCs, CJSCs, OJSCs — are covered.
 
 Identifier:
 - VAT → TIN / ՀՎՀՀ (Hark Vcharoghi Hashvarkayin Hamar). 8 digits. Some
-  sources prefix with ``AM``; we strip it. Same number serves as VAT
-  registration ID and corporate tax ID.
-- COMPANY_NUMBER → state-registry serial. Variable length, often
-  hyphenated (e.g. ``290.110.05049``). We pass it through with
-  whitespace stripped.
-
-No centralized free source of filed financial statements exists for
-Armenian companies; ``fetch_financials`` therefore returns an empty
-list rather than fabricating data. (Listed-issuer reports on AMX are
-PDF-only and would need a separate pipeline.)
+  sources prefix with ``AM``; we strip it. The same number serves as the VAT
+  registration ID and the corporate tax ID.
+- COMPANY_NUMBER → state-registry serial. Rendered in ``NNN.NNN.NNNNNNN``
+  form (e.g. ``286.120.1110041``). We pass it through with whitespace
+  stripped.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime
 from html import unescape
-from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -61,86 +66,70 @@ logger = logging.getLogger(__name__)
 _TIN_RE = re.compile(r"^\d{8}$")
 _REG_NUM_RE = re.compile(r"^[0-9./\-]{3,32}$")
 
-# Ardshinbank CJSC — a stable, well-known liveness probe.
-_HEALTH_PROBE_TIN = "02525118"
+# "UCOM" CJSC — a well-known, in-register liveness probe (TIN 00024873).
+_HEALTH_PROBE_NAME = "UCOM"
 
-# e-Register renders the company card as a label/value table. Labels appear
-# in Armenian (Unicode), Russian (Cyrillic), and English depending on the
-# current site language. Match loosely on all three.
-_LABEL_NAME = (
-    "անվանումը",
-    "ընկերության անվանումը",
-    "ֆիրմային անվանումը",
-    "name",
-    "company name",
-    "наименование",
-    "название",
-    "полное наименование",
+_LEGAL_FORM_SUFFIXES = (
+    "CJSC",
+    "OJSC",
+    "LLC",
+    "JSC",
+    "PBE",
+    "SNCO",
+    "LTD",
 )
-_LABEL_STATUS = (
-    "կարգավիճակ",
-    "վիճակ",
-    "status",
-    "статус",
-    "состояние",
-)
-_LABEL_ADDRESS = (
-    "հասցե",
-    "գտնվելու վայր",
-    "իրավաբանական հասցե",
-    "address",
-    "registered address",
-    "адрес",
-    "юридический адрес",
-)
-_LABEL_REG_DATE = (
-    "գրանցման ամսաթիվ",
-    "գրանցման օր",
-    "registration date",
-    "date of registration",
-    "дата регистрации",
-)
-_LABEL_LEGAL_FORM = (
-    "կազմակերպական-իրավական ձև",
-    "կազմակերպաիրավական ձև",
-    "legal form",
-    "type",
-    "организационно-правовая форма",
-)
-_LABEL_TIN = (
-    "հվհհ",
-    "հարկ վճարողի հաշվառման համար",
-    "tin",
-    "tax id",
-    "taxpayer id",
-    "инн",
-    "учетный номер налогоплательщика",
-)
+
 _LABEL_REG_NUMBER = (
-    "գրանցման համար",
-    "պետական գրանցման համար",
     "registration number",
     "state registration number",
+    "պետական գրանցման համար",
+    "գրանցման համար",
     "регистрационный номер",
-    "номер регистрации",
 )
-_LABEL_DIRECTOR = (
-    "տնօրեն",
-    "գործադիր մարմին",
-    "ղեկավար",
-    "executive",
-    "director",
-    "руководитель",
-    "директор",
+_LABEL_REG_DATE = (
+    "registration date",
+    "date of registration",
+    "գրանցման ամսաթիվ",
+    "дата регистрации",
 )
-_LABEL_CAPITAL = (
-    "կանոնադրական կապիտալ",
-    "հիմնադիր կապիտալ",
-    "charter capital",
-    "share capital",
-    "уставный капитал",
+_LABEL_TIN = (
+    "tax id",
+    "taxpayer id",
+    "tin",
+    "հվհհ",
+    "инн",
+)
+_LABEL_UNIQUE_ID = (
+    "unique identifier",
+    "եզակի նույնացուցիչ",
+    "уникальный идентификатор",
+)
+_LABEL_ADDRESS = (
+    "address",
+    "հասցե",
+    "адрес",
+)
+_LABEL_STATUS = (
+    "company status",
+    "status",
+    "կարգավիճակ",
+    "статус",
+)
+_LABEL_REGISTRAR = (
+    "registration body",
+    "գրանցող մարմին",
+    "регистрирующий орган",
 )
 
+# The e-register card states status as a negative sentence ("no information
+# recorded ... regarding liquidation or termination"), which means the company
+# is active. This phrase must be checked before the inactive-token scan.
+_STATUS_ACTIVE_PHRASES = (
+    "no information recorded",
+    "տեղեկություն առկա չէ",
+    "нет сведений",
+    "отсутствует информация",
+)
 _STATUS_ACTIVE_TOKENS = (
     "գործող",
     "ակտիվ",
@@ -154,15 +143,18 @@ _STATUS_INACTIVE_TOKENS = (
     "լուծարված",
     "դադարեցված",
     "սնանկ",
-    "ոչ ակտիվ",
     "inactive",
     "liquidated",
+    "in liquidation",
     "dissolved",
     "closed",
+    "bankrupt",
+    "terminat",
     "ликвидир",
     "прекращ",
     "закрыт",
     "недейств",
+    "банкрот",
 )
 
 
@@ -187,7 +179,7 @@ def _normalize_reg_number(value: str) -> str:
 
 
 def _parse_am_date(value: str | None) -> date | None:
-    """e-Register renders dates as DD.MM.YYYY; tolerate ISO and slashes."""
+    """e-register renders dates as DD-MM-YYYY; tolerate dots, slashes, ISO."""
     if not value:
         return None
     s = value.strip()
@@ -195,7 +187,7 @@ def _parse_am_date(value: str | None) -> date | None:
         return date.fromisoformat(s[:10])
     except ValueError:
         pass
-    for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
+    for fmt in ("%d-%m-%Y", "%d.%m.%Y", "%d/%m/%Y"):
         try:
             return datetime.strptime(s[:10], fmt).date()
         except ValueError:
@@ -207,11 +199,21 @@ def _classify_status(raw: str | None) -> str | None:
     if not raw:
         return None
     low = raw.lower()
+    if any(phrase in low for phrase in _STATUS_ACTIVE_PHRASES):
+        return "active"
     if any(token in low for token in _STATUS_INACTIVE_TOKENS):
         return "inactive"
     if any(token in low for token in _STATUS_ACTIVE_TOKENS):
         return "active"
     return raw.strip() or None
+
+
+def _legal_form_from_name(name: str) -> str | None:
+    upper = name.upper()
+    for suffix in _LEGAL_FORM_SUFFIXES:
+        if re.search(rf"\b{suffix}\b", upper):
+            return suffix
+    return None
 
 
 class AMAdapter(CountryAdapter):
@@ -223,12 +225,9 @@ class AMAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    BASE_URL = "https://www.e-register.am"
-
-    # The public site supports per-language paths. We default to English so
-    # responses use Latin script wherever the registry has it.
-    SEARCH_PATH = "/en/search"
-    LOOKUP_PATH = "/en/company"
+    BASE_URL = "https://e-register.moj.am"
+    SEARCH_PATH = "/en/search/companies"
+    COMPANY_PATH = "/en/companies"
 
     def _client(self) -> httpx.AsyncClient:
         return build_http_client(
@@ -243,13 +242,7 @@ class AMAdapter(CountryAdapter):
     async def health_check(self) -> AdapterHealth:
         try:
             async with self._client() as client:
-                resp = await get_with_retry(
-                    client,
-                    self.LOOKUP_PATH,
-                    params={"tin": _HEALTH_PROBE_TIN},
-                )
-                resp.raise_for_status()
-                page_text = _decode_response(resp)
+                hits = await self._search_hits(client, _HEALTH_PROBE_NAME)
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -265,8 +258,7 @@ class AMAdapter(CountryAdapter):
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=str(exc)[:200],
             )
-        record = _extract_company_record(page_text)
-        if not record.get("name"):
+        if not hits:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
@@ -280,8 +272,8 @@ class AMAdapter(CountryAdapter):
                 api_key_present=True,
                 rate_limit_per_minute=self.rate_limit_per_minute,
                 notes=(
-                    "e-Register responded but probe TIN returned no name; "
-                    "page markup may have changed."
+                    "e-register.moj.am responded but the probe query returned "
+                    "no rows; page markup may have changed."
                 ),
             )
         return AdapterHealth(
@@ -297,8 +289,9 @@ class AMAdapter(CountryAdapter):
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup live via e-register.am HTML scrape. Financial "
-                "statements are not centrally published."
+                "Search + lookup live via e-register.moj.am. Filed financial "
+                "statements are login-gated on the register; exchange and "
+                "bulletin feeds are geo/Cloudflare-blocked outside Armenia."
             ),
         )
 
@@ -309,53 +302,34 @@ class AMAdapter(CountryAdapter):
         if not query:
             return []
         async with self._client() as client:
-            resp = await get_with_retry(
-                client,
-                self.SEARCH_PATH,
-                params={"q": query},
-            )
-            if resp.status_code == 404:
-                return []
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
+            hits = await self._search_hits(client, query)
+            hits = hits[:limit]
+            semaphore = asyncio.Semaphore(3)
 
-        rows = _extract_search_rows(page_text)
+            async def _guarded(uid: str) -> dict[str, Any]:
+                async with semaphore:
+                    return await self._fetch_record(client, uid)
+
+            records = await asyncio.gather(
+                *(_guarded(uid) for uid, _ in hits),
+                return_exceptions=True,
+            )
+
         matches: list[CompanyMatch] = []
-        for row in rows[:limit]:
-            identifier = row.get("tin") or row.get("reg_number")
-            if not identifier or not row.get("name"):
-                continue
-            ids: list[RegistryIdentifier] = []
-            if row.get("tin"):
-                ids.append(
-                    RegistryIdentifier(
-                        type=IdentifierType.VAT,
-                        value=row["tin"],
-                        label="ՀՎՀՀ / TIN",
-                    )
-                )
-            if row.get("reg_number"):
-                ids.append(
-                    RegistryIdentifier(
-                        type=IdentifierType.COMPANY_NUMBER,
-                        value=row["reg_number"],
-                        label="State Registry Number",
-                    )
-                )
+        for (uid, hit_name), record in zip(hits, records):
+            record = record if isinstance(record, dict) else {}
+            tin = record.get("tin")
+            reg = record.get("reg_number")
+            identifiers = self._build_identifiers(tin, reg)
             matches.append(
                 CompanyMatch(
-                    id=identifier,
-                    name=row["name"],
+                    id=tin or reg or uid,
+                    name=record.get("name") or hit_name,
                     country=self.country_code,
-                    identifiers=ids,
-                    address=row.get("address"),
-                    status=_classify_status(row.get("status_raw")),
-                    source_url=(
-                        f"{self.BASE_URL}{self.LOOKUP_PATH}"
-                        f"?tin={row['tin']}"
-                        if row.get("tin")
-                        else f"{self.BASE_URL}{self.SEARCH_PATH}?q={query}"
-                    ),
+                    identifiers=identifiers,
+                    address=record.get("address"),
+                    status=_classify_status(record.get("status_raw")),
+                    source_url=f"{self.BASE_URL}{self.COMPANY_PATH}/{uid}",
                 )
             )
         return matches
@@ -364,13 +338,11 @@ class AMAdapter(CountryAdapter):
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.VAT:
-            tin = _normalize_tin(value)
-            params = {"tin": tin}
-            local_id = tin
+            wanted = _normalize_tin(value)
+            field = "tin"
         elif id_type == IdentifierType.COMPANY_NUMBER:
-            reg = _normalize_reg_number(value)
-            params = {"reg_number": reg}
-            local_id = reg
+            wanted = _normalize_reg_number(value)
+            field = "reg_number"
         else:
             raise InvalidIdentifierError(
                 "Armenia adapter only supports VAT (TIN) or COMPANY_NUMBER "
@@ -378,34 +350,58 @@ class AMAdapter(CountryAdapter):
             )
 
         async with self._client() as client:
-            resp = await get_with_retry(client, self.LOOKUP_PATH, params=params)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            page_text = _decode_response(resp)
+            hits = await self._search_hits(client, wanted)
+            for uid, _ in hits[:10]:
+                record = await self._fetch_record(client, uid)
+                if not record:
+                    continue
+                found = record.get(field)
+                if found and _same_identifier(found, wanted, field):
+                    return self._to_details(record, uid)
+        return None
 
-        record = _extract_company_record(page_text)
-        if not record.get("name"):
-            low = page_text.lower()
-            if any(
-                token in low
-                for token in (
-                    "չի գտնվել",
-                    "not found",
-                    "no results",
-                    "не найден",
-                )
-            ):
-                return None
-            return None
-
-        tin = record.get("tin") or (
-            local_id if id_type == IdentifierType.VAT else None
-        )
-        reg_number = record.get("reg_number") or (
-            local_id if id_type == IdentifierType.COMPANY_NUMBER else None
+    async def fetch_financials(
+        self, company_id: str, years: int = 5
+    ) -> list[FinancialFiling]:
+        raise AdapterNotImplementedError(
+            "No free financial-statements feed is reachable for Armenia from "
+            "outside the country. Annual accounts filed with the State "
+            "Register (e-register.moj.am) are login-gated; the Armenia "
+            "Securities Exchange (amx.am) and Central Depository (cda.am) are "
+            "Cloudflare IP-banned; the official bulletin (azdarar.am) and the "
+            "Central Bank (cba.am) are geo-restricted to Armenia. Fetching "
+            "real statements would require an Armenian egress or a registered "
+            "account, so no data is fabricated here."
         )
 
+    async def _search_hits(
+        self, client: httpx.AsyncClient, query: str
+    ) -> list[tuple[str, str]]:
+        resp = await get_with_retry(
+            client, self.SEARCH_PATH, params={"query": query}
+        )
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        return _parse_search_hits(resp.text)
+
+    async def _fetch_record(
+        self, client: httpx.AsyncClient, unique_id: str
+    ) -> dict[str, Any]:
+        resp = await get_with_retry(
+            client, f"{self.COMPANY_PATH}/{unique_id}"
+        )
+        if resp.status_code == 404:
+            return {}
+        resp.raise_for_status()
+        record = _parse_company_card(resp.text)
+        if record:
+            record.setdefault("unique_id", unique_id)
+        return record
+
+    def _build_identifiers(
+        self, tin: str | None, reg: str | None
+    ) -> list[RegistryIdentifier]:
         identifiers: list[RegistryIdentifier] = []
         if tin:
             identifiers.append(
@@ -415,319 +411,118 @@ class AMAdapter(CountryAdapter):
                     label="ՀՎՀՀ / TIN",
                 )
             )
-        if reg_number:
+        if reg:
             identifiers.append(
                 RegistryIdentifier(
                     type=IdentifierType.COMPANY_NUMBER,
-                    value=reg_number,
-                    label="State Registry Number",
+                    value=reg,
+                    label="State Registration Number",
                 )
             )
+        return identifiers
 
-        source_url = (
-            f"{self.BASE_URL}{self.LOOKUP_PATH}?tin={tin}"
-            if tin
-            else f"{self.BASE_URL}{self.LOOKUP_PATH}?reg_number={reg_number}"
-        )
-
+    def _to_details(
+        self, record: dict[str, Any], unique_id: str
+    ) -> CompanyDetails:
+        tin = record.get("tin")
+        reg = record.get("reg_number")
+        name = record["name"]
         return CompanyDetails(
-            id=tin or reg_number or local_id,
-            name=record["name"],
+            id=tin or reg or unique_id,
+            name=name,
             country=self.country_code,
-            legal_form=record.get("legal_form"),
+            legal_form=_legal_form_from_name(name),
             status=_classify_status(record.get("status_raw")),
             incorporation_date=_parse_am_date(record.get("registration_date")),
             registered_address=record.get("address"),
-            capital_amount=_parse_capital_amount(record.get("capital")),
-            capital_currency="AMD",
-            identifiers=identifiers,
-            raw={
-                "source": "e-register.am",
-                "fields": record,
-            },
-            source_url=source_url,
-        )
-
-    async def fetch_financials(
-        self, company_id: str, years: int = 5
-    ) -> list[FinancialFiling]:
-        raise AdapterNotImplementedError(
-            "Armenian financial statements are not centrally published. "
-            "Annual accounts are filed with the State Revenue Committee but "
-            "not exposed via a free portal. Listed-issuer reports on AMX "
-            "(amx.am) are PDF-only and out of scope for the free MVP."
+            identifiers=self._build_identifiers(tin, reg),
+            raw={"source": "e-register.moj.am", "fields": record},
+            source_url=f"{self.BASE_URL}{self.COMPANY_PATH}/{unique_id}",
         )
 
 
-def _decode_response(resp: httpx.Response) -> str:
-    """Decode the body, preferring UTF-8 then Windows-1251 fallbacks.
+def _same_identifier(found: str, wanted: str, field: str) -> bool:
+    if field == "tin":
+        return re.sub(r"\D", "", found) == wanted
+    return re.sub(r"\s+", "", found) == wanted
 
-    e-register.am serves UTF-8 today, but legacy mirrors and the SRC
-    pages occasionally use windows-1251 for Russian text; we keep the
-    same fallback chain as the AZ adapter to stay robust.
-    """
-    body = resp.content
-    if not body:
-        return ""
-    for encoding in ("utf-8", "cp1251", "windows-1251"):
-        try:
-            return body.decode(encoding)
-        except UnicodeDecodeError:
+
+def _match_label(label: str, candidates: tuple[str, ...]) -> bool:
+    low = label.lower().strip().rstrip(":").strip()
+    return any(c in low for c in candidates)
+
+
+def _clean_cell(fragment: str) -> str:
+    return unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+
+_ARTICLE_RE = re.compile(
+    r'<article[^>]*class="[^"]*company-search-result[^"]*"[^>]*>(.*?)</article>',
+    re.DOTALL,
+)
+_ARTICLE_LINK_RE = re.compile(
+    r'href="/[a-z]{2}/companies/(\d+)"[^>]*>\s*<h[1-6][^>]*>(.*?)</h[1-6]>',
+    re.DOTALL,
+)
+_DL_PAIR_RE = re.compile(r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>", re.DOTALL)
+_CARD_NAME_RE = re.compile(
+    r'class="[^"]*company-title[^"]*"[^>]*>\s*<h[1-6][^>]*>(.*?)</h[1-6]>',
+    re.DOTALL,
+)
+
+
+def _parse_search_hits(html: str) -> list[tuple[str, str]]:
+    """Return ``(unique_id, name)`` pairs from a company search results page."""
+    if not html:
+        return []
+    hits: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for block in _ARTICLE_RE.findall(html):
+        m = _ARTICLE_LINK_RE.search(block)
+        if not m:
             continue
-    return resp.text
+        uid = m.group(1)
+        if uid in seen:
+            continue
+        seen.add(uid)
+        hits.append((uid, _clean_cell(m.group(2))))
+    return hits
 
 
-class _TableParser(HTMLParser):
-    """Flatten every <td>/<th> cell into a list of stripped text strings."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.cells: list[str] = []
-        self._in_cell = 0
-        self._buf: list[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag in ("td", "th"):
-            self._in_cell += 1
-            self._buf = []
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self.cells.append(text)
-            self._in_cell -= 1
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-class _SearchRowParser(HTMLParser):
-    """Capture every <tr>'s flattened cell list, for search-results tables."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.rows: list[list[str]] = []
-        self._row: list[str] = []
-        self._in_row = False
-        self._in_cell = 0
-        self._buf: list[str] = []
-        self._href: str | None = None
-        self.row_hrefs: list[str | None] = []
-        self._row_href: str | None = None
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
-        if tag == "tr":
-            self._in_row = True
-            self._row = []
-            self._row_href = None
-        elif tag in ("td", "th") and self._in_row:
-            self._in_cell += 1
-            self._buf = []
-        elif tag == "a" and self._in_cell:
-            for k, v in attrs:
-                if k == "href" and v and self._row_href is None:
-                    self._row_href = v
-        elif self._in_cell and tag in ("br", "p", "div", "li"):
-            self._buf.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-            text = unescape(text)
-            self._row.append(text)
-            self._in_cell -= 1
-            self._buf = []
-        elif tag == "tr" and self._in_row:
-            if self._row:
-                self.rows.append(self._row)
-                self.row_hrefs.append(self._row_href)
-            self._in_row = False
-            self._row = []
-            self._row_href = None
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._buf.append(data)
-
-
-def _match_label(cell: str, candidates: tuple[str, ...]) -> bool:
-    low = cell.lower().strip().rstrip(":").strip()
-    return any(label in low for label in candidates)
-
-
-def _extract_company_record(html: str) -> dict[str, Any]:
-    """Pull the company fields out of an e-register.am detail page."""
+def _parse_company_card(html: str) -> dict[str, Any]:
+    """Pull company fields out of an e-register.moj.am company card."""
     if not html:
         return {}
-
-    parser = _TableParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("AM e-register HTML parse failed: %s", exc)
-        return {}
-
-    cells = [c for c in parser.cells if c]
     record: dict[str, Any] = {}
-    for label_cell, value_cell in zip(cells, cells[1:]):
-        if not value_cell:
+
+    name_match = _CARD_NAME_RE.search(html)
+    if name_match:
+        candidate = _clean_cell(name_match.group(1))
+        if candidate and "legal person" not in candidate.lower():
+            record["name"] = candidate
+
+    for label_html, value_html in _DL_PAIR_RE.findall(html):
+        label = _clean_cell(label_html)
+        value = _clean_cell(value_html)
+        if not value:
             continue
-        if "name" not in record and _match_label(label_cell, _LABEL_NAME):
-            record["name"] = value_cell
-        elif "status_raw" not in record and _match_label(
-            label_cell, _LABEL_STATUS
-        ):
-            record["status_raw"] = value_cell
-        elif "address" not in record and _match_label(
-            label_cell, _LABEL_ADDRESS
-        ):
-            record["address"] = value_cell
+        if "reg_number" not in record and _match_label(label, _LABEL_REG_NUMBER):
+            record["reg_number"] = value
         elif "registration_date" not in record and _match_label(
-            label_cell, _LABEL_REG_DATE
+            label, _LABEL_REG_DATE
         ):
-            record["registration_date"] = value_cell
-        elif "legal_form" not in record and _match_label(
-            label_cell, _LABEL_LEGAL_FORM
-        ):
-            record["legal_form"] = value_cell
-        elif "tin" not in record and _match_label(label_cell, _LABEL_TIN):
-            digits = re.sub(r"\D", "", value_cell)
+            record["registration_date"] = value
+        elif "tin" not in record and _match_label(label, _LABEL_TIN):
+            digits = re.sub(r"\D", "", value)
             if _TIN_RE.match(digits):
                 record["tin"] = digits
-        elif "reg_number" not in record and _match_label(
-            label_cell, _LABEL_REG_NUMBER
-        ):
-            record["reg_number"] = value_cell
-        elif "director" not in record and _match_label(
-            label_cell, _LABEL_DIRECTOR
-        ):
-            record["director"] = value_cell
-        elif "capital" not in record and _match_label(
-            label_cell, _LABEL_CAPITAL
-        ):
-            record["capital"] = value_cell
+        elif "unique_id" not in record and _match_label(label, _LABEL_UNIQUE_ID):
+            record["unique_id"] = re.sub(r"\D", "", value) or value
+        elif "address" not in record and _match_label(label, _LABEL_ADDRESS):
+            record["address"] = value
+        elif "status_raw" not in record and _match_label(label, _LABEL_STATUS):
+            record["status_raw"] = value
+        elif "registrar" not in record and _match_label(label, _LABEL_REGISTRAR):
+            record["registrar"] = value
 
-    if "name" not in record:
-        # Fallback: try a heading-style match. e-register sometimes renders
-        # the company name above the table inside an <h1>/<h2>.
-        m = re.search(
-            r"<h[12][^>]*>\s*([^<]{3,200})\s*</h[12]>",
-            html,
-            re.IGNORECASE,
-        )
-        if m:
-            candidate = unescape(re.sub(r"\s+", " ", m.group(1)).strip())
-            # Avoid grabbing the site title.
-            if "e-register" not in candidate.lower():
-                record["name"] = candidate
-    return record
-
-
-def _extract_search_rows(html: str) -> list[dict[str, Any]]:
-    """Best-effort parse of the e-register name-search results page.
-
-    The result table layout varies by site language; we pick out the TIN
-    (8 consecutive digits) and the longest non-numeric cell as the name.
-    """
-    if not html:
-        return []
-    parser = _SearchRowParser()
-    try:
-        parser.feed(html)
-    except Exception as exc:
-        logger.warning("AM e-register search parse failed: %s", exc)
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for cells in parser.rows:
-        cleaned = [c for c in cells if c]
-        if len(cleaned) < 2:
-            continue
-        tin_match: str | None = None
-        for c in cleaned:
-            digits = re.sub(r"\D", "", c)
-            if _TIN_RE.match(digits):
-                tin_match = digits
-                break
-        # Skip header rows that have no TIN and look like label text.
-        name_candidate: str | None = None
-        for c in cleaned:
-            if c == tin_match:
-                continue
-            if re.fullmatch(r"[\d\s./\-]+", c):
-                continue
-            if len(c) < 3:
-                continue
-            if name_candidate is None or len(c) > len(name_candidate):
-                name_candidate = c
-        if not name_candidate:
-            continue
-        if name_candidate.lower() in {
-            "name",
-            "company",
-            "company name",
-            "անվանումը",
-            "наименование",
-        }:
-            continue
-        rows.append(
-            {
-                "name": name_candidate,
-                "tin": tin_match,
-                "reg_number": _pick_reg_number(cleaned, exclude=tin_match),
-                "address": _pick_address(cleaned),
-                "status_raw": _pick_status(cleaned),
-            }
-        )
-    return rows
-
-
-def _pick_reg_number(cells: list[str], *, exclude: str | None) -> str | None:
-    for c in cells:
-        if c == exclude:
-            continue
-        if re.fullmatch(r"\d{2,4}[./\-]\d{2,4}[./\-]\d{2,7}", c):
-            return c
-    return None
-
-
-def _pick_address(cells: list[str]) -> str | None:
-    for c in cells:
-        low = c.lower()
-        if any(
-            token in low
-            for token in ("yerevan", "երևան", "ереван", "str.", "ave", "փող", "ул.")
-        ):
-            return c
-    return None
-
-
-def _pick_status(cells: list[str]) -> str | None:
-    for c in cells:
-        low = c.lower()
-        if any(token in low for token in _STATUS_ACTIVE_TOKENS):
-            return c
-        if any(token in low for token in _STATUS_INACTIVE_TOKENS):
-            return c
-    return None
-
-
-def _parse_capital_amount(raw: str | None) -> float | None:
-    if not raw:
-        return None
-    cleaned = re.sub(r"[^\d.,]", "", raw).replace(",", "")
-    if not cleaned:
-        return None
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
+    return record if record.get("name") else {}

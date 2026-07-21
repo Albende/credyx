@@ -1,35 +1,38 @@
-"""Luxembourg adapter — LBR (Registre de Commerce et des Sociétés) + VIES.
+"""Luxembourg adapter — GLEIF + VIES + filings.xbrl.org.
 
-Luxembourg has two free, authoritative public sources usable without paid
-licensing:
+Luxembourg's own register (LBR / RCSL) redesigned onto an IBM Tivoli Access
+Manager login servlet and no longer exposes a free machine-readable search or
+per-company page — the legacy ``mjrcs`` action URLs now 404 or bounce through
+``TAMLoginServlet``. The RCSL open-data extract that once lived on
+data.public.lu was withdrawn. So this adapter sources the same facts from
+three free, key-free, authoritative feeds:
 
-- LBR / RCSL (https://www.lbr.lu/) exposes a free public name search and
-  per-company HTML detail pages keyed by an "RCS" identifier ("B" + 5–6
-  digits). Full filed extracts (statuts, comptes annuels) are paywalled
-  per document and out of scope for the MVP per project rules.
-- VIES confirms an LU VAT registration and returns the registered name +
-  address; the cheapest reliable way to resolve an LU VAT to a company.
+- **GLEIF** (https://api.gleif.org) — the Global LEI index. Every LU record
+  carries the RCS number in ``entity.registeredAs`` and the registrar
+  ``RA000432`` (= Luxembourg RCS), so GLEIF is a live proxy for name search
+  and RCS lookup, and yields the LEI needed for filings.
+- **VIES REST** (https://ec.europa.eu/taxation_customs/vies) — confirms an LU
+  VAT registration and returns the registered name + address.
+- **filings.xbrl.org** — the XBRL International ESEF filings index. LU listed
+  companies file their annual financial report as an iXBRL/ESEF package here;
+  the API returns real per-filing metadata and a downloadable report package.
 
 Identifier scope:
 - COMPANY_NUMBER → RCS B-number ("B82454", "82454", "B 82 454" all valid).
-- VAT             → LU + 8 digits.
+- LEI            → 20-char ISO 17442 code.
+- VAT            → LU + 8 digits.
 
-Capabilities:
-- search_by_name → scrape the public LBR search results page.
-- lookup_by_identifier(VAT)            → VIES SOAP.
-- lookup_by_identifier(COMPANY_NUMBER) → LBR detail page scrape.
-- fetch_financials                     → []; filings are paid extracts on LBR.
-
-If LBR's HTML changes shape (it has historically) or returns a CAPTCHA /
-hard-block, callers see the underlying httpx error or an empty result —
-we never fabricate registry data.
+GLEIF only indexes entities that hold an LEI (all listed companies and most
+mid/large LU entities do). When a company has no LEI it simply doesn't match —
+we never fabricate a registry row. Financials cover ESEF filers (listed
+issuers); non-listed accounts remain paid documents on LBR and are not faked.
 """
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
-from html.parser import HTMLParser
+from datetime import date, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -41,32 +44,16 @@ from packages.shared.models import (
     AdapterStatus,
     CompanyDetails,
     CompanyMatch,
+    FilingType,
     FinancialFiling,
     IdentifierType,
     RegistryIdentifier,
 )
 
-_RCS_RE = re.compile(r"^B?\d{1,7}$")
 _LU_VAT_RE = re.compile(r"^\d{8}$")
+_LEI_RE = re.compile(r"^[0-9A-Z]{18}[0-9]{2}$")
 
-_VIES_HEALTH_PROBE = "24876214"  # ArcelorMittal — stable, always-valid LU VAT
-
-_VIES_ENVELOPE = """<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:urn="urn:ec.europa.eu:taxud:vies:services:checkVat:types">
-  <soapenv:Header/>
-  <soapenv:Body>
-    <urn:checkVat>
-      <urn:countryCode>{cc}</urn:countryCode>
-      <urn:vatNumber>{vat}</urn:vatNumber>
-    </urn:checkVat>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-_VIES_NS = {
-    "soap": "http://schemas.xmlsoap.org/soap/envelope/",
-    "vies": "urn:ec.europa.eu:taxud:vies:services:checkVat:types",
-}
+_HEALTH_PROBE_RCS = "B82454"  # ArcelorMittal — stable LU RCS with an LEI
 
 
 def _normalize_rcs(value: str) -> str:
@@ -94,315 +81,336 @@ def _normalize_lu_vat(value: str) -> str:
     return cleaned
 
 
+def _normalize_lei(value: str) -> str:
+    cleaned = value.strip().upper().replace(" ", "")
+    if not _LEI_RE.match(cleaned):
+        raise InvalidIdentifierError(f"LEI must be 20 chars (ISO 17442): {value}")
+    return cleaned
+
+
 class LUAdapter(CountryAdapter):
     country_code = "LU"
     country_name = "Luxembourg"
-    identifier_types = [IdentifierType.COMPANY_NUMBER, IdentifierType.VAT]
+    identifier_types = [
+        IdentifierType.COMPANY_NUMBER,
+        IdentifierType.LEI,
+        IdentifierType.VAT,
+    ]
     primary_identifier = IdentifierType.COMPANY_NUMBER
     requires_api_key = False
     api_key_env = None
     rate_limit_per_minute = 30
 
-    VIES_URL = "https://ec.europa.eu/taxation_customs/vies/services/checkVatService"
-    LBR_BASE = "https://www.lbr.lu"
-    LBR_SEARCH_URL = (
-        "https://www.lbr.lu/mjrcs/jsp/IndexActionNotSecured.action"
-    )
-    LBR_DETAIL_URL = (
-        "https://www.lbr.lu/mjrcs/jsp/DisplayConsultDocDetailsActionNotSecured.action"
-    )
+    GLEIF_BASE = "https://api.gleif.org/api/v1"
+    VIES_BASE = "https://ec.europa.eu/taxation_customs/vies/rest-api"
+    FILINGS_BASE = "https://filings.xbrl.org"
+    FILINGS_API = "https://filings.xbrl.org/api/filings"
+    GLEIF_RECORD_UI = "https://search.gleif.org/#/record"
 
     async def health_check(self) -> AdapterHealth:
+        caps = {"search": True, "lookup": True, "financials": True}
         try:
-            payload = await self._vies_check(_VIES_HEALTH_PROBE)
+            record = await self._gleif_lookup_rcs(_HEALTH_PROBE_RCS)
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.ERROR,
-                capabilities={"search": True, "lookup": True, "financials": False},
+                capabilities=caps,
                 rate_limit_per_minute=self.rate_limit_per_minute,
-                notes=f"VIES probe failed: {str(exc)[:160]}",
+                notes=f"GLEIF probe failed: {str(exc)[:160]}",
             )
-        if not payload or not payload.get("valid"):
+        if record is None:
             return AdapterHealth(
                 country_code=self.country_code,
                 name=self.country_name,
                 status=AdapterStatus.DEGRADED,
-                capabilities={"search": True, "lookup": True, "financials": False},
+                capabilities=caps,
                 rate_limit_per_minute=self.rate_limit_per_minute,
-                notes="VIES reachable but ArcelorMittal VAT reported invalid.",
+                notes="GLEIF reachable but ArcelorMittal RCS not resolved.",
             )
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
             status=AdapterStatus.OK,
-            capabilities={"search": True, "lookup": True, "financials": False},
+            capabilities=caps,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=(
-                "Lookup via VIES (VAT) or LBR HTML (RCS). "
-                "Financial extracts are paid documents on LBR and not returned."
+                "Search + RCS/LEI lookup via GLEIF, VAT via VIES REST, "
+                "financials via filings.xbrl.org ESEF index."
             ),
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
         params = {
-            "FROM_MENU": "true",
-            "time": "0",
-            "currentMenuLabel": "MENU_CONSULT_RCS",
-            "currentMenuPath": "MENU_CONSULT_RCS",
-            "queryType1": "EXACT",
-            "denomination": name,
+            "filter[entity.legalName]": name,
+            "filter[entity.legalAddress.country]": self.country_code,
+            "page[size]": max(1, min(limit, 50)),
         }
         async with build_http_client(timeout=30.0) as client:
             try:
-                resp = await get_with_retry(client, self.LBR_SEARCH_URL, params=params)
+                resp = await get_with_retry(
+                    client, f"{self.GLEIF_BASE}/lei-records", params=params
+                )
             except httpx.HTTPError:
                 return []
         if resp.status_code != 200:
             return []
-        return _parse_lbr_search_results(resp.text, country=self.country_code)[:limit]
+        records = (resp.json() or {}).get("data", [])
+        matches: list[CompanyMatch] = []
+        for record in records[:limit]:
+            match = self._record_to_match(record)
+            if match is not None:
+                matches.append(match)
+        return matches
 
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
         if id_type == IdentifierType.VAT:
             return await self._lookup_by_vat(value)
+        if id_type == IdentifierType.LEI:
+            record = await self._gleif_get_by_lei(_normalize_lei(value))
+            return self._record_to_details(record) if record else None
         if id_type == IdentifierType.COMPANY_NUMBER:
-            return await self._lookup_by_rcs(value)
+            record = await self._gleif_lookup_rcs(_normalize_rcs(value))
+            return self._record_to_details(record) if record else None
         raise InvalidIdentifierError(
-            f"LU supports COMPANY_NUMBER (RCS) or VAT, got {id_type}"
+            f"LU supports COMPANY_NUMBER (RCS), LEI or VAT, got {id_type}"
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
-        # LBR sells filed accounts ("comptes annuels") per document; no free
-        # structured feed exists. Returning an empty list keeps the contract
-        # honest — see docs/countries/lu.md for the paid-source upgrade path.
-        return []
+        lei = await self._resolve_lei(company_id)
+        if lei is None:
+            return []
+        filter_json = (
+            '[{"name":"entity.identifier","op":"eq","val":"' + lei + '"}]'
+        )
+        params = {"filter": filter_json, "page[size]": 100}
+        async with build_http_client(timeout=30.0) as client:
+            try:
+                resp = await get_with_retry(client, self.FILINGS_API, params=params)
+            except httpx.HTTPError:
+                return []
+        if resp.status_code != 200:
+            return []
+        entries = (resp.json() or {}).get("data", [])
+        filings: list[FinancialFiling] = []
+        for entry in entries:
+            filing = self._entry_to_filing(entry, company_id)
+            if filing is not None:
+                filings.append(filing)
+        filings.sort(key=lambda f: f.period_end or date.min, reverse=True)
+        return filings[:years]
 
     async def _lookup_by_vat(self, value: str) -> CompanyDetails | None:
         vat = _normalize_lu_vat(value)
-        result = await self._vies_check(vat)
-        if not result or not result.get("valid"):
-            return None
-        identifiers = [
-            RegistryIdentifier(type=IdentifierType.VAT, value=f"LU{vat}", label="VAT"),
-        ]
-        return CompanyDetails(
-            id=f"LU{vat}",
-            name=(result.get("name") or "").strip() or f"LU{vat}",
-            country="LU",
-            status="active",
-            registered_address=(result.get("address") or "").strip() or None,
-            capital_currency="EUR",
-            identifiers=identifiers,
-            raw={"vies": result},
-            source_url=None,
-        )
-
-    async def _lookup_by_rcs(self, value: str) -> CompanyDetails | None:
-        rcs = _normalize_rcs(value)
-        # First try the search endpoint with the RCS itself — LBR accepts it
-        # as a free-text query and returns the canonical row. This avoids
-        # depending on internal action IDs whose schema is undocumented.
-        params = {
-            "FROM_MENU": "true",
-            "time": "0",
-            "currentMenuLabel": "MENU_CONSULT_RCS",
-            "currentMenuPath": "MENU_CONSULT_RCS",
-            "queryType1": "EXACT",
-            "rcsNumber": rcs,
-        }
+        url = f"{self.VIES_BASE}/ms/{self.country_code}/vat/{vat}"
         async with build_http_client(timeout=30.0) as client:
             try:
-                resp = await get_with_retry(client, self.LBR_SEARCH_URL, params=params)
+                resp = await get_with_retry(client, url)
             except httpx.HTTPError:
                 return None
         if resp.status_code != 200:
             return None
-        matches = _parse_lbr_search_results(resp.text, country=self.country_code)
-        match = _pick_match_by_rcs(matches, rcs)
-        if match is None:
+        payload = resp.json() or {}
+        if not payload.get("isValid"):
             return None
+        name = (payload.get("name") or "").strip()
+        address = (payload.get("address") or "").strip()
         return CompanyDetails(
-            id=rcs,
-            name=match.name,
+            id=f"LU{vat}",
+            name=name if name and name != "---" else f"LU{vat}",
             country="LU",
-            status=match.status,
-            registered_address=match.address,
+            status="active",
+            registered_address=address if address and address != "---" else None,
             capital_currency="EUR",
             identifiers=[
-                RegistryIdentifier(
-                    type=IdentifierType.COMPANY_NUMBER, value=rcs, label="RCS"
-                ),
+                RegistryIdentifier(type=IdentifierType.VAT, value=f"LU{vat}", label="VAT"),
             ],
-            raw={"lbr_row": match.model_dump()},
-            source_url=match.source_url or self.LBR_SEARCH_URL,
+            raw={"vies": payload},
+            source_url="https://ec.europa.eu/taxation_customs/vies/",
         )
 
-    async def _vies_check(self, vat: str) -> dict[str, Any] | None:
-        envelope = _VIES_ENVELOPE.format(cc="LU", vat=vat)
-        headers = {
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "",
-        }
-        async with build_http_client(timeout=30.0, headers=headers) as client:
-            resp = await client.post(self.VIES_URL, content=envelope)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-        return _parse_vies_response(resp.text)
+    async def _resolve_lei(self, company_id: str) -> str | None:
+        candidate = company_id.strip().upper().replace(" ", "")
+        if _LEI_RE.match(candidate):
+            return candidate
+        record = await self._gleif_lookup_rcs(_normalize_rcs(company_id))
+        if record is None:
+            return None
+        return record.get("attributes", {}).get("lei")
 
-
-class _LBRResultsParser(HTMLParser):
-    """Minimal HTML parser pulling rows from the LBR search results table.
-
-    LBR's results page renders a single results table; each company row
-    contains the RCS number, the denomination, the legal form, and a status.
-    The exact column order is stable in the public template at time of
-    writing — defensive lookups handle minor reorderings.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.rows: list[list[str]] = []
-        self._in_table = False
-        self._in_row = False
-        self._in_cell = False
-        self._row: list[str] = []
-        self._cell: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attrd = {k: v for k, v in attrs}
-        if tag == "table":
-            css = (attrd.get("class") or "").lower()
-            if "result" in css or "consult" in css or self._in_table is False:
-                self._in_table = True
-        elif self._in_table and tag == "tr":
-            self._in_row = True
-            self._row = []
-        elif self._in_row and tag in ("td", "th"):
-            self._in_cell = True
-            self._cell = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._in_cell:
-            self._row.append("".join(self._cell).strip())
-            self._cell = []
-            self._in_cell = False
-        elif tag == "tr" and self._in_row:
-            if self._row:
-                self.rows.append(self._row)
-            self._row = []
-            self._in_row = False
-        elif tag == "table" and self._in_table:
-            self._in_table = False
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._cell.append(data)
-
-
-_RCS_IN_TEXT = re.compile(r"\bB\s?\d{1,7}\b", re.IGNORECASE)
-_STATUS_HINTS = ("active", "radié", "radie", "dissoute", "liquidation", "inactive")
-
-
-def _parse_lbr_search_results(html: str, *, country: str) -> list[CompanyMatch]:
-    parser = _LBRResultsParser()
-    try:
-        parser.feed(html)
-    except Exception:
-        return []
-
-    matches: list[CompanyMatch] = []
-    seen: set[str] = set()
-    for row in parser.rows:
-        rcs = _extract_rcs_from_row(row)
-        name = _extract_name_from_row(row, rcs)
-        if not rcs or not name:
-            continue
-        if rcs in seen:
-            continue
-        seen.add(rcs)
-        status = _extract_status_from_row(row)
-        matches.append(
-            CompanyMatch(
-                id=rcs,
-                name=name,
-                country=country,
-                identifiers=[
-                    RegistryIdentifier(
-                        type=IdentifierType.COMPANY_NUMBER, value=rcs, label="RCS"
+    async def _gleif_lookup_rcs(self, rcs: str) -> dict[str, Any] | None:
+        for registered_as in (rcs, rcs[1:]):
+            params = {
+                "filter[entity.registeredAs]": registered_as,
+                "filter[entity.legalAddress.country]": self.country_code,
+            }
+            async with build_http_client(timeout=30.0) as client:
+                try:
+                    resp = await get_with_retry(
+                        client, f"{self.GLEIF_BASE}/lei-records", params=params
                     )
-                ],
-                status=status,
-                source_url=f"https://www.lbr.lu/mjrcs/jsp/IndexActionNotSecured.action?rcsNumber={rcs}",
+                except httpx.HTTPError:
+                    return None
+            if resp.status_code != 200:
+                continue
+            records = (resp.json() or {}).get("data", [])
+            for record in records:
+                if (
+                    record.get("attributes", {})
+                    .get("entity", {})
+                    .get("registeredAs", "")
+                    .upper()
+                    == rcs.upper()
+                ):
+                    return record
+            if records:
+                return records[0]
+        return None
+
+    async def _gleif_get_by_lei(self, lei: str) -> dict[str, Any] | None:
+        async with build_http_client(timeout=30.0) as client:
+            try:
+                resp = await get_with_retry(
+                    client, f"{self.GLEIF_BASE}/lei-records/{lei}"
+                )
+            except httpx.HTTPError:
+                return None
+        if resp.status_code != 200:
+            return None
+        return (resp.json() or {}).get("data")
+
+    def _record_to_match(self, record: dict[str, Any]) -> CompanyMatch | None:
+        attrs = record.get("attributes", {})
+        entity = attrs.get("entity", {})
+        name = (entity.get("legalName") or {}).get("name")
+        if not name:
+            return None
+        lei = attrs.get("lei") or record.get("id")
+        rcs = _clean_rcs(entity.get("registeredAs"))
+        identifiers: list[RegistryIdentifier] = []
+        local_id = lei
+        if rcs:
+            identifiers.append(
+                RegistryIdentifier(type=IdentifierType.COMPANY_NUMBER, value=rcs, label="RCS")
             )
+            local_id = rcs
+        if lei:
+            identifiers.append(
+                RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI")
+            )
+        return CompanyMatch(
+            id=local_id,
+            name=name,
+            country=self.country_code,
+            identifiers=identifiers,
+            address=_format_address(entity.get("legalAddress")),
+            status=_map_status(entity.get("status")),
+            source_url=f"{self.GLEIF_RECORD_UI}/{lei}" if lei else None,
         )
-    return matches
+
+    def _record_to_details(self, record: dict[str, Any]) -> CompanyDetails | None:
+        attrs = record.get("attributes", {})
+        entity = attrs.get("entity", {})
+        name = (entity.get("legalName") or {}).get("name")
+        if not name:
+            return None
+        lei = attrs.get("lei") or record.get("id")
+        rcs = _clean_rcs(entity.get("registeredAs"))
+        identifiers: list[RegistryIdentifier] = []
+        local_id = lei
+        if rcs:
+            identifiers.append(
+                RegistryIdentifier(type=IdentifierType.COMPANY_NUMBER, value=rcs, label="RCS")
+            )
+            local_id = rcs
+        if lei:
+            identifiers.append(
+                RegistryIdentifier(type=IdentifierType.LEI, value=lei, label="LEI")
+            )
+        return CompanyDetails(
+            id=local_id,
+            name=name,
+            country="LU",
+            legal_form=(entity.get("legalForm") or {}).get("id"),
+            status=_map_status(entity.get("status")),
+            incorporation_date=_parse_date(entity.get("creationDate")),
+            registered_address=_format_address(entity.get("legalAddress")),
+            capital_currency="EUR",
+            identifiers=identifiers,
+            raw={"gleif": attrs},
+            source_url=f"{self.GLEIF_RECORD_UI}/{lei}" if lei else None,
+        )
+
+    def _entry_to_filing(
+        self, entry: dict[str, Any], company_id: str
+    ) -> FinancialFiling | None:
+        attrs = entry.get("attributes", {})
+        period_end = _parse_date(attrs.get("period_end"))
+        if period_end is None:
+            return None
+        package_path = attrs.get("package_url")
+        report_path = attrs.get("report_url")
+        return FinancialFiling(
+            company_id=company_id,
+            year=period_end.year,
+            type=FilingType.ANNUAL_REPORT,
+            period_end=period_end,
+            currency=None,
+            document_url=_absolute_filing_url(package_path),
+            document_format="xbrl",
+            source_url=_absolute_filing_url(report_path)
+            or self.FILINGS_BASE,
+        )
 
 
-def _extract_rcs_from_row(row: list[str]) -> str | None:
-    for cell in row:
-        m = _RCS_IN_TEXT.search(cell)
-        if m:
-            digits = re.sub(r"\D", "", m.group(0))
-            if digits:
-                return f"B{digits}"
-    return None
+def _clean_rcs(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip().upper().replace(" ", "")
+    digits = re.sub(r"\D", "", cleaned)
+    return f"B{digits}" if digits else None
 
 
-def _extract_name_from_row(row: list[str], rcs: str | None) -> str | None:
-    """Pick the row's denomination — the longest non-RCS, non-status cell."""
-    best: str | None = None
-    for cell in row:
-        if not cell:
-            continue
-        if rcs and rcs[1:] in cell.replace(" ", ""):
-            continue
-        low = cell.lower()
-        if any(h in low for h in _STATUS_HINTS) and len(cell) < 25:
-            continue
-        if best is None or len(cell) > len(best):
-            best = cell
-    return best
+def _map_status(status: str | None) -> str | None:
+    if not status:
+        return None
+    return "active" if status.upper() == "ACTIVE" else status.lower()
 
 
-def _extract_status_from_row(row: list[str]) -> str | None:
-    for cell in row:
-        low = cell.lower()
-        for hint in _STATUS_HINTS:
-            if hint in low:
-                return cell.strip()
-    return None
+def _format_address(address: dict[str, Any] | None) -> str | None:
+    if not address:
+        return None
+    parts: list[str] = []
+    parts.extend(line for line in (address.get("addressLines") or []) if line)
+    for key in ("postalCode", "city", "country"):
+        value = address.get(key)
+        if value:
+            parts.append(value)
+    joined = ", ".join(p.strip() for p in parts if p and p.strip())
+    return joined or None
 
 
-def _pick_match_by_rcs(matches: list[CompanyMatch], rcs: str) -> CompanyMatch | None:
-    for m in matches:
-        if m.id.upper() == rcs.upper():
-            return m
-    return matches[0] if len(matches) == 1 else None
-
-
-def _parse_vies_response(xml_text: str) -> dict[str, Any] | None:
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+
+def _absolute_filing_url(path: str | None) -> str | None:
+    if not path:
         return None
-    body = root.find("soap:Body", _VIES_NS)
-    if body is None:
-        return None
-    fault = body.find("soap:Fault", _VIES_NS)
-    if fault is not None:
-        return {"valid": False, "fault": (fault.findtext("faultstring") or "").strip()}
-    resp = body.find("vies:checkVatResponse", _VIES_NS)
-    if resp is None:
-        return None
-    valid = (
-        resp.findtext("vies:valid", default="false", namespaces=_VIES_NS) or ""
-    ).lower() == "true"
-    name = resp.findtext("vies:name", default="", namespaces=_VIES_NS) or ""
-    address = resp.findtext("vies:address", default="", namespaces=_VIES_NS) or ""
-    return {"valid": valid, "name": name, "address": address}
+    if path.startswith("http"):
+        return path
+    return "https://filings.xbrl.org" + quote(path)

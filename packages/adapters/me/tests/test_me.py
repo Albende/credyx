@@ -5,13 +5,15 @@ import pytest
 from packages.adapters._base.errors import InvalidIdentifierError
 from packages.adapters.me import MEAdapter
 from packages.adapters.me.adapter import (
+    _classify_filing,
     _extract_legal_form,
+    _name_tokens,
     _normalize_me_id,
-    _parse_crps_results,
-    _pick_by_identifier,
+    _parse_financial_docs,
+    _parse_issuer_detail,
     _strip_diacritics,
 )
-from packages.shared.models import IdentifierType
+from packages.shared.models import FilingType, IdentifierType
 
 
 def test_normalize_strips_me_prefix():
@@ -43,30 +45,62 @@ def test_legal_form_recognized():
     assert _extract_legal_form("Bezimena Kompanija") is None
 
 
-def test_parse_crps_results_picks_up_row():
+def test_name_tokens_drops_stopwords():
+    tokens = _name_tokens('"CRNOGORSKI TELEKOM" A.D. PODGORICA')
+    assert "TELEKOM" in tokens
+    assert "CRNOGORSKI" in tokens
+    assert "AD" not in tokens
+    assert "PODGORICA" not in tokens
+
+
+def test_parse_issuer_detail_extracts_fields():
     sample = (
-        "<table><tr>"
-        "<td>Crnogorski Telekom A.D.</td>"
-        "<td>PIB: 02289377</td>"
-        "<td>MB: 02289377</td>"
-        "<td>Moskovska bb, Podgorica</td>"
-        "<td>Aktivno</td>"
-        "</tr></table>"
+        '<td class="td_header_row" colspan="2">CRNOGORSKI TELEKOM AD PODGORICA</td>'
+        '<td class="td_color2_02">Adresa</td>'
+        '<td class="td_color1_02 txt_right">MOSKOVSKA 29, 81000 PODGORICA</td>'
+        '<td class="td_color2_01">Matični broj</td>'
+        '<td class="td_color1_01 txt_right">2289377</td>'
+        '<td class="td_color2_01">Šifra djelatnosti</td>'
+        '<td class="td_color1_01 txt_right">6110 Kablovske telekomunikacije</td>'
+        "ISIN </td><td>METECGRA8PG0"
     )
-    rows = _parse_crps_results(sample)
-    assert rows
-    row = rows[0]
-    assert row["pib"] == "02289377"
-    assert "Telekom" in row["name"]
-    assert "Podgorica" in (row["address"] or "")
+    info = _parse_issuer_detail(sample)
+    assert info["name"] == "CRNOGORSKI TELEKOM AD PODGORICA"
+    assert info["address"] == "MOSKOVSKA 29, 81000 PODGORICA"
+    assert info["mb"] == "02289377"
+    assert info["nace"].startswith("6110")
+    assert info["isin"] == "METECGRA8PG0"
 
 
-def test_pick_by_identifier_matches_pib():
-    rows = [
-        {"pib": "02289377", "mb": "02289377", "name": "X"},
-        {"pib": "02002230", "mb": "02002230", "name": "Y"},
-    ]
-    assert _pick_by_identifier(rows, "02002230")["name"] == "Y"
+def test_parse_financial_docs_only_financial_section():
+    sample = (
+        "<h1>CRNOGORSKI TELEKOM AD PODGORICA</h1>"
+        "<h1>Finansijski i revizorski izvještaji</h1>"
+        '<a href="/upload/documents/issuer/TECG/god.pdf">'
+        "Godišnji izvještaj za 2025. godinu (pdf)</a>"
+        '<a href="/upload/documents/issuer/TECG/rev.pdf">'
+        "Revizorski izvještaj za 2024. godinu (pdf)</a>"
+        "<h1>Objave i odluke</h1>"
+        '<a href="/upload/documents/issuer/TECG/poziv.pdf">'
+        "Poziv za sjednicu Skupštine 2026</a>"
+    )
+    docs = _parse_financial_docs(sample)
+    years = {d["year"]: d["type"] for d in docs}
+    assert years[2025] == FilingType.ANNUAL_REPORT
+    assert years[2024] == FilingType.AUDIT_REPORT
+    assert all("poziv" not in d["href"] for d in docs)
+
+
+def test_classify_filing():
+    assert _classify_filing("Revizorski izvještaj za 2024.") == FilingType.AUDIT_REPORT
+    assert (
+        _classify_filing("Godišnji izvještaj za 2025. godinu")
+        == FilingType.ANNUAL_REPORT
+    )
+    assert (
+        _classify_filing("Finansijski izvještaj za period 01.01-30.06.2025.")
+        == FilingType.BALANCE_SHEET
+    )
 
 
 def test_adapter_metadata():
@@ -74,6 +108,7 @@ def test_adapter_metadata():
     assert a.country_code == "ME"
     assert IdentifierType.VAT in a.identifier_types
     assert IdentifierType.COMPANY_NUMBER in a.identifier_types
+    assert a.primary_identifier == IdentifierType.VAT
     assert a.requires_api_key is False
     assert a.rate_limit_per_minute == 30
 
@@ -92,10 +127,10 @@ async def test_health_check_live():
 async def test_search_finds_telekom():
     adapter = MEAdapter()
     matches = await adapter.search_by_name("Crnogorski Telekom", limit=5)
-    # CRPS HTML occasionally shifts; we accept an empty result rather than
-    # fabricate one, but if it returns rows they must be real Montenegrin.
+    assert matches
     for m in matches:
         assert m.country == "ME"
+    assert any("TELEKOM" in m.name.upper() for m in matches)
 
 
 @pytest.mark.asyncio
@@ -103,9 +138,10 @@ async def test_search_finds_telekom():
 async def test_lookup_by_pib_telekom():
     adapter = MEAdapter()
     details = await adapter.lookup_by_identifier(IdentifierType.VAT, "02289377")
-    if details is not None:
-        assert details.country == "ME"
-        assert any(i.value.endswith("02289377") for i in details.identifiers)
+    assert details is not None
+    assert details.country == "ME"
+    assert "TELEKOM" in details.name.upper()
+    assert any(i.value.endswith("02289377") for i in details.identifiers)
 
 
 @pytest.mark.asyncio
@@ -115,19 +151,21 @@ async def test_lookup_by_mb_epcg():
     details = await adapter.lookup_by_identifier(
         IdentifierType.COMPANY_NUMBER, "02002230"
     )
-    if details is not None:
-        assert details.country == "ME"
+    assert details is not None
+    assert details.country == "ME"
+    assert "ELEKTROPRIVREDA" in details.name.upper()
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_fetch_financials_listed_issuer():
     adapter = MEAdapter()
-    filings = await adapter.fetch_financials("02289377", years=2)
-    assert isinstance(filings, list)
+    filings = await adapter.fetch_financials("02289377", years=3)
+    assert filings
     for f in filings:
         assert f.currency == "EUR"
-        assert f.source_url and "mse.co.me" in f.source_url
+        assert f.source_url and "mnse.me" in f.source_url
+        assert f.document_url and f.document_url.startswith("https://www.mnse.me/")
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,9 @@
 """Integration tests for the Ghana adapter.
 
-Real upstream sources (RGD, GRA, GSE) are either fully gated or paid for
-structured data. These tests assert the adapter honors the no-mock rule
-(raises ``AdapterNotImplementedError`` for search + lookup) and that a
-live probe of GSE/RGD succeeds.
+Free coverage is the GSE-listed universe (~40 issuers): search + profile via
+the key-less kwayisi GSE-API / AFX index, annual reports via AfricanFinancials.
+RGD (COMPANY_NUMBER) and GRA (VAT) remain gated and must raise
+``AdapterNotImplementedError``. Nothing here may fabricate data.
 """
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from packages.adapters._base.errors import (
     InvalidIdentifierError,
 )
 from packages.adapters.gh import GHAdapter
-from packages.shared.models import AdapterStatus, IdentifierType
+from packages.shared.models import (
+    AdapterStatus,
+    FilingType,
+    IdentifierType,
+)
 
 
 @pytest.mark.asyncio
@@ -24,17 +28,49 @@ async def test_health_check_probes_real_sources():
     health = await adapter.health_check()
     assert health.country_code == "GH"
     assert health.name == "Ghana"
-    assert health.status in (AdapterStatus.DEGRADED, AdapterStatus.ERROR)
-    assert health.capabilities["search"] is False
-    assert health.capabilities["lookup"] is False
+    assert health.status in (AdapterStatus.OK, AdapterStatus.ERROR)
+    if health.status is AdapterStatus.OK:
+        assert health.capabilities["search"] is True
+        assert health.capabilities["lookup"] is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_search_raises_not_implemented():
+async def test_search_by_name_returns_listed_issuer():
     adapter = GHAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("MTN Ghana", limit=5)
+    matches = await adapter.search_by_name("Ecobank Ghana", limit=5)
+    assert matches
+    assert any(m.id == "EGH" for m in matches)
+    top = next(m for m in matches if m.id == "EGH")
+    assert top.country == "GH"
+    assert top.identifiers[0].type is IdentifierType.OTHER
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize("ticker", ["MTNGH", "GCB", "EGH", "TOTAL"])
+async def test_lookup_by_ticker_returns_real_profile(ticker: str):
+    adapter = GHAdapter()
+    details = await adapter.lookup_by_identifier(adapter.primary_identifier, ticker)
+    assert details is not None
+    assert details.country == "GH"
+    assert details.name
+    assert details.registered_address
+    assert details.capital_currency == "GHS"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize("ticker", ["MTNGH", "GCB", "EGH", "TOTAL"])
+async def test_financials_listed_issuer_returns_real_filings(ticker: str):
+    adapter = GHAdapter()
+    filings = await adapter.fetch_financials(ticker, years=3)
+    assert filings
+    for f in filings:
+        assert f.company_id == ticker
+        assert f.type is FilingType.ANNUAL_REPORT
+        assert f.currency == "GHS"
+        assert f.source_url and "africanfinancials.com/document/" in f.source_url
 
 
 @pytest.mark.asyncio
@@ -65,6 +101,13 @@ async def test_lookup_rejects_unsupported_identifier():
 
 
 @pytest.mark.asyncio
+async def test_lookup_rejects_malformed_ticker():
+    adapter = GHAdapter()
+    with pytest.raises(InvalidIdentifierError):
+        await adapter.lookup_by_identifier(IdentifierType.OTHER, "!!")
+
+
+@pytest.mark.asyncio
 async def test_lookup_rejects_malformed_rgd_number():
     adapter = GHAdapter()
     with pytest.raises(InvalidIdentifierError):
@@ -81,20 +124,6 @@ async def test_lookup_rejects_malformed_tin():
 
 
 @pytest.mark.asyncio
-async def test_financials_returns_empty_for_non_listed():
+async def test_financials_rejects_non_ticker_input():
     adapter = GHAdapter()
-    filings = await adapter.fetch_financials("CS123456789", years=5)
-    assert filings == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("ticker", ["MTNGH", "GCB", "EGH", "TOTAL"])
-async def test_financials_listed_issuer_no_mock(ticker: str):
-    """For GSE-listed test issuers we must not invent filings.
-
-    Until the PDF + browser pipeline lands we explicitly return ``[]``
-    rather than fabricate a filing — same rule as every other adapter.
-    """
-    adapter = GHAdapter()
-    filings = await adapter.fetch_financials(ticker, years=5)
-    assert filings == []
+    assert await adapter.fetch_financials("CS123456789", years=5) == []

@@ -1,33 +1,34 @@
-"""Nigeria adapter — CAC public search + FIRS TIN + NGX listed filings.
+"""Nigeria adapter — CAC iCRP public search + NGX financial statements.
 
-Source coverage:
+Source coverage (all free, no API key):
 
-* CAC (Corporate Affairs Commission) public search at
-  https://search.cac.gov.ng/ and https://publicsearch.cac.gov.ng/ exposes
-  free name + RC-number lookups. Full registry extracts and certified
-  copies require a paid CAC e-services account. The public page is HTML
-  and changes shape; we parse defensively and fall back to
-  `AdapterNotImplementedError` if the response is not machine-readable.
-* FIRS TIN validator at https://tin.firs.gov.ng/ — partial public TIN
-  verification. Used best-effort for `lookup_by_identifier(VAT, tin)`.
-  When the response is not deterministic we raise rather than guess.
-* NGX (Nigerian Exchange) at https://ngxgroup.com/ publishes annual
-  reports for listed issuers as free PDFs. `fetch_financials` returns
-  filing URLs when the issuer is listed and an empty list otherwise —
-  matching the FR / MA convention since "no public filings" is a real
-  factual answer for an unlisted Nigerian Ltd.
+* **CAC iCRP** (Corporate Affairs Commission, "CRP 3.0"). The public search
+  SPA at https://icrp.cac.gov.ng/public-search is backed by a public JSON
+  API: ``POST https://authapp.cac.gov.ng/name_similarity_app/api/public_search/search``
+  with ``{"searchTerm": ..., "SearchType": "ALL"}``. It returns the approved
+  name, RC number, registration date, classification, nature of business and
+  status for every registered company / business name. Used for both
+  ``search_by_name`` and ``lookup_by_identifier(COMPANY_NUMBER, rc)``.
+* **NGX** (Nigerian Exchange). The corporate-disclosures backend is a
+  SharePoint list ``XFinancial_News`` served by an anonymous OData endpoint at
+  ``https://doclib.ngxgroup.com/_api/Web/Lists/GetByTitle('XFinancial_News')/items``.
+  Filtering by ``Type_of_Submission eq 'Financial Statements'`` and the issuer
+  name yields the filed quarterly + audited annual financial statements, each
+  with a directly downloadable PDF on ``doclib.ngxgroup.com``. Unlisted
+  companies have no NGX filings, so ``fetch_financials`` returns ``[]`` for
+  them (a real factual answer — matches the FR / MA convention).
 
 Identifiers:
 - COMPANY_NUMBER → RC number (Registration of Companies), e.g. `RC208767`
-  or just `208767`. Normalised by stripping the `RC` prefix and spaces.
-- VAT            → TIN (Tax Identification Number), 8–14 digits. The
-  FIRS-issued TIN is 10 digits with no checksum we can verify offline;
-  CAC-issued TINs are longer.
+  or `208767`. Normalised by stripping the `RC` prefix and spaces.
+- VAT → TIN (Tax Identification Number). No free public TIN→company resolver
+  exists today, so that path raises `AdapterNotImplementedError`.
 """
 from __future__ import annotations
 
 import logging
 import re
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -37,7 +38,7 @@ from packages.adapters._base.errors import (
     AdapterNotImplementedError,
     InvalidIdentifierError,
 )
-from packages.adapters._base.http import build_http_client, get_with_retry
+from packages.adapters._base.http import build_http_client
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 _RC_RE = re.compile(r"^\d{1,10}$")
 _TIN_RE = re.compile(r"^\d{8,14}$")
+_LEGAL_SUFFIXES = ("PLC", "LIMITED", "LTD", "INCORPORATED", "INC")
 
 
 def _normalize_rc(value: str) -> str:
@@ -76,6 +78,18 @@ def _normalize_tin(value: str) -> str:
     return cleaned
 
 
+def _clean_rc(raw: str) -> str:
+    """Reduce a CAC ``rcNumber`` field to a bare comparison key.
+
+    CAC returns the value inconsistently — ``208767``, ``RC 613``, ``KD023538``.
+    Strip a leading ``RC`` and all whitespace so equal companies compare equal.
+    """
+    cleaned = re.sub(r"\s+", "", (raw or "").strip().upper())
+    if cleaned.startswith("RC"):
+        cleaned = cleaned[2:]
+    return cleaned.lstrip("-/")
+
+
 class NGAdapter(CountryAdapter):
     country_code = "NG"
     country_name = "Nigeria"
@@ -85,30 +99,36 @@ class NGAdapter(CountryAdapter):
     api_key_env = None
     rate_limit_per_minute = 30
 
-    CAC_SEARCH_URL = "https://search.cac.gov.ng/"
-    CAC_PUBLIC_URL = "https://publicsearch.cac.gov.ng/"
-    FIRS_TIN_URL = "https://tin.firs.gov.ng/"
-    NGX_BASE = "https://ngxgroup.com"
+    CAC_SEARCH_API = (
+        "https://authapp.cac.gov.ng/name_similarity_app/api/public_search/search"
+    )
+    CAC_PUBLIC_URL = "https://icrp.cac.gov.ng/public-search"
+    NGX_LIST_API = (
+        "https://doclib.ngxgroup.com/_api/Web/Lists/"
+        "GetByTitle('XFinancial_News')/items"
+    )
+    NGX_DISCLOSURES_URL = "https://ngxgroup.com/exchange/data/corporate-disclosures/"
 
     async def health_check(self) -> AdapterHealth:
         notes = (
-            "Coverage: CAC public name + RC search (HTML scrape); FIRS TIN "
-            "validator best-effort; NGX annual reports for listed issuers."
+            "Coverage: CAC iCRP public JSON search (name + RC); NGX XFinancial_News "
+            "financial statements (downloadable PDFs) for listed issuers."
         )
+        capabilities = {"search": True, "lookup": True, "financials": True}
         try:
             async with build_http_client(timeout=15.0) as client:
-                resp = await get_with_retry(client, self.CAC_SEARCH_URL)
-                if resp.status_code >= 500:
-                    return AdapterHealth(
-                        country_code=self.country_code,
-                        name=self.country_name,
-                        status=AdapterStatus.DEGRADED,
-                        capabilities={"search": False, "lookup": True, "financials": True},
-                        requires_api_key=False,
-                        api_key_present=True,
-                        rate_limit_per_minute=self.rate_limit_per_minute,
-                        notes=f"CAC returned HTTP {resp.status_code}. {notes}",
-                    )
+                rows = await self._cac_search(client, "dangote cement", limit=1)
+            if not rows:
+                return AdapterHealth(
+                    country_code=self.country_code,
+                    name=self.country_name,
+                    status=AdapterStatus.DEGRADED,
+                    capabilities=capabilities,
+                    requires_api_key=False,
+                    api_key_present=True,
+                    rate_limit_per_minute=self.rate_limit_per_minute,
+                    notes=f"CAC search returned no rows on probe. {notes}",
+                )
         except Exception as exc:
             return AdapterHealth(
                 country_code=self.country_code,
@@ -123,12 +143,49 @@ class NGAdapter(CountryAdapter):
         return AdapterHealth(
             country_code=self.country_code,
             name=self.country_name,
-            status=AdapterStatus.DEGRADED,
-            capabilities={"search": True, "lookup": True, "financials": True},
+            status=AdapterStatus.OK,
+            capabilities=capabilities,
             requires_api_key=False,
             api_key_present=True,
             rate_limit_per_minute=self.rate_limit_per_minute,
             notes=notes,
+        )
+
+    async def _cac_search(
+        self, client: httpx.AsyncClient, term: str, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        resp = await client.post(
+            self.CAC_SEARCH_API,
+            json={"searchTerm": term, "SearchType": "ALL"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Origin": "https://icrp.cac.gov.ng",
+                "Referer": "https://icrp.cac.gov.ng/",
+            },
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = payload.get("data") or []
+        return rows[:limit] if limit else rows
+
+    def _match_from_row(self, row: dict[str, Any]) -> CompanyMatch:
+        rc = _clean_rc(str(row.get("rcNumber") or ""))
+        return CompanyMatch(
+            id=rc or str(row.get("companyId") or ""),
+            name=str(row.get("approvedName") or "").strip(),
+            country="NG",
+            status=row.get("status"),
+            identifiers=[
+                RegistryIdentifier(
+                    type=IdentifierType.COMPANY_NUMBER,
+                    value=rc,
+                    label="RC Number",
+                )
+            ]
+            if rc
+            else [],
+            source_url=self.CAC_PUBLIC_URL,
         )
 
     async def search_by_name(self, name: str, limit: int = 10) -> list[CompanyMatch]:
@@ -138,37 +195,16 @@ class NGAdapter(CountryAdapter):
                 "Nigeria CAC name search requires at least 2 characters."
             )
         try:
-            async with build_http_client(timeout=20.0) as client:
-                resp = await get_with_retry(
-                    client,
-                    self.CAC_PUBLIC_URL,
-                    params={"q": query, "type": "name"},
-                )
+            async with build_http_client(timeout=25.0) as client:
+                rows = await self._cac_search(client, query, limit=limit)
         except httpx.HTTPError as exc:
             raise AdapterNotImplementedError(
-                f"CAC public search unreachable ({exc.__class__.__name__}). "
-                "The CAC portal does not publish a documented free JSON API; "
-                "integration is best-effort and currently blocked."
+                f"CAC iCRP search unreachable ({exc.__class__.__name__})."
             ) from exc
 
-        if resp.status_code >= 400:
-            raise AdapterNotImplementedError(
-                f"CAC public search returned HTTP {resp.status_code}. "
-                "Free name search is gated by a session token / login on the "
-                "current CAC portal; full access requires a paid CAC e-services "
-                "account (Phase-2)."
-            )
-
-        matches = _parse_cac_search_html(resp.text or "", query, limit)
-        if not matches:
-            # The portal renders search results behind a session-bound XHR; a
-            # plain GET often returns an empty shell. We refuse to fabricate.
-            raise AdapterNotImplementedError(
-                "CAC public search returned no machine-parseable results. The "
-                "live portal is JavaScript-rendered and requires a logged-in "
-                "session for the result JSON; free name search is blocked "
-                "until CAC ships a documented public endpoint."
-            )
+        matches = [
+            self._match_from_row(r) for r in rows if (r.get("approvedName") or "").strip()
+        ]
         return matches
 
     async def lookup_by_identifier(
@@ -178,51 +214,37 @@ class NGAdapter(CountryAdapter):
             rc = _normalize_rc(value)
             return await self._lookup_by_rc(rc)
         if id_type == IdentifierType.VAT:
-            tin = _normalize_tin(value)
-            return await self._lookup_by_tin(tin)
+            _normalize_tin(value)
+            raise AdapterNotImplementedError(
+                "Nigeria has no free public TIN→company resolver. The FIRS/JTB TIN "
+                "verification portal is session-gated; the CAC tax-id endpoint runs "
+                "RC→TIN only. Use COMPANY_NUMBER (RC) for lookups."
+            )
         raise InvalidIdentifierError(
             f"Nigeria adapter only supports COMPANY_NUMBER (RC) or VAT (TIN), got {id_type}"
         )
 
     async def _lookup_by_rc(self, rc: str) -> CompanyDetails | None:
         try:
-            async with build_http_client(timeout=20.0) as client:
-                resp = await get_with_retry(
-                    client,
-                    self.CAC_PUBLIC_URL,
-                    params={"rcNumber": rc, "type": "rc"},
-                )
+            async with build_http_client(timeout=25.0) as client:
+                rows = await self._cac_search(client, rc, limit=50)
         except httpx.HTTPError as exc:
             raise AdapterNotImplementedError(
-                f"CAC RC lookup unreachable ({exc.__class__.__name__}). "
-                "The CAC portal does not expose a documented free JSON API."
+                f"CAC iCRP RC lookup unreachable ({exc.__class__.__name__})."
             ) from exc
 
-        if resp.status_code == 404:
+        row = next((r for r in rows if _clean_rc(str(r.get("rcNumber") or "")) == rc), None)
+        if row is None:
             return None
-        if resp.status_code >= 400:
-            raise AdapterNotImplementedError(
-                f"CAC RC {rc} returned HTTP {resp.status_code}. Full RC details "
-                "require a paid CAC e-services subscription (Phase-2)."
-            )
-
-        body = resp.text or ""
-        name = _extract_company_name(body)
-        if not name:
-            raise AdapterNotImplementedError(
-                f"CAC RC {rc}: no machine-parseable identity in the public page. "
-                "The CAC public search is JS-rendered; certified extracts are "
-                "behind the paid e-services portal."
-            )
 
         return CompanyDetails(
             id=rc,
-            name=name,
+            name=str(row.get("approvedName") or "").strip(),
             country="NG",
-            legal_form=_extract_field(body, "company type") or _extract_field(body, "type"),
-            status=_extract_field(body, "status"),
-            registered_address=_extract_field(body, "address")
-            or _extract_field(body, "registered office"),
+            legal_form=row.get("classificationName"),
+            status=row.get("status"),
+            incorporation_date=_parse_date(row.get("companyRegistrationDate")),
+            registered_address=None,
             capital_amount=None,
             capital_currency="NGN",
             identifiers=[
@@ -232,124 +254,132 @@ class NGAdapter(CountryAdapter):
                     label="RC Number",
                 ),
             ],
-            raw={"source": "publicsearch.cac.gov.ng", "html_length": len(body)},
-            source_url=f"{self.CAC_PUBLIC_URL}?rcNumber={rc}",
-        )
-
-    async def _lookup_by_tin(self, tin: str) -> CompanyDetails | None:
-        try:
-            async with build_http_client(timeout=15.0) as client:
-                resp = await get_with_retry(
-                    client,
-                    self.FIRS_TIN_URL,
-                    params={"tin": tin},
-                )
-        except httpx.HTTPError as exc:
-            raise AdapterNotImplementedError(
-                f"FIRS TIN validator unreachable ({exc.__class__.__name__}). "
-                "FIRS does not publish a documented free JSON API; integration "
-                "is best-effort and currently blocked."
-            ) from exc
-
-        body = resp.text or ""
-        name = _extract_company_name(body)
-        if resp.status_code >= 400 or not name:
-            raise AdapterNotImplementedError(
-                f"FIRS TIN {tin}: no machine-readable identity "
-                f"(HTTP {resp.status_code}). Free TIN→company resolution is "
-                "not currently available; the FIRS validator is session-gated."
-            )
-
-        return CompanyDetails(
-            id=tin,
-            name=name,
-            country="NG",
-            legal_form=None,
-            status=_extract_field(body, "status"),
-            registered_address=_extract_field(body, "address"),
-            capital_amount=None,
-            capital_currency="NGN",
-            identifiers=[
-                RegistryIdentifier(type=IdentifierType.VAT, value=tin, label="TIN"),
-            ],
-            raw={"source": "tin.firs.gov.ng", "html_length": len(body)},
-            source_url=f"{self.FIRS_TIN_URL}?tin={tin}",
+            raw={
+                "source": "authapp.cac.gov.ng/name_similarity_app",
+                "companyId": row.get("companyId"),
+                "classificationId": row.get("classificationId"),
+                "natureOfBusiness": (row.get("natureOfBusiness") or "").strip() or None,
+                "rcNumberRaw": row.get("rcNumber"),
+            },
+            source_url=self.CAC_PUBLIC_URL,
         )
 
     async def fetch_financials(
         self, company_id: str, years: int = 5
     ) -> list[FinancialFiling]:
         rc = _normalize_rc(company_id)
-        # NGX annual reports are keyed by ticker, not RC. Without a free
-        # RC→ticker resolver we cannot enumerate filings; return an empty
-        # list so the credit pipeline can proceed using registry data
-        # alone (matches FR/MA convention) rather than raising 501.
-        _ = rc, years
-        return []
 
-
-def _parse_cac_search_html(html: str, query: str, limit: int) -> list[CompanyMatch]:
-    """Defensive scrape of the CAC public search results page.
-
-    The portal is JS-rendered; a plain GET typically returns no rows. We
-    look for any `RC\\d+` markers paired with an adjacent company name in
-    the HTML. Empty result is the caller's signal to raise.
-    """
-    if not html:
-        return []
-    matches: list[CompanyMatch] = []
-    seen: set[str] = set()
-    pattern = re.compile(
-        r"(?:RC[\s\-]?(\d{1,10}))[^<]{0,80}?<[^>]+>([A-Z0-9][^<]{2,200})",
-        re.IGNORECASE,
-    )
-    for m in pattern.finditer(html):
-        rc = m.group(1)
-        name = re.sub(r"\s+", " ", m.group(2)).strip()
-        if not rc or not name or rc in seen:
-            continue
-        seen.add(rc)
-        matches.append(
-            CompanyMatch(
-                id=rc,
-                name=name,
-                country="NG",
-                identifiers=[
-                    RegistryIdentifier(
-                        type=IdentifierType.COMPANY_NUMBER,
-                        value=rc,
-                        label="RC Number",
-                    )
-                ],
-                source_url=f"https://publicsearch.cac.gov.ng/?rcNumber={rc}",
+        async with build_http_client(timeout=30.0) as client:
+            rows = await self._cac_search(client, rc, limit=50)
+            row = next(
+                (r for r in rows if _clean_rc(str(r.get("rcNumber") or "")) == rc), None
             )
+            if row is None:
+                return []
+            core = _core_name(str(row.get("approvedName") or ""))
+            if not core:
+                return []
+            filings = await self._ngx_financials(client, rc, core, years)
+        return filings
+
+    async def _ngx_financials(
+        self, client: httpx.AsyncClient, rc: str, core: str, years: int
+    ) -> list[FinancialFiling]:
+        term = core.replace("'", "''")
+        params = {
+            "$select": "URL,Created,Modified,CompanyName,CompanySymbol,Type_of_Submission",
+            "$filter": (
+                "Type_of_Submission eq 'Financial Statements' and "
+                f"substringof('{term}',CompanyName)"
+            ),
+            "$orderby": "Created desc",
+            "$top": "60",
+        }
+        resp = await client.get(
+            self.NGX_LIST_API,
+            params=params,
+            headers={
+                "Accept": "application/json;odata=verbose",
+                "Referer": self.NGX_DISCLOSURES_URL,
+            },
         )
-        if len(matches) >= limit:
-            break
-    return matches
+        if resp.status_code >= 400:
+            return []
+        results = (resp.json().get("d") or {}).get("results") or []
+
+        cutoff = datetime.utcnow().year - max(years, 1)
+        filings: list[FinancialFiling] = []
+        seen: set[str] = set()
+        for item in results:
+            ngx_name = str(item.get("CompanyName") or "")
+            if core not in _core_name(ngx_name):
+                continue
+            url_field = item.get("URL") or {}
+            doc_url = url_field.get("Url") if isinstance(url_field, dict) else None
+            if not doc_url or not doc_url.lower().endswith(".pdf"):
+                continue
+            label = (
+                (url_field.get("Description") if isinstance(url_field, dict) else "")
+                or ""
+            ) + " " + doc_url.rsplit("/", 1)[-1]
+            year = _extract_year(label) or _year_of(item.get("Created"))
+            if year is None or year <= cutoff:
+                continue
+            if doc_url in seen:
+                continue
+            seen.add(doc_url)
+            filings.append(
+                FinancialFiling(
+                    company_id=rc,
+                    year=year,
+                    type=_classify_filing(label),
+                    period_end=None,
+                    currency="NGN",
+                    document_url=doc_url,
+                    document_format="pdf",
+                    source_url=self.NGX_DISCLOSURES_URL,
+                )
+            )
+        return filings
 
 
-def _extract_company_name(html: str) -> str | None:
-    if not html:
+def _parse_date(value: Any) -> date | None:
+    if not value:
         return None
+    text = str(value)
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if not m:
+        return None
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _year_of(value: Any) -> int | None:
+    d = _parse_date(value)
+    return d.year if d else None
+
+
+def _core_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Z0-9 ]", " ", (name or "").upper())
+    words = [w for w in cleaned.split() if w]
+    while words and words[-1] in _LEGAL_SUFFIXES:
+        words.pop()
+    return " ".join(words).strip()
+
+
+def _extract_year(text: str) -> int | None:
     for pattern in (
-        r"<h[12][^>]*>([^<]{3,200})</h[12]>",
-        r"company\s*name\s*[:\-]?\s*</[^>]+>\s*<[^>]+>([^<]{3,200})",
-        r"approved\s*name\s*[:\-]?\s*</[^>]+>\s*<[^>]+>([^<]{3,200})",
+        r"FOR[_ ](20\d\d)",
+        r"(20\d\d)[_ ]?(?:AUDITED|AFS)",
+        r"(20\d\d)",
     ):
-        m = re.search(pattern, html, re.IGNORECASE)
+        m = re.search(pattern, text, re.IGNORECASE)
         if m:
-            candidate = re.sub(r"\s+", " ", m.group(1)).strip()
-            if candidate and not candidate.lower().startswith(("error", "not found", "no record")):
-                return candidate
+            return int(m.group(1))
     return None
 
 
-def _extract_field(html: str, label: str) -> str | None:
-    if not html:
-        return None
-    pattern = rf"{re.escape(label)}\s*[:\-]?\s*</[^>]+>\s*<[^>]+>([^<]{{2,300}})"
-    m = re.search(pattern, html, re.IGNORECASE)
-    if not m:
-        return None
-    return re.sub(r"\s+", " ", m.group(1)).strip() or None
+def _classify_filing(text: str) -> FilingType:
+    upper = text.upper()
+    if any(k in upper for k in ("AUDITED", "AFS", "ANNUAL", "QUARTER 5", "QUARTER_5")):
+        return FilingType.ANNUAL_REPORT
+    return FilingType.BALANCE_SHEET

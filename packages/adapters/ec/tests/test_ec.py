@@ -1,9 +1,9 @@
-"""Tests for the Ecuador adapter (SUPERCIAS).
+"""Tests for the Ecuador adapter (GLEIF-backed).
 
-Integration tests hit the live SUPERCIAS public Portal de Consultas and
-are marked ``integration`` so CI can skip them with
-``-m "not integration"``. Per the project's no-mock-data rule the
-integration tests never use canned fixtures.
+Integration tests hit the live GLEIF LEI registry (SUPERCIAS/SRI are
+geo-blocked to Ecuador — see docs/countries/ec.md) and are marked
+``integration`` so CI can skip them with ``-m "not integration"``. Per the
+project's no-mock-data rule the integration tests never use canned fixtures.
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ async def test_wrong_identifier_type_rejected() -> None:
     adapter = ECAdapter()
     with pytest.raises(InvalidIdentifierError):
         await adapter.lookup_by_identifier(
-            IdentifierType.LEI, "1790010937001"
+            IdentifierType.KRS, "1790010937001"
         )
 
 
@@ -77,64 +77,66 @@ async def test_lookup_invalid_ruc_format_rejected() -> None:
 async def test_health_check_live() -> None:
     adapter = ECAdapter()
     health = await adapter.health_check()
-    # Either OK (SUPERCIAS reachable) or ERROR — both reflect reality.
     assert health.country_code == "EC"
     assert health.name == "Ecuador"
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_banco_pichincha() -> None:
+async def test_lookup_omarsa_by_ruc() -> None:
     adapter = ECAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.VAT, "1790010937001"
+        IdentifierType.VAT, "0990608504001"
     )
     if details is None:
-        pytest.skip(
-            "SUPERCIAS returned no record for Banco Pichincha — "
-            "region-blocked or offline"
-        )
+        pytest.skip("GLEIF returned no record for OMARSA — offline")
     assert details.country == "EC"
-    assert "pichincha" in details.name.lower()
-    assert any(i.type == IdentifierType.VAT for i in details.identifiers)
+    assert "omarsa" in details.name.lower()
+    assert any(
+        i.type == IdentifierType.VAT and i.value == "0990608504001"
+        for i in details.identifiers
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_lookup_favorita_alias() -> None:
+async def test_lookup_by_company_number_alias() -> None:
     adapter = ECAdapter()
     details = await adapter.lookup_by_identifier(
-        IdentifierType.COMPANY_NUMBER, "1790016919001"
+        IdentifierType.COMPANY_NUMBER, "0990608504001"
     )
     if details is None:
-        pytest.skip("SUPERCIAS returned no record for Corporación Favorita")
-    assert "favorita" in details.name.lower()
+        pytest.skip("GLEIF returned no record for OMARSA — offline")
+    assert "omarsa" in details.name.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_lookup_by_lei() -> None:
+    adapter = ECAdapter()
+    details = await adapter.lookup_by_identifier(
+        IdentifierType.LEI, "549300CO09CR3FNOZ392"
+    )
+    if details is None:
+        pytest.skip("GLEIF returned no record for Banco Pichincha — offline")
+    assert "pichincha" in details.name.lower()
+    assert details.country == "EC"
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_search_by_name_finds_pichincha() -> None:
     adapter = ECAdapter()
-    try:
-        matches = await adapter.search_by_name("PICHINCHA", limit=5)
-    except AdapterNotImplementedError:
-        pytest.skip(
-            "SUPERCIAS search shape changed; see docs/countries/ec.md"
-        )
+    matches = await adapter.search_by_name("PICHINCHA", limit=5)
     if not matches:
-        pytest.skip("SUPERCIAS returned no matches — region-blocked or offline")
+        pytest.skip("GLEIF returned no matches — offline")
     assert any("pichincha" in m.name.lower() for m in matches)
     assert all(m.country == "EC" for m in matches)
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_fetch_financials_pichincha() -> None:
+async def test_fetch_financials_unavailable() -> None:
     adapter = ECAdapter()
-    filings = await adapter.fetch_financials("1790010937001", years=3)
-    # An empty list is acceptable (per no-mock-data rule); when present,
-    # filings must carry real metadata.
-    for f in filings:
-        assert f.company_id == "1790010937001"
-        assert 1900 <= f.year <= 2100
-        assert f.currency == "USD"
+    with pytest.raises(AdapterNotImplementedError):
+        await adapter.fetch_financials("0990608504001", years=3)

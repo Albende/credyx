@@ -7,12 +7,12 @@ from packages.adapters._base.errors import (
     InvalidIdentifierError,
 )
 from packages.adapters.dz import DZAdapter
-from packages.shared.models import AdapterStatus, IdentifierType
+from packages.shared.models import AdapterStatus, FilingType, IdentifierType
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_health_check_probes_sgbv():
+async def test_health_check_probes_cosob():
     adapter = DZAdapter()
     health = await adapter.health_check()
     assert health.country_code == "DZ"
@@ -26,10 +26,33 @@ async def test_health_check_probes_sgbv():
 
 
 @pytest.mark.asyncio
-async def test_search_by_name_raises_not_implemented():
+@pytest.mark.integration
+async def test_search_by_name_finds_listed_issuer():
     adapter = DZAdapter()
-    with pytest.raises(AdapterNotImplementedError):
-        await adapter.search_by_name("Saidal Group", limit=5)
+    matches = await adapter.search_by_name("Saidal")
+    assert any(m.id == "SAI" for m in matches)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_lookup_by_symbol_returns_details():
+    adapter = DZAdapter()
+    details = await adapter.lookup_by_identifier(IdentifierType.OTHER, "SAI")
+    assert details is not None
+    assert details.country == "DZ"
+    assert details.capital_amount and details.capital_amount > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fetch_financials_returns_real_filings():
+    adapter = DZAdapter()
+    filings = await adapter.fetch_financials("SAI", years=3)
+    assert len(filings) >= 1
+    latest = filings[0]
+    assert latest.type == FilingType.ANNUAL_REPORT
+    assert latest.currency == "DZD"
+    assert latest.document_url and latest.document_url.endswith(".pdf")
 
 
 @pytest.mark.asyncio
@@ -41,12 +64,10 @@ async def test_lookup_invalid_nif_format_raises():
 
 @pytest.mark.asyncio
 async def test_lookup_valid_nif_raises_not_implemented():
-    """A well-formed NIF normalises but DGI validator is not free-API."""
+    """A well-formed NIF normalises but DGI validator is login-gated."""
     adapter = DZAdapter()
     with pytest.raises(AdapterNotImplementedError):
-        await adapter.lookup_by_identifier(
-            IdentifierType.VAT, "000016000000000"
-        )
+        await adapter.lookup_by_identifier(IdentifierType.VAT, "000016000000000")
 
 
 @pytest.mark.asyncio
@@ -59,32 +80,15 @@ async def test_lookup_rc_raises_not_implemented():
 
 
 @pytest.mark.asyncio
-async def test_lookup_unsupported_identifier_raises():
-    adapter = DZAdapter()
-    with pytest.raises(InvalidIdentifierError):
-        await adapter.lookup_by_identifier(
-            IdentifierType.LEI, "529900T8BM49AURSDO55"
-        )
-
-
-@pytest.mark.asyncio
 async def test_fetch_financials_nif_returns_empty():
-    """SGBV pages key on ticker not NIF; no resolver in MVP."""
+    """A well-formed NIF that is not a listed issuer has no free public filings."""
     adapter = DZAdapter()
-    # Alliance Assurances — SGBV-listed (placeholder NIF, format only).
     filings = await adapter.fetch_financials("000016000000000", years=3)
     assert filings == []
 
 
 @pytest.mark.asyncio
-async def test_fetch_financials_rc_returns_empty():
-    adapter = DZAdapter()
-    filings = await adapter.fetch_financials("16/00-0123456 B 09", years=3)
-    assert filings == []
-
-
-@pytest.mark.asyncio
-async def test_fetch_financials_rejects_invalid_id():
+async def test_fetch_financials_rejects_empty_id():
     adapter = DZAdapter()
     with pytest.raises(InvalidIdentifierError):
-        await adapter.fetch_financials("??", years=3)
+        await adapter.fetch_financials("   ", years=3)
