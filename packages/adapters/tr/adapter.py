@@ -47,6 +47,7 @@ from packages.adapters._base.errors import (
     InvalidIdentifierError,
 )
 from packages.adapters._base.http import build_http_client, fetch_with_bot_bypass
+from packages.adapters.tr import gleif_tr
 from packages.shared.models import (
     AdapterHealth,
     AdapterStatus,
@@ -91,7 +92,7 @@ def _normalize_mersis(value: str) -> str:
 class TRAdapter(CountryAdapter):
     country_code = "TR"
     country_name = "Türkiye"
-    identifier_types = [IdentifierType.VAT, IdentifierType.MERSIS]
+    identifier_types = [IdentifierType.VAT, IdentifierType.MERSIS, IdentifierType.LEI]
     primary_identifier = IdentifierType.VAT
     requires_api_key = False
     api_key_env = None
@@ -210,6 +211,30 @@ class TRAdapter(CountryAdapter):
         if not needle:
             return []
         results = await self._kap_search(needle)
+        matches = self._kap_matches(results, limit)
+        # Private (non-listed) companies never appear on KAP — always layer
+        # in GLEIF (carries the MERSIS number for TR entities), then rank
+        # hits that actually contain the query above KAP's fuzzy noise.
+        try:
+            gleif = await gleif_tr.search_tr(needle, limit=limit)
+        except Exception as exc:
+            logger.warning("GLEIF TR search failed: %s", exc)
+            gleif = []
+        seen = {m.name.casefold() for m in matches}
+        matches.extend(g for g in gleif if g.name.casefold() not in seen)
+
+        folded_query = needle.translate(_TURKISH_FOLD).casefold()
+
+        def relevance(m: CompanyMatch) -> int:
+            folded = m.name.translate(_TURKISH_FOLD).casefold()
+            return 0 if folded_query in folded else 1
+
+        matches.sort(key=relevance)
+        return matches[:limit]
+
+    def _kap_matches(
+        self, results: list[dict[str, Any]], limit: int
+    ) -> list[CompanyMatch]:
         matches: list[CompanyMatch] = []
         for r in results[:limit]:
             member_oid = str(r["memberOrFundOid"])
@@ -240,17 +265,22 @@ class TRAdapter(CountryAdapter):
     async def lookup_by_identifier(
         self, id_type: IdentifierType, value: str
     ) -> CompanyDetails | None:
-        if id_type not in (IdentifierType.VAT, IdentifierType.MERSIS):
+        if id_type not in (IdentifierType.VAT, IdentifierType.MERSIS, IdentifierType.LEI):
             raise InvalidIdentifierError(
-                f"Türkiye adapter only supports VAT (VKN) or MERSIS, got {id_type}"
+                f"Türkiye adapter only supports VAT (VKN), MERSIS or LEI, got {id_type}"
             )
         cleaned = re.sub(r"[\s\-]", "", value.strip())
         if _MEMBER_OID_RE.match(cleaned):
             return await self._details_by_oid(cleaned)
+        if id_type == IdentifierType.LEI or gleif_tr.is_lei(cleaned):
+            return await gleif_tr.lookup_lei(cleaned)
         if id_type == IdentifierType.VAT:
             number = _normalize_vkn(value)
         else:
             number = _normalize_mersis(value)
+            details = await gleif_tr.lookup_mersis(number)
+            if details is not None:
+                return details
         # KAP's search only indexes titles/tickers, but numbers occasionally
         # resolve (e.g. pasted into a title); try once before giving up.
         results = await self._kap_search(number)
