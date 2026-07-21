@@ -634,8 +634,23 @@ async def _run_risk_job(job_id: UUID) -> None:
                     )
                 )
 
+            # Download every available filed report and extract its text so
+            # the model analyzes the actual documents, not just structured
+            # line items. Cached in pdf_text_cache across runs.
+            try:
+                await _attach_pdf_text_to_filings(session, filings)
+            except Exception as exc:
+                logger.warning("PDF text attach failed for job %s: %s", job_id, exc)
+            pdf_text_excerpts = {
+                f.year: (f.structured_data or {})["pdf_text_excerpts"]
+                for f in filings
+                if (f.structured_data or {}).get("pdf_text_excerpts")
+            }
+
             engine = get_risk_engine()
-            assessment = await engine.analyze(details, filings)
+            assessment = await engine.analyze(
+                details, filings, pdf_text_excerpts=pdf_text_excerpts or None
+            )
 
             session.add(
                 RiskAssessmentRow(
